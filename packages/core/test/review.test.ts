@@ -65,7 +65,7 @@ interface Env {
 }
 
 async function setup(repo: string): Promise<Env> {
-  const config = await loadConfig(repo, { dataDir: tempDir('ci-data-') });
+  const config = await loadConfig(repo, { dataDir: tempDir('ci-data-'), env: {} });
   const layout = await initDataDir(config.dataDir);
   return {
     repo,
@@ -205,7 +205,7 @@ describe('review of the working tree', () => {
 
   it('rejects --head together with --working', async () => {
     const env = await setup(initRepo(V1));
-    const config = await loadConfig(env.repo, { dataDir: tempDir('ci-data-') });
+    const config = await loadConfig(env.repo, { dataDir: tempDir('ci-data-'), env: {} });
     const layout = await initDataDir(config.dataDir);
     const store = new Store(layout.dbPath);
     await expect(runReview({ repo: env.repo, store, layout, config, head: 'HEAD', working: true })).rejects.toThrow('cannot be used together');
@@ -247,7 +247,7 @@ describe('review edge cases', () => {
     expect(logs.filter((l) => l.includes('snapshot_build_start') || l.includes('scip_python_start'))).toEqual([]);
     expect(report).toMatchObject({ base: { snapshotId: null }, head: { snapshotId: null }, modules: [], edgeChanges: [] });
     expect(report.files).toMatchObject([{ path: 'README.md', status: 'modified' }]);
-    expect(report.warnings).toMatchObject([{ code: 'language_unsupported', path: 'README.md' }]);
+    expect(report.warnings).toMatchObject([{ code: 'language_unsupported', path: 'README.md' }, { code: 'llm_not_configured' }]);
   });
 
   it('compares the first commit with the empty tree', async () => {

@@ -34,6 +34,9 @@ interface FileConfig {
   llm?: Partial<LlmConfig> & { apiKeyEnv?: string };
 }
 
+/** provider 为 anthropic 且没有配置 model 时使用 */
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+
 export const CONFIG_FILE = 'codeinsight.config.json';
 export const DEFAULT_DATA_DIR = '.codeinsight';
 
@@ -52,8 +55,8 @@ function resolveLlm(file: FileConfig, env: NodeJS.ProcessEnv): LlmConfig | undef
   if (provider !== 'anthropic' && provider !== 'openai-compatible') {
     throw new Error(`unsupported LLM provider: ${provider}`);
   }
-  const model = env.CODEINSIGHT_LLM_MODEL ?? file.llm?.model;
-  if (!model) throw new Error('LLM provider configured but model is missing');
+  const model = env.CODEINSIGHT_LLM_MODEL ?? file.llm?.model ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : undefined);
+  if (!model) throw new Error('LLM provider openai-compatible configured but model is missing');
   const keyEnv = file.llm?.apiKeyEnv;
   const apiKey =
     env.CODEINSIGHT_LLM_API_KEY ??

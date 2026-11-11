@@ -1,8 +1,8 @@
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildSnapshot, callerSummaries, initDataDir, loadGraphSide, loadConfig, runReview, setLogSink, Store } from '../src/index.js';
-import type { ReviewReport, SymbolRow } from '../src/index.js';
+import { buildSnapshot, callerSummaries, initDataDir, loadGraphSide, loadConfig, runReview, setLogSink, similarInSnapshot, Store } from '../src/index.js';
+import type { DuplicateFinding, ReviewReport, SymbolRow } from '../src/index.js';
 import { git, tempDir } from './helpers/git-repo.js';
 
 const CLAUVE = process.env.CODEINSIGHT_CLAUVE?.replace(/^~(?=$|\/)/, os.homedir());
@@ -20,11 +20,18 @@ function callers(store: Store, snapshotId: number, target: SymbolRow, syms: Map<
   return { prod: srcs.filter((s) => !s.isTest).length, test: srcs.filter((s) => s.isTest).length };
 }
 
+const DUPLICATE_GROUPS = ['select_org_by_id', '_ensure_same_org', 'select_user_org_id', 'insert_lease'];
+
+/** 某个名字的一组：查询函数和其中一个候选都叫这个名字 */
+function hasSameNameGroup(findings: DuplicateFinding[], name: string): boolean {
+  return findings.some((f) => f.symbol.name === name && f.candidates.some((c) => c.symbol.name === name));
+}
+
 describe.skipIf(!CLAUVE)('clauve integration (CODEINSIGHT_CLAUVE)', () => {
-  it(`matches the verified caller counts at ${COMMIT}`, async () => {
+  it(`matches the verified caller counts and duplicate groups at ${COMMIT}`, async () => {
     const repo = path.resolve(CLAUVE!);
     const statusBefore = git(repo, 'status', '--porcelain');
-    const config = await loadConfig(repo, { dataDir: tempDir('ci-clauve-') });
+    const config = await loadConfig(repo, { dataDir: tempDir('ci-clauve-'), env: {} });
     const layout = await initDataDir(config.dataDir);
     const store = new Store(layout.dbPath);
     try {
@@ -47,6 +54,10 @@ describe.skipIf(!CLAUVE)('clauve integration (CODEINSIGHT_CLAUVE)', () => {
 
       const prodToTest = store.getEdges(snapshot.id).filter((e) => !syms.get(e.srcId)!.isTest && syms.get(e.dstId)!.isTest);
       expect(prodToTest).toEqual([]);
+
+      // similar --all 在同一个提交快照上：四组同名重复实现都要出现
+      const { findings } = similarInSnapshot(store, snapshot.id, { minScore: config.similarMinScore });
+      expect(DUPLICATE_GROUPS.filter((name) => !hasSameNameGroup(findings, name))).toEqual([]);
     } finally {
       store.close();
     }
@@ -73,7 +84,7 @@ describe.skipIf(!CLAUVE)('clauve review fc4c752 (CODEINSIGHT_CLAUVE)', () => {
   it('lists the 16 added admin_api.py functions, flags non-Python files, and reuses snapshots on the second review', async () => {
     const repo = path.resolve(CLAUVE!);
     const statusBefore = git(repo, 'status', '--porcelain');
-    const config = await loadConfig(repo, { dataDir: tempDir('ci-clauve-review-') });
+    const config = await loadConfig(repo, { dataDir: tempDir('ci-clauve-review-'), env: {} });
     const layout = await initDataDir(config.dataDir);
     const review = async (): Promise<ReviewReport> => {
       const store = new Store(layout.dbPath);

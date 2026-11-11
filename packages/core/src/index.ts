@@ -16,3 +16,6 @@ export * from './graph/traverse.js';
 export * from './report/types.js';
 export * from './report/markdown.js';
 export * from './review/index.js';
+export * from './similar/index.js';
+export * from './llm/index.js';
+export * from './intent/index.js';

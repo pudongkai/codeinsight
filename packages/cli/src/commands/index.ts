@@ -1,6 +1,6 @@
-import path from 'node:path';
 import { parseArgs } from 'node:util';
-import { buildSnapshot, checkPyrightExclude, dataDirInRepo, initDataDir, loadConfig, repoRoot, Store } from '@codeinsight/core';
+import { buildSnapshot } from '@codeinsight/core';
+import { openWorkspace } from './workspace.js';
 
 export const INDEX_USAGE = `Usage: codeinsight index [--repo .] [--ref REF] [--data-dir DIR]
 
@@ -23,12 +23,7 @@ export async function runIndex(argv: string[]): Promise<number> {
     process.stdout.write(INDEX_USAGE);
     return 0;
   }
-  const repo = await repoRoot(path.resolve(values.repo));
-  const config = await loadConfig(repo, { dataDir: values['data-dir'] });
-  const layout = await initDataDir(config.dataDir);
-  const rel = dataDirInRepo(config);
-  if (rel) for (const w of await checkPyrightExclude(repo, rel)) process.stderr.write(`warning: ${w}\n`);
-  const store = new Store(layout.dbPath);
+  const { repo, config, layout, store } = await openWorkspace(values.repo, values['data-dir']);
   try {
     const result = await buildSnapshot({ repo, store, layout, config, ref: values.ref });
     const s = result.snapshot;

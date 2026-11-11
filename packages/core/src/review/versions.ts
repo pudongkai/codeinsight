@@ -3,6 +3,7 @@ import { diffCommits, diffWorking, emptyTreeSha, hasParent, repoRoot, resolveRef
 import { isSupported } from '../model/language.js';
 import { log } from '../log.js';
 import type { SnapshotRow } from '../model/types.js';
+import type { LlmClient } from '../llm/index.js';
 import type { Resolver } from '../resolve/types.js';
 import { buildSnapshot, excludeDirs, type BuildSnapshotResult } from '../snapshot/build.js';
 import type { DataDirLayout } from '../store/data-dir.js';
@@ -23,6 +24,14 @@ export interface ReviewOptions {
   resolver?: Resolver;
   /** 进度回调（HTTP 异步审查任务用） */
   onProgress?: (step: string) => void;
+  /** 意图文本（--intent / --intent-file）；不传且审查提交区间时用区间内的提交说明 */
+  intent?: { source: 'arg' | 'file'; text: string };
+  /** --no-llm：跳过意图偏离检测 */
+  noLlm?: boolean;
+  /** 不传时按 config.llm 创建；测试注入假的客户端 */
+  llmClient?: LlmClient;
+  /** 第一次实际发送请求前的提示（每个进程每个模型一次）；不传时只写日志 */
+  onLlmNotice?: (message: string) => void;
 }
 
 export interface Versions {
