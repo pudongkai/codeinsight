@@ -106,13 +106,36 @@ function dedentedText(node: Node, source: string): string {
   return [lines[0], ...lines.slice(1).map((l) => (l.startsWith(indent) ? l.slice(indent.length) : l))].join('\n');
 }
 
+const DEFINITION_TYPES = new Set(['function_definition', 'class_definition', 'decorated_definition']);
+
+/** 单独的 `pass` 或 `...` 语句：只是占位，类里有没有它不算类自身的修改 */
+function isPlaceholder(n: Node): boolean {
+  return n.type === 'pass_statement' || (n.type === 'expression_statement' && n.namedChildCount === 1 && n.firstNamedChild?.type === 'ellipsis');
+}
+
+/**
+ * 类体里类自身的部分：去掉直接定义在类体里的方法和嵌套类（它们是独立的符号，各自判断是否修改），
+ * 以及占位用的 `pass` / `...`（方法搬走后补上或搬来后删掉它们不算类的修改），
+ * 保留类属性、docstring 等其余语句，各自去缩进
+ */
+function classOwnText(body: Node, source: string): string {
+  return body.namedChildren
+    .filter((n) => !DEFINITION_TYPES.has(n.type) && !isPlaceholder(n))
+    .map((n) => dedentedText(n, source))
+    .join('\n');
+}
+
 /**
  * body_hash = 装饰器 + 函数体（各自去缩进）的 hash，不含 def 行的签名（签名变化看 display_signature）。
  * 包含装饰器：路由、权限等入口信息写在装饰器里，只改装饰器也要算修改。
+ * 类只算类装饰器和类自身的部分，不含方法，改一个方法不会让类也算作修改；基类列表在 display_signature 里。
  */
 function bodyHash(def: Node, outer: Node, body: Node | null, source: string): string {
   const decorators = outer === def ? [] : outer.namedChildren.filter((n) => n.type === 'decorator');
-  return sha1([...decorators, body ?? def].map((n) => dedentedText(n, source)).join('\n'));
+  const parts = decorators.map((n) => dedentedText(n, source));
+  if (def.type === 'class_definition') parts.push(body ? classOwnText(body, source) : '');
+  else parts.push(dedentedText(body ?? def, source));
+  return sha1(parts.join('\n'));
 }
 
 function bodyTokens(def: Node): string[] {

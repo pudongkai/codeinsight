@@ -1,5 +1,6 @@
-import { GitError } from '@codeinsight/core';
+import { GitError, ReviewArgsError } from '@codeinsight/core';
 import { runIndex } from './commands/index.js';
+import { runReviewCommand } from './commands/review.js';
 
 const USAGE = `Usage: codeinsight <command> [options]
 
@@ -13,6 +14,7 @@ Commands:
 
 const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   index: runIndex,
+  review: runReviewCommand,
 };
 
 export async function runCli(argv: string[]): Promise<number> {
@@ -31,7 +33,7 @@ export async function runCli(argv: string[]): Promise<number> {
   } catch (err) {
     // 参数错误和 git 错误按约定退出码 1
     const e = err as Error & { code?: string };
-    if (err instanceof GitError || e.code?.startsWith('ERR_PARSE_ARGS')) {
+    if (err instanceof GitError || err instanceof ReviewArgsError || e.code?.startsWith('ERR_PARSE_ARGS')) {
       process.stderr.write(`error: ${e.message}\n`);
       return 1;
     }

@@ -1,5 +1,5 @@
-/** 表结构变化时加 1；版本不一致时直接删库重建，数据都可以从代码重新算出来 */
-export const SCHEMA_VERSION = 1;
+/** 表结构或已入库数据的计算方式（如 body_hash）变化时加 1；版本不一致时直接删库重建，数据都可以从代码重新算出来 */
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 CREATE TABLE meta (

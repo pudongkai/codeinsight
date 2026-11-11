@@ -33,3 +33,31 @@ function collect(node: Node, out: string[]): void {
   }
   for (const child of node.children) if (child) collect(child, out);
 }
+
+export const SHINGLE_SIZE = 5;
+
+/** 归一化 token 序列的 k-gram shingle 集合；不足 k 个 token 时整个序列作为一个 shingle */
+export function shingles(tokens: string[], k = SHINGLE_SIZE): Set<string> {
+  const out = new Set<string>();
+  if (tokens.length === 0) return out;
+  if (tokens.length < k) {
+    out.add(tokens.join('\u0001'));
+    return out;
+  }
+  for (let i = 0; i + k <= tokens.length; i++) out.add(tokens.slice(i, i + k).join('\u0001'));
+  return out;
+}
+
+/** 两个 shingle 集合的 Jaccard，任一为空时为 0；批量比较时先把每个符号的集合算好再调用 */
+export function shingleJaccard(sa: Set<string>, sb: Set<string>): number {
+  if (sa.size === 0 || sb.size === 0) return 0;
+  const [small, large] = sa.size <= sb.size ? [sa, sb] : [sb, sa];
+  let inter = 0;
+  for (const s of small) if (large.has(s)) inter++;
+  return inter / (sa.size + sb.size - inter);
+}
+
+/** 函数体相似度：shingle 集合的 Jaccard，两边都为空时为 0 */
+export function bodySimilarity(a: string[], b: string[], k = SHINGLE_SIZE): number {
+  return shingleJaccard(shingles(a, k), shingles(b, k));
+}
