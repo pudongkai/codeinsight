@@ -3,3 +3,6 @@
 node_modules/
 dist/
 .DS_Store
+packages/cli/web/
+packages/web/test-results/
+packages/web/playwright-report/

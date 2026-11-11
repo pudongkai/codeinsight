@@ -8,14 +8,19 @@
     "codeinsight": "dist/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-web.mjs",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@codeinsight/core": "workspace:*",
-    "@codeinsight/server": "workspace:*"
+    "@codeinsight/server": "workspace:*",
+    "@codeinsight/web": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2"
-  }
+  },
+  "files": [
+    "dist",
+    "web"
+  ]
 }
