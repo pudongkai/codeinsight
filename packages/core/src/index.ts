@@ -8,3 +8,7 @@ export * from './store/db.js';
 export * from './store/data-dir.js';
 export { SCHEMA_VERSION } from './store/schema.js';
 export * from './log.js';
+export * from './extract/index.js';
+export * from './scip/index.js';
+export * from './resolve/index.js';
+export * from './snapshot/build.js';

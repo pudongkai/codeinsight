@@ -326,6 +326,13 @@ export class Store {
     return (this.db.prepare('SELECT * FROM edges WHERE snapshot_id = ? AND src_id = ?').all(snapshotId, srcId) as Row[]).map(toEdge);
   }
 
+  /** 快照里各类数据的条数 */
+  snapshotStats(snapshotId: number): { files: number; symbols: number; edges: number; entries: number } {
+    const count = (table: string): number =>
+      Number((this.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE snapshot_id = ?`).get(snapshotId) as Row).n);
+    return { files: count('files'), symbols: count('symbols'), edges: count('edges'), entries: count('entries') };
+  }
+
   getEntries(snapshotId: number): EntryRow[] {
     return (this.db.prepare('SELECT * FROM entries WHERE snapshot_id = ?').all(snapshotId) as Row[]).map(toEntry);
   }
