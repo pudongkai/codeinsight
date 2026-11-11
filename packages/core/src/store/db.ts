@@ -13,6 +13,7 @@ import type {
   StepStatus,
   SymbolRow,
 } from '../model/types.js';
+import { log } from '../log.js';
 import { isProcessAlive } from './process.js';
 import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 
@@ -39,16 +40,33 @@ function openRaw(dbPath: string): DatabaseSync {
   return db;
 }
 
+/** 打开库并读 schema 版本；文件不是合法的 SQLite 库时删掉重建 */
+function openAndReadVersion(dbPath: string): { db: DatabaseSync; version: number | undefined } {
+  let db: DatabaseSync | undefined;
+  try {
+    db = openRaw(dbPath);
+    return { db, version: readSchemaVersion(db) };
+  } catch (err) {
+    if (db?.isOpen) db.close();
+    if (!/not a database|malformed/i.test((err as Error).message)) throw err;
+    log.warn('index_db_rebuild', { dbPath, reason: 'corrupt', error: (err as Error).message });
+    removeDbFiles(dbPath);
+    return { db: openRaw(dbPath), version: undefined };
+  }
+}
+
 /**
  * 打开数据库；schema 版本不一致（或库是空的）时删库重建。
  * 返回值的 rebuilt 表示本次是否新建了库。
  */
 export function openDatabase(dbPath: string): { db: DatabaseSync; rebuilt: boolean } {
   mkdirSync(path.dirname(dbPath), { recursive: true });
-  let db = openRaw(dbPath);
-  const version = readSchemaVersion(db);
+  const opened = openAndReadVersion(dbPath);
+  let db = opened.db;
+  const version = opened.version;
   if (version === SCHEMA_VERSION) return { db, rebuilt: false };
   if (version !== undefined) {
+    log.info('index_db_rebuild', { dbPath, reason: 'schema_version_mismatch', found: version, expected: SCHEMA_VERSION });
     db.close();
     removeDbFiles(dbPath);
     db = openRaw(dbPath);

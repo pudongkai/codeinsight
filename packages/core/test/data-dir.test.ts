@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,6 +9,7 @@ import {
   checkPyrightExclude,
   cleanupSnapshots,
   initDataDir,
+  isLocked,
   lockPath,
   readPyprojectPyrightExclude,
   snapshotDir,
@@ -29,6 +31,12 @@ describe('data dir', () => {
     expect(await checkPyrightExclude(repo, '.codeinsight')).toHaveLength(1);
     writeFileSync(path.join(repo, 'pyrightconfig.json'), '{"exclude": ["build", ".codeinsight"]}');
     expect(await checkPyrightExclude(repo, '.codeinsight')).toHaveLength(0);
+    for (const pattern of ['.codeinsight/*', '**/.*', '**/.codeinsight/**', './.codeinsight/']) {
+      writeFileSync(path.join(repo, 'pyrightconfig.json'), JSON.stringify({ exclude: [pattern] }));
+      expect(await checkPyrightExclude(repo, '.codeinsight'), pattern).toHaveLength(0);
+    }
+    writeFileSync(path.join(repo, 'pyrightconfig.json'), JSON.stringify({ exclude: ['**/node_modules', 'foo.codeinsight'] }));
+    expect(await checkPyrightExclude(repo, '.codeinsight')).toHaveLength(1);
     writeFileSync(path.join(repo, 'pyrightconfig.json'), '{"include": ["src"]}');
     expect(await checkPyrightExclude(repo, '.codeinsight')).toHaveLength(0);
   });
@@ -44,40 +52,90 @@ describe('data dir', () => {
   });
 });
 
-/** 在子进程里按同样的约定持有锁 holdMs 毫秒后释放 */
-function holdLockInChild(file: string, holdMs: number): Promise<void> {
-  const script = `
-    const fs = require('node:fs');
-    fs.writeFileSync(${JSON.stringify(file)}, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), { flag: 'wx' });
-    process.stdout.write('locked\\n');
-    setTimeout(() => { fs.rmSync(${JSON.stringify(file)}); process.exit(0); }, ${holdMs});
-  `;
-  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
-  return new Promise((resolve) => child.stdout.once('data', () => resolve()));
+const WORKER = path.join(import.meta.dirname, 'helpers', 'lock-worker.mjs');
+
+function runWorker(dataDir: string, key: string, holdMs: number, events: string, mode = ''): Promise<void> {
+  const child = spawn(process.execPath, [WORKER, dataDir, key, String(holdMs), events, mode], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  return new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}`))));
+  });
+}
+
+function readIntervals(events: string): [number, number][] {
+  return readFileSync(events, 'utf8').trim().split('\n').map((l) => {
+    const [, s, e] = l.split(' ');
+    return [Number(s), Number(e)];
+  });
 }
 
 describe('snapshot locks', () => {
+  it('lets only one of several competing processes hold the lock at a time', async () => {
+    const layout = await initDataDir(tempDir());
+    const events = path.join(tempDir(), 'events.txt');
+    for (let round = 0; round < 3; round++) {
+      await Promise.all(Array.from({ length: 6 }, () => runWorker(layout.root, 'k', 30, events)));
+    }
+    const intervals = readIntervals(events).sort((a, b) => a[0] - b[0]);
+    expect(intervals).toHaveLength(18);
+    for (let i = 1; i < intervals.length; i++) {
+      expect(intervals[i]![0]).toBeGreaterThanOrEqual(intervals[i - 1]![1]);
+    }
+    expect(existsSync(lockPath(layout, 'k'))).toBe(false);
+  });
+
   it('waits while another live process holds the lock', async () => {
     const layout = await initDataDir(tempDir());
-    await holdLockInChild(lockPath(layout, 'k1'), 600);
-    const t0 = Date.now();
-    const h = await acquireSnapshotLock(layout, 'k1', { pollMs: 50 });
+    const events = path.join(tempDir(), 'events.txt');
+    const holder = runWorker(layout.root, 'k1', 600, events);
+    while (!existsSync(lockPath(layout, 'k1'))) await sleep(10);
+    expect(await isLocked(layout, 'k1')).toBe(true);
+    const h = await acquireSnapshotLock(layout, 'k1', { pollMs: 20 });
+    const acquiredAt = Date.now();
+    await holder;
     expect(h.waited).toBe(true);
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(400);
+    expect(acquiredAt).toBeGreaterThanOrEqual(readIntervals(events)[0]![1] - 5);
     await h.release();
     expect(existsSync(lockPath(layout, 'k1'))).toBe(false);
   });
 
-  it('reclaims a lock whose holder has exited', async () => {
+  it('reclaims a lock whose holder process has exited', async () => {
     const layout = await initDataDir(tempDir());
-    writeFileSync(lockPath(layout, 'k2'), JSON.stringify({ pid: 999999999, startedAt: Date.now() }));
-    const h = await acquireSnapshotLock(layout, 'k2', { pollMs: 50, timeoutMs: 2000 });
+    await runWorker(layout.root, 'k2', 0, path.join(tempDir(), 'e'), 'die');
+    expect(existsSync(lockPath(layout, 'k2'))).toBe(true);
+    expect(await isLocked(layout, 'k2')).toBe(false);
+    const h = await acquireSnapshotLock(layout, 'k2', { pollMs: 20, timeoutMs: 2000 });
     expect(h.waited).toBe(false);
     expect(JSON.parse(readFileSync(lockPath(layout, 'k2'), 'utf8')).pid).toBe(process.pid);
     await h.release();
   });
 
-  it('cleanup keeps recent, locked and the newest snapshots', async () => {
+  it('treats an old corrupt lock file as stale but a fresh one as held', async () => {
+    const layout = await initDataDir(tempDir());
+    const file = lockPath(layout, 'k3');
+    writeFileSync(file, '');
+    expect(await isLocked(layout, 'k3')).toBe(true);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(file, old, old);
+    expect(await isLocked(layout, 'k3')).toBe(false);
+    const h = await acquireSnapshotLock(layout, 'k3', { pollMs: 20, timeoutMs: 2000 });
+    expect(h.waited).toBe(false);
+    await h.release();
+  });
+
+  it('does not delete a lock it no longer owns', async () => {
+    const layout = await initDataDir(tempDir());
+    const file = lockPath(layout, 'k4');
+    const h = await acquireSnapshotLock(layout, 'k4');
+    const other = JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: 'someone-else' });
+    writeFileSync(file, other);
+    await h.release();
+    expect(readFileSync(file, 'utf8')).toBe(other);
+  });
+
+  it('cleanup keeps the newest and locked snapshots', async () => {
     const layout = await initDataDir(tempDir());
     const store = new Store(layout.dbPath);
     const old = Date.now() - 60 * 60 * 1000;
@@ -85,16 +143,24 @@ describe('snapshot locks', () => {
       const s = store.createSnapshot('commit', `sha${i}`, `sha${i}`, old + i);
       mkdirSync(snapshotDir(layout, s.contentKey), { recursive: true });
     }
-    store.touchSnapshot(store.getSnapshotByKey('sha0')!.id); // 刚用过
-    const lock = await acquireSnapshotLock(layout, 'sha1'); // 持锁中
+    const lock = await acquireSnapshotLock(layout, 'sha1');
     const removed = await cleanupSnapshots(store, layout);
     const remaining = store.listSnapshots().map((s) => s.contentKey).sort();
-    // 保留 sha0（刚用过）和最近的 7 个；剩下 sha1..sha4 中 sha1 持锁
+    // 保留最近的 8 个（sha4..sha11）；sha0..sha3 中 sha1 持锁
     expect(removed).toHaveLength(3);
-    expect(remaining).toContain('sha0');
-    expect(remaining).toContain('sha1');
-    expect(existsSync(snapshotDir(layout, 'sha2'))).toBe(false);
+    expect(remaining).toEqual(['sha1', 'sha10', 'sha11', 'sha4', 'sha5', 'sha6', 'sha7', 'sha8', 'sha9']);
+    expect(existsSync(snapshotDir(layout, 'sha0'))).toBe(false);
     await lock.release();
+    store.close();
+  });
+
+  it('cleanup keeps snapshots used recently even beyond the newest 8', async () => {
+    const layout = await initDataDir(tempDir());
+    const store = new Store(layout.dbPath);
+    const now = Date.now();
+    for (let i = 0; i < 12; i++) store.createSnapshot('commit', `sha${i}`, `sha${i}`, now - 60_000 + i);
+    expect(await cleanupSnapshots(store, layout, { now })).toHaveLength(0);
+    expect(store.listSnapshots()).toHaveLength(12);
     store.close();
   });
 });

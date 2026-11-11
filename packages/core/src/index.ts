@@ -7,3 +7,4 @@ export * from './config/index.js';
 export * from './store/db.js';
 export * from './store/data-dir.js';
 export { SCHEMA_VERSION } from './store/schema.js';
+export * from './log.js';
