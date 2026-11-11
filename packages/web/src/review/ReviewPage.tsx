@@ -1,7 +1,8 @@
 import type { ReviewReport } from '@codeinsight/core/report/types';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { StatusResponse } from '../api/types';
 import { useNav } from '../app/nav';
+import { registerPage } from '../bridge';
 import type { ReportActions, SymbolTarget } from '../report/actions';
 import { ReportView } from '../report/ReportView';
 import { ReviewForm } from './ReviewForm';
@@ -20,6 +21,24 @@ interface Props {
   goneNotice: boolean;
   /** 切换到另一份报告时清除上面的提示 */
   resetGone(): void;
+  /** 插件请求审查未提交改动时把审查页切到前面 */
+  onHostReview?(): void;
+}
+
+/** 插件发起的工作区审查：切到审查页并显示这次审查的进度和报告 */
+function useHostReviewRequests(start: (p: { working: true }) => void, onHostReview: (() => void) | undefined) {
+  const latest = useRef({ start, onHostReview });
+  latest.current = { start, onHostReview };
+  useEffect(
+    () =>
+      registerPage({
+        reviewWorking: () => {
+          latest.current.onHostReview?.();
+          latest.current.start({ working: true });
+        },
+      }),
+    [],
+  );
 }
 
 function useReportActions(report: ReviewReport | undefined): ReportActions | undefined {
@@ -36,8 +55,9 @@ function useReportActions(report: ReviewReport | undefined): ReportActions | und
 }
 
 /** 审查页：发起审查、进度、历史记录和报告 */
-export function ReviewPage({ status, refreshStatus, goneNotice, resetGone }: Props) {
+export function ReviewPage({ status, refreshStatus, goneNotice, resetGone, onHostReview }: Props) {
   const { id, job, error, start, open } = useReviewJob(refreshStatus);
+  useHostReviewRequests((p) => void start(p), onHostReview);
   useEffect(resetGone, [id]);
   const report = job?.status === 'done' ? job.report : undefined;
   const probeGone = useSnapshotProbe(report);
