@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
@@ -60,6 +61,16 @@ describe('store', () => {
     expect(s3.rebuilt).toBe(false);
     s2.close();
     s3.close();
+  });
+
+  it('rebuilds the database when the file is not a SQLite database', () => {
+    const dbPath = path.join(tempDir(), 'index.db');
+    writeFileSync(dbPath, 'this is not sqlite'.repeat(100));
+    const s = new Store(dbPath);
+    expect(s.rebuilt).toBe(true);
+    s.createSnapshot('commit', 'abc', 'abc');
+    expect(s.listSnapshots()).toHaveLength(1);
+    s.close();
   });
 
   it('marks interrupted reviews as failed and keeps only 20', () => {

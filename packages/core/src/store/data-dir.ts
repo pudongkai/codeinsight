@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Store } from './db.js';
+import { log } from '../log.js';
 import { isProcessAlive } from './process.js';
 
 export const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -84,12 +86,35 @@ export function readPyprojectPyrightExclude(text: string): string[] | undefined 
   return items;
 }
 
+/** 把 pyright 的 glob（`**`、`*`、`?`）转成匹配相对路径的正则 */
+function globToRegExp(glob: string): RegExp {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    if (c === '*' && glob[i + 1] === '*') {
+      i++;
+      if (glob[i + 1] === '/') {
+        re += '(?:.*/)?';
+        i++;
+      } else {
+        re += '.*';
+      }
+    } else if (c === '*') {
+      re += '[^/]*';
+    } else if (c === '?') {
+      re += '[^/]';
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  // pyright 的 exclude 匹配目录时也排除目录下的所有文件
+  return new RegExp(`^${re}(/.*)?$`);
+}
+
 function excludesDataDir(patterns: string[], dataDirRel: string): boolean {
   const name = dataDirRel.replace(/^\.\//, '').replace(/\/+$/, '');
-  return patterns.some((p) => {
-    const q = p.replace(/^\.\//, '').replace(/\/+$/, '').replace(/^\*\*\//, '');
-    return q === name || q === `${name}/**` || q === `**/${name}`;
-  });
+  const probe = `${name}/x.py`;
+  return patterns.some((p) => globToRegExp(p.replace(/^\.\//, '').replace(/\/+$/, '')).test(probe));
 }
 
 /**
@@ -116,34 +141,135 @@ export async function checkPyrightExclude(repo: string, dataDirRel: string): Pro
 }
 
 // ---- 快照锁 ----
+//
+// 锁文件内容先写进临时文件，再用 link 原子地放到锁路径上，读到的锁文件内容总是完整的。
+// 删除锁（释放、回收失效锁）都在一个短暂持有的 guard 文件保护下进行，并在删除前重新确认
+// 锁还是原来那一把，避免误删其他进程刚建好的新锁。
 
 interface LockInfo {
   pid: number;
   startedAt: number;
+  token: string;
 }
+
+interface LockState {
+  /** 内容无法解析时为 undefined */
+  info?: LockInfo;
+  mtimeMs: number;
+}
+
+/** 内容损坏的锁文件超过这个时间按失效处理 */
+const CORRUPT_LOCK_GRACE_MS = 5_000;
+/** guard 只在删除锁的瞬间持有，超过这个时间说明持有者已异常退出 */
+const GUARD_STALE_MS = 10_000;
 
 export function lockPath(layout: DataDirLayout, contentKey: string): string {
   return path.join(layout.locksDir, `${contentKey}.lock`);
 }
 
-async function readLock(file: string): Promise<LockInfo | undefined> {
+function newLockInfo(): LockInfo {
+  return { pid: process.pid, startedAt: Date.now(), token: randomUUID() };
+}
+
+async function readLockState(file: string): Promise<LockState | undefined> {
+  let raw: string;
+  let mtimeMs: number;
   try {
-    return JSON.parse(await readFile(file, 'utf8')) as LockInfo;
+    [raw, { mtimeMs }] = await Promise.all([readFile(file, 'utf8'), stat(file)]);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw err;
+  }
+  return { info: parseLockInfo(raw), mtimeMs };
+}
+
+function parseLockInfo(raw: string): LockInfo | undefined {
+  try {
+    const v = JSON.parse(raw) as Partial<LockInfo> | null;
+    if (v && typeof v.pid === 'number' && typeof v.startedAt === 'number') {
+      return { pid: v.pid, startedAt: v.startedAt, token: String(v.token ?? '') };
+    }
   } catch {
-    return undefined;
+    // 内容损坏，按 undefined 处理
+  }
+  return undefined;
+}
+
+function isLockStale(state: LockState, now = Date.now()): boolean {
+  if (!state.info) return now - state.mtimeMs > CORRUPT_LOCK_GRACE_MS;
+  return !isProcessAlive(state.info.pid) || now - state.info.startedAt > LOCK_STALE_MS;
+}
+
+function sameLock(a: LockState, b: LockState): boolean {
+  return a.info && b.info ? a.info.token === b.info.token && a.info.pid === b.info.pid : a.info === b.info;
+}
+
+/** 原子地创建锁文件；已存在时返回 false */
+async function createExclusive(file: string, info: LockInfo): Promise<boolean> {
+  const tmp = `${file}.${info.token}.tmp`;
+  await writeFile(tmp, JSON.stringify(info));
+  try {
+    await link(tmp, file);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  } finally {
+    await rm(tmp, { force: true });
   }
 }
 
-function isLockStale(info: LockInfo | undefined, now = Date.now()): boolean {
-  // 刚创建、还没写入内容的锁文件读出来是 undefined，这时不当作失效
-  if (!info) return false;
-  return !isProcessAlive(info.pid) || now - info.startedAt > LOCK_STALE_MS;
+/** 在 guard 保护下执行删除锁相关的操作 */
+async function withLockGuard<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const guard = `${file}.guard`;
+  const me = newLockInfo();
+  while (!(await createExclusive(guard, me))) {
+    const g = await readLockState(guard);
+    if (g && Date.now() - g.mtimeMs > GUARD_STALE_MS) {
+      log.warn('lock_guard_reclaimed', { guard, holderPid: g.info?.pid });
+      await rm(guard, { force: true });
+      continue;
+    }
+    await sleep(10);
+  }
+  try {
+    return await fn();
+  } finally {
+    const g = await readLockState(guard);
+    if (g?.info?.token === me.token) await rm(guard, { force: true });
+  }
+}
+
+/** 锁仍是 seen 那一把且已失效时删除它 */
+async function reclaimStaleLock(file: string, seen: LockState, contentKey: string): Promise<void> {
+  await withLockGuard(file, async () => {
+    const cur = await readLockState(file);
+    if (!cur || !sameLock(cur, seen) || !isLockStale(cur)) return;
+    await rm(file, { force: true });
+    log.warn('snapshot_lock_reclaimed', {
+      contentKey,
+      holderPid: cur.info?.pid,
+      reason: cur.info ? (isProcessAlive(cur.info.pid) ? 'expired' : 'holder_exited') : 'corrupt',
+    });
+  });
+}
+
+/** 只删除自己持有的锁 */
+async function releaseOwnLock(file: string, token: string, contentKey: string): Promise<void> {
+  await withLockGuard(file, async () => {
+    const cur = await readLockState(file);
+    if (cur?.info?.token === token) {
+      await rm(file, { force: true });
+      log.debug('snapshot_lock_released', { contentKey });
+    } else {
+      log.warn('snapshot_lock_lost', { contentKey, currentPid: cur?.info?.pid });
+    }
+  });
 }
 
 export async function isLocked(layout: DataDirLayout, contentKey: string): Promise<boolean> {
-  const file = lockPath(layout, contentKey);
-  if (!existsSync(file)) return false;
-  return !isLockStale(await readLock(file));
+  const state = await readLockState(lockPath(layout, contentKey));
+  return state !== undefined && !isLockStale(state);
 }
 
 export interface LockHandle {
@@ -155,18 +281,6 @@ export interface LockHandle {
 export interface AcquireOptions {
   pollMs?: number;
   timeoutMs?: number;
-}
-
-async function tryCreateLock(file: string): Promise<boolean> {
-  try {
-    const fh = await open(file, 'wx');
-    await fh.writeFile(JSON.stringify({ pid: process.pid, startedAt: Date.now() } satisfies LockInfo));
-    await fh.close();
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw err;
-  }
 }
 
 /** 获取快照构建锁；已被其他存活进程持有时等待，持有者已退出或超过 30 分钟时认为锁失效并回收 */
@@ -181,14 +295,19 @@ export async function acquireSnapshotLock(
   let waited = false;
   await mkdir(layout.locksDir, { recursive: true });
   for (;;) {
-    if (await tryCreateLock(file)) {
-      return { waited, release: () => rm(file, { force: true }) };
+    const me = newLockInfo();
+    if (await createExclusive(file, me)) {
+      log.debug('snapshot_lock_acquired', { contentKey, waited });
+      return { waited, release: () => releaseOwnLock(file, me.token, contentKey) };
     }
-    if (isLockStale(await readLock(file))) {
-      await rm(file, { force: true });
+    const seen = await readLockState(file);
+    if (!seen) continue;
+    if (isLockStale(seen)) {
+      await reclaimStaleLock(file, seen, contentKey);
       continue;
     }
     if (Date.now() > deadline) throw new Error(`timed out waiting for snapshot lock ${contentKey}`);
+    if (!waited) log.info('snapshot_lock_waiting', { contentKey, holderPid: seen.info?.pid });
     waited = true;
     await sleep(pollMs);
   }
@@ -216,5 +335,6 @@ export async function cleanupSnapshots(store: Store, layout: DataDirLayout, opts
     await rm(scipPath(layout, snap.contentKey), { force: true });
     removed.push(snap.id);
   }
+  if (removed.length > 0) log.info('snapshots_cleaned', { removed: removed.length });
   return removed;
 }

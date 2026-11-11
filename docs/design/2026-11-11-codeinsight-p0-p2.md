@@ -1,6 +1,6 @@
 # CodeInsight P0–P2 技术方案：Python 结构化审查、CLI/MCP 与 JetBrains 插件
 
-开发状态: TODO
+开发状态: RUNNING
 方案评审: 通过（2026-11-11）
 需求来源: 2026-11-11 头脑风暴对话，以及在 clauve、bluewhale 上的验证结论
 作者: steve@data-coding.com　　日期: 2026-11-11
@@ -467,14 +467,15 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
 
 ## 8. 开发计划
 
-- [ ] 阶段1：项目骨架、数据模型与公共基础
+- [x] 阶段1：项目骨架、数据模型与公共基础
   - 涉及模块：根目录配置、packages/core/src/{model,store,classify,git,config}
   - 依赖：无
   - 验证方式：独立
   - 内容：pnpm monorepo（core、cli、server、web 四个包，TS 严格模式，vitest，eslint）；LICENSE；4.2 节全部表结构和 schema 版本检查；symbol_key、语言识别、classify、git 辅助函数（含文件清单）、配置读取、数据目录（默认位置、初始化含 `.gitignore`、pyright exclude 检查、快照锁、快照清理）；store 基于 `node:sqlite`，WAL + busy_timeout
   - 完成标准：`pnpm install && pnpm -r build && pnpm -r test` 通过；store 测试覆盖建表、写入读取五类实体（含 reviews）、schema 版本不一致时重建；git 测试在临时仓库里覆盖提交区间、工作区（含未跟踪文件、排除被忽略文件和仓库内数据目录）、`git archive` 导出；数据目录测试覆盖：初始化后 `git status --porcelain` 不出现 `.codeinsight`；`pyrightconfig.json` 自定义了 exclude 且不含 `.codeinsight` 时给出警告，含时不警告；锁测试覆盖两个进程抢同一把锁时后者等待、持锁进程已退出时锁被回收、清理跳过持锁快照
+  - 验证：`pnpm install && pnpm -r build && pnpm -r test`（core 33/33）、`pnpm lint` 通过；独立验证两轮共 16 个问题已修：快照锁改为 link 原子创建 + guard 保护下确认 token 再删除、只释放自己的锁、损坏锁 5 秒后按失效回收，锁测试改为 6 个真实子进程 × 3 轮检查持锁区间不重叠；提交导出由 `git archive` 改为 `ls-tree` + `cat-file --batch` 写出（不受 `.gitattributes` 的 export-ignore / export-subst 影响，与文件清单一致，跳过子模块，目标目录先清空）；git 函数统一按仓库根目录工作并固定 diff 参数（`--no-relative --no-ext-diff --ignore-submodules=all`）；新增 core 日志（stderr，`CODEINSIGHT_LOG` 控制级别）；pyright exclude 按 glob 匹配；`index.db` 损坏时重建。未处理：guard 文件自身的失效回收（持有者卡住超过 10 秒）仍有小概率竞争；schema 版本不一致删库时不检查旧版进程是否还开着库。改动 packages/core/src/{store/data-dir.ts,store/db.ts,git/index.ts,log.ts}、packages/core/test/
 
-- [ ] 阶段2：Python 提取层与 scip-python 解析
+- [~] 阶段2：Python 提取层与 scip-python 解析
   - 涉及模块：packages/core/src/{extract,resolve,scip,snapshot}、packages/core/test/fixtures/、packages/cli/src/commands/index.ts
   - 依赖：阶段1
   - 验证方式：独立
