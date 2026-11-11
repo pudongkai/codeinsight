@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { deflateSync, inflateSync } from 'node:zlib';
 import type {
+  EdgeKind,
   EdgeRow,
   EntryRow,
   FileRow,
@@ -314,16 +315,32 @@ export class Store {
     return rows.map((r) => toSymbol(r, false));
   }
 
+  /** 按 id 批量取符号；id 列表作为一个 JSON 参数传入，不受 SQL 变量个数限制 */
+  getSymbolsByIds(snapshotId: number, ids: string[], opts: { withTokens?: boolean } = {}): SymbolRow[] {
+    if (ids.length === 0) return [];
+    const rows = this.db
+      .prepare('SELECT * FROM symbols WHERE snapshot_id = ? AND id IN (SELECT value FROM json_each(?))')
+      .all(snapshotId, JSON.stringify(ids)) as Row[];
+    return rows.map((r) => toSymbol(r, opts.withTokens ?? false));
+  }
+
+  /**
+   * 批量取一组符号的边：direction 为 in 时取指向它们的边（按 dst_id），out 时取它们发出的边（按 src_id）。
+   * kinds 不传时不按类型过滤。
+   */
+  getEdgesForSymbols(snapshotId: number, ids: string[], direction: 'in' | 'out', kinds?: EdgeKind[]): EdgeRow[] {
+    if (ids.length === 0) return [];
+    const column = direction === 'in' ? 'dst_id' : 'src_id';
+    const kindFilter = kinds ? ' AND kind IN (SELECT value FROM json_each(?))' : '';
+    const params: SQLInputValue[] = [snapshotId, JSON.stringify(ids), ...(kinds ? [JSON.stringify(kinds)] : [])];
+    const rows = this.db
+      .prepare(`SELECT * FROM edges WHERE snapshot_id = ? AND ${column} IN (SELECT value FROM json_each(?))${kindFilter}`)
+      .all(...params) as Row[];
+    return rows.map(toEdge);
+  }
+
   getEdges(snapshotId: number): EdgeRow[] {
     return (this.db.prepare('SELECT * FROM edges WHERE snapshot_id = ?').all(snapshotId) as Row[]).map(toEdge);
-  }
-
-  getEdgesTo(snapshotId: number, dstId: string): EdgeRow[] {
-    return (this.db.prepare('SELECT * FROM edges WHERE snapshot_id = ? AND dst_id = ?').all(snapshotId, dstId) as Row[]).map(toEdge);
-  }
-
-  getEdgesFrom(snapshotId: number, srcId: string): EdgeRow[] {
-    return (this.db.prepare('SELECT * FROM edges WHERE snapshot_id = ? AND src_id = ?').all(snapshotId, srcId) as Row[]).map(toEdge);
   }
 
   /** 快照里各类数据的条数 */

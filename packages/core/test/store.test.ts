@@ -32,8 +32,8 @@ describe('store', () => {
 
     expect(store.getFiles(snap.id)).toHaveLength(1);
     expect(store.getSymbol(snap.id, s1.id)).toEqual(s1);
-    expect(store.getEdgesTo(snap.id, s1.id)).toHaveLength(1);
-    expect(store.getEdgesFrom(snap.id, s2.id)[0]!.line).toBe(5);
+    expect(store.getEdgesForSymbols(snap.id, [s1.id], 'in')).toHaveLength(1);
+    expect(store.getEdgesForSymbols(snap.id, [s2.id], 'out')[0]!.line).toBe(5);
     expect(store.getEntries(snap.id)[0]!.detail).toEqual({ method: 'GET', path: '/x' });
 
     const rid = store.createReview({ working: true });

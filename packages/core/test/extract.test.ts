@@ -96,6 +96,19 @@ describe('python extraction', () => {
     expect(changed!.bodyHash).not.toBe(top!.bodyHash);
   });
 
+  it('hashes only the class itself: methods and placeholder pass / ... statements do not count', async () => {
+    const [, withMethod] = await extractSource('class A:\n    """Doc."""\n    x = 1\n\n    def m(self):\n        return 1\n');
+    const [, withPass] = await extractSource('class A:\n    """Doc."""\n    x = 1\n    pass\n');
+    const [, withEllipsis] = await extractSource('class A:\n    """Doc."""\n    x = 1\n    ...\n');
+    const [, changedAttr] = await extractSource('class A:\n    """Doc."""\n    x = 2\n    pass\n');
+    expect(withPass!.bodyHash).toBe(withMethod!.bodyHash);
+    expect(withEllipsis!.bodyHash).toBe(withMethod!.bodyHash);
+    expect(changedAttr!.bodyHash).not.toBe(withMethod!.bodyHash);
+    const [, emptyA] = await extractSource('class B:\n    pass\n');
+    const [, filledA] = await extractSource('class B:\n    def m(self):\n        return 1\n');
+    expect(emptyA!.bodyHash).toBe(filledA!.bodyHash);
+  });
+
   it('finds the module docstring after leading comments', async () => {
     const [mod] = await extractSource('# -*- coding: utf-8 -*-\n# License header\n"""Module doc."""\nx = 1\n');
     expect(mod!.docstring).toBe('Module doc.');

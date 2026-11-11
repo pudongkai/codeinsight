@@ -313,11 +313,22 @@ export async function workingContentKey(repo: string, headSha: string, excludeDi
   return `${headSha}-${h.digest('hex').slice(0, 16)}`;
 }
 
+/** 提交是否有父提交（仓库的首个提交没有） */
+export async function hasParent(repo: string, sha: string): Promise<boolean> {
+  const parts = (await runGit(repo, ['rev-list', '--parents', '-n', '1', sha])).trim().split(/\s+/);
+  return parts.length > 1;
+}
+
+/** 空树对象的 id，按仓库的 hash 算法计算；首个提交与它比较 */
+export async function emptyTreeSha(repo: string): Promise<string> {
+  return (await runGit(repo, ['hash-object', '-t', 'tree', '/dev/null'])).trim();
+}
+
 export async function readFileAtCommit(repo: string, sha: string, filePath: string): Promise<string> {
   return runGit(repo, ['show', `${sha}:${filePath}`]);
 }
 
-/** 区间 (base, head] 的提交说明，作为默认意图文本 */
+/** 区间 (base, head] 的提交说明，作为默认意图文本；多个提交之间用 `---` 分隔 */
 export async function commitMessages(repo: string, base: string, head: string): Promise<string> {
-  return (await runGit(repo, ['log', '--format=%B%n---', `${base}..${head}`])).trim();
+  return (await runGit(repo, ['log', '--format=%B%n---', `${base}..${head}`])).trim().replace(/\n*---$/, '').trim();
 }

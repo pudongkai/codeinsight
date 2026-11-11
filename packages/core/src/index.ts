@@ -12,3 +12,7 @@ export * from './extract/index.js';
 export * from './scip/index.js';
 export * from './resolve/index.js';
 export * from './snapshot/build.js';
+export * from './graph/traverse.js';
+export * from './report/types.js';
+export * from './report/markdown.js';
+export * from './review/index.js';

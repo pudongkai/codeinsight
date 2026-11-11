@@ -61,7 +61,8 @@ async function resolveTarget(opts: BuildSnapshotOptions): Promise<Target> {
   return { root, kind: 'working', commitSha: head, contentKey };
 }
 
-function excludeDirs(config: CodeInsightConfig, root: string): string[] {
+/** 文件清单要排除的仓库内数据目录 */
+export function excludeDirs(config: CodeInsightConfig, root: string): string[] {
   const rel = dataDirInRepo({ repo: root, dataDir: config.dataDir });
   return rel ? [rel] : [];
 }
