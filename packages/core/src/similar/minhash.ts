@@ -1,3 +1,5 @@
+import { pushTo } from '../util/collections.js';
+
 /**
  * MinHash + LSH：全库扫描时用来找函数体可能相似的组合，只对命中的组合算精确的 shingle Jaccard。
  * 128 个 hash 分成 32 个 band、每个 band 4 行：命中概率为 1 - (1 - J^4)^32，
@@ -55,11 +57,7 @@ export class LshIndex<T> {
   }
 
   add(sig: Uint32Array, item: T): void {
-    for (const key of LshIndex.bandKeys(sig)) {
-      const list = this.buckets.get(key);
-      if (list) list.push(item);
-      else this.buckets.set(key, [item]);
-    }
+    for (const key of LshIndex.bandKeys(sig)) pushTo(this.buckets, key, item);
   }
 
   /** 至少有一个 band 相同的条目（去重） */

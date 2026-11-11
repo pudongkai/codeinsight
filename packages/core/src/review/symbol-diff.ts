@@ -1,6 +1,7 @@
-import { shingleJaccard, shingles } from '../extract/normalize.js';
+import { shingles } from '../extract/normalize.js';
 import type { SymbolRow } from '../model/types.js';
 import type { SymbolChangeKind } from '../report/types.js';
+import { groupBy, jaccard } from '../util/collections.js';
 
 /** 函数体相似度达到这个值时，同名同类型的删除 + 新增可以配成 moved */
 export const MOVED_MIN_SIMILARITY = 0.9;
@@ -24,17 +25,6 @@ export interface DiffInput {
 interface Unmatched {
   removed: SymbolRow[];
   added: SymbolRow[];
-}
-
-function groupBy(rows: SymbolRow[], keyOf: (s: SymbolRow) => string): Map<string, SymbolRow[]> {
-  const out = new Map<string, SymbolRow[]>();
-  for (const r of rows) {
-    const k = keyOf(r);
-    const list = out.get(k);
-    if (list) list.push(r);
-    else out.set(k, [r]);
-  }
-  return out;
 }
 
 /** 同一文件、类型、signature，qualified_name 去掉重复定义的 `#N` 后缀后相同的符号为一组 */
@@ -151,7 +141,7 @@ function similarCandidates(rest: Unmatched, input: DiffInput): MoveCandidate[] {
   };
   const out: MoveCandidate[] = [];
   for (const [r, a] of pairs) {
-    const similarity = shingleJaccard(shingleSet('b', r.id, baseTokens), shingleSet('h', a.id, headTokens));
+    const similarity = jaccard(shingleSet('b', r.id, baseTokens), shingleSet('h', a.id, headTokens));
     if (similarity >= MOVED_MIN_SIMILARITY) out.push(candidate(r, a, similarity));
   }
   return out;

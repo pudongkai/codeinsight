@@ -4,6 +4,8 @@ import type { ReviewParams } from '../api/types';
 interface Props {
   llmConfigured: boolean;
   busy: boolean;
+  /** busy 时按钮上的文字，默认"审查中…" */
+  busyText?: string;
   onSubmit(params: ReviewParams): void;
 }
 
@@ -16,7 +18,7 @@ function buildParams(mode: 'working' | 'range', base: string, head: string, inte
 }
 
 /** 发起审查：工作区未提交改动，或提交区间（base 不填时为 head~1） */
-export function ReviewForm({ llmConfigured, busy, onSubmit }: Props) {
+export function ReviewForm({ llmConfigured, busy, busyText, onSubmit }: Props) {
   const [mode, setMode] = useState<'working' | 'range'>('working');
   const [base, setBase] = useState('');
   const [head, setHead] = useState('');
@@ -24,6 +26,7 @@ export function ReviewForm({ llmConfigured, busy, onSubmit }: Props) {
   const [noLlm, setNoLlm] = useState(false);
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     onSubmit(buildParams(mode, base, head, intent, noLlm));
   };
   return (
@@ -41,7 +44,7 @@ export function ReviewForm({ llmConfigured, busy, onSubmit }: Props) {
       </label>
       {llmConfigured && <label><input type="checkbox" checked={noLlm} onChange={(e) => setNoLlm(e.target.checked)} /> 不调用 LLM（跳过意图检查）</label>}
       {!llmConfigured && <p className="muted">未配置 LLM，不做意图检查。</p>}
-      <button type="submit" disabled={busy} data-testid="review-submit">{busy ? '审查中…' : '开始审查'}</button>
+      <button type="submit" disabled={busy} data-testid="review-submit">{busy ? (busyText ?? '审查中…') : '开始审查'}</button>
     </form>
   );
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -27,22 +27,49 @@ beforeAll(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('codeinsight serve', () => {
-  it('prints port, token and url as one JSON line, and --open hands the url to the browser opener', async () => {
+  it('prints port, token, url, repo and dataDir as one JSON line, and --open hands the url to the browser opener', async () => {
     let out = '';
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => ((out += String(chunk)), true));
     const opened: string[] = [];
-    const started = await startServe(['--repo', makeRepo(), '--data-dir', tempDir('ci-serve-data-'), '--open'], {
+    const repo = makeRepo();
+    const dataDir = tempDir('ci-serve-data-');
+    const started = await startServe(['--repo', path.join(repo, '.'), '--data-dir', dataDir, '--open'], {
       openUrl: (url) => opened.push(url),
       staticDir: tempDir('ci-serve-web-'),
     });
     vi.restoreAllMocks();
     try {
-      const line = JSON.parse(out.trim().split('\n')[0]!) as { port: number; token: string; url: string };
+      const line = JSON.parse(out.trim().split('\n')[0]!) as { port: number; token: string; url: string; repo: string; dataDir: string };
+      expect(line.repo).toBe(realpathSync(repo));
+      expect(line.dataDir).toBe(dataDir);
       expect(line.url).toBe(`http://127.0.0.1:${line.port}/?token=${line.token}`);
       expect(opened).toEqual([line.url]);
       const res = await fetch(`http://127.0.0.1:${line.port}/api/status`, { headers: { Authorization: `Bearer ${line.token}` } });
       expect(res.status).toBe(200);
       expect((await fetch(`http://127.0.0.1:${line.port}/api/status`)).status).toBe(401);
+    } finally {
+      await started!.stop();
+    }
+  });
+
+  it('reports the data directory actually used, including CODEINSIGHT_DATA_DIR overrides, and the git root for a subdirectory', async () => {
+    const repo = makeRepo();
+    const sub = path.join(repo, 'sub');
+    mkdirSync(sub);
+    process.env.CODEINSIGHT_DATA_DIR = 'build/ci-data';
+    let out = '';
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => ((out += String(chunk)), true));
+    let started: Awaited<ReturnType<typeof startServe>>;
+    try {
+      started = await startServe(['--repo', sub], { staticDir: tempDir('ci-serve-web-') });
+    } finally {
+      delete process.env.CODEINSIGHT_DATA_DIR;
+      vi.restoreAllMocks();
+    }
+    try {
+      const line = JSON.parse(out.trim().split('\n')[0]!) as { repo: string; dataDir: string };
+      expect(line.repo).toBe(realpathSync(repo));
+      expect(line.dataDir).toBe(path.join(realpathSync(repo), 'build', 'ci-data'));
     } finally {
       await started!.stop();
     }

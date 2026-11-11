@@ -3,7 +3,7 @@
  * 认证只靠 serve 设置的 HttpOnly cookie（同源请求自动带上），前端不接触 token。
  */
 import type {
-  EntryItem, ReviewParams, ReviewResponse, SimilarResponse, SourceResponse, StatusResponse, SymbolDetail, SymbolInfo, TreeResponse,
+  EntryItem, ReviewParams, ReviewResponse, SourceResponse, StatusResponse, SymbolDetail, SymbolInfo, TreeResponse,
 } from './types';
 
 export class ApiError extends Error {
@@ -21,6 +21,11 @@ export class ApiError extends Error {
 
   get indexNotReady(): boolean {
     return this.status === 503 && this.code === 'index_not_ready';
+  }
+
+  /** 认证失效或资源不存在：重试也不会成功 */
+  get permanent(): boolean {
+    return this.status === 401 || this.status === 404;
   }
 }
 
@@ -65,7 +70,6 @@ export const api = {
   callees: (snapshot: number, id: string, depth = 1) => request<TreeResponse>('GET', `${sym(snapshot, id)}/callees${qs({ depth })}`),
   source: (snapshot: number, path: string, start?: number, end?: number) =>
     request<SourceResponse>('GET', `/api/source${qs({ snapshot, path, start, end })}`),
-  similar: (snapshot: number, id: string) => request<SimilarResponse>('GET', `/api/similar${qs({ snapshot, id })}`),
 };
 
 export type Api = typeof api;

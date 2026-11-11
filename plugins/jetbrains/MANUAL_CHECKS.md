@@ -48,6 +48,8 @@
    预期：工具窗口显示"没有找到 Node ≥ 22.13"、安装步骤、"查找过但不能用的"列表，以及"重试""打开设置"两个按钮。恢复 Node 后点"重试"，页面正常显示。
 3. 操作：设置里 codeinsight 路径留空，临时 `npm unlink -g codeinsight`（或改名），重启 IDE 打开工具窗口。
    预期：显示"没有找到 codeinsight 命令"、`npm install -g codeinsight` 的指引和已找到的 Node 路径。"打开设置"按钮能打开 CodeInsight 设置页。恢复后点"重试"能正常显示。
+4. 操作：保持 codeinsight 找不到的状态，关闭项目再打开，**不先打开工具窗口**，直接 Tools → 审查未提交改动；看到安装指引后恢复 codeinsight，点"重试"。
+   预期：页面正常显示，但不自动发起审查（停留在默认页面，没有新的"审查 #N 进行中"）。
 
 ## 4. `.codeinsight` 排除目录通知
 
@@ -61,6 +63,13 @@
    预期：不再弹通知。
 5. 操作：另一个项目里忽略通知（不点按钮），关闭再打开项目、打开工具窗口。
    预期：再次弹出通知（每次打开项目检查一次）。
+6. 数据目录被环境变量或配置文件改到仓库内其他位置时，提示的是 serve 实际用的目录：
+   - 操作：插件设置里数据目录留空，在仓库根写 `codeinsight.config.json`，内容为 `{"dataDir": "build/ci-data"}`，删掉 `.codeinsight/`，关闭并重新打开项目、打开工具窗口。
+     预期：通知里的目录名是 `ci-data`，按钮把 `build/ci-data` 标记为排除目录；仓库里没有新建 `.codeinsight/`。
+   - 操作：删掉配置文件，在登录 shell 的配置里 `export CODEINSIGHT_DATA_DIR=/tmp/ci-demo-env-data`，完全退出 IDE 后从 Dock 启动，打开项目和工具窗口。
+     预期：不弹排除通知（数据目录在仓库外），`/tmp/ci-demo-env-data` 下出现 `index.db`。做完删掉这行 export。
+7. 在仓库的子目录打开项目（如只打开 `/tmp/ci-demo/pkg`），打开工具窗口。
+   预期：页面显示的是整个仓库的数据；点击 `pkg/app.py` 里的函数能跳到编辑器；排除通知针对仓库根下的 `.codeinsight`。
 
 ## 5. 审查未提交改动
 
@@ -79,6 +88,16 @@
    预期：编辑器打开 `pkg/app.py` 并跳到 `def run` 那一行。
 3. 操作：删除一个已提交的函数后再审查，点击这个 removed 函数。
    预期：不跳到编辑器，在页面的源码面板里显示 base 版本的源码。
+4. 仓库内指向仓库外的符号链接不能被打开：
+   - 操作：`mkdir -p /tmp/ci-outside && printf 'def secret():\n    return 0\n' > /tmp/ci-outside/s.py && ln -s /tmp/ci-outside /tmp/ci-demo/ext`，在内嵌页面里按 F12（或 Find Action → Open DevTools）打开开发者工具，Console 执行 `window.codeinsightHost.openFile('ext/s.py', 1)`。
+     预期：编辑器不打开 `/tmp/ci-outside/s.py`，IDE 日志里有 `openFile rejected a path that is missing or outside the repository: ext/s.py`。
+   - 操作：Console 执行 `window.codeinsightHost.openFile('pkg/util.py', 1)`。
+     预期：正常打开。做完 `rm /tmp/ci-demo/ext`。
+5. 页面不能离开 serve 的地址：
+   - 操作：开发者工具 Console 执行 `location.href = 'https://example.com'`。
+     预期：页面不跳转，IDE 日志里有 `blocked navigation away from the web UI (opened externally: false)`。
+   - 操作：Console 执行 `document.body.insertAdjacentHTML('beforeend', '<a id=x href="https://example.com">x</a>')`，再用鼠标点页面底部出现的 x 链接。
+     预期：内嵌页面不跳转，系统浏览器打开 example.com。
 
 ## 7. JCEF 不可用时
 
@@ -91,15 +110,18 @@
 ## 8. 关闭项目后 serve 退出
 
 1. 操作：打开工具窗口让页面显示出来，终端执行 `pgrep -fl "codeinsight.*serve"`。
-   预期：有一个 serve 进程，命令行里有 `--repo /tmp/ci-demo`（没有 token）。
+   预期：有一个 serve 进程，命令行里有 `--repo /tmp/ci-demo` 和 `--exit-on-stdin-close`（没有 token）。
 2. 操作：File → Close Project。等几秒后再执行 `pgrep -fl "codeinsight.*serve"` 和 `pgrep -fl scip-python`。
    预期：都没有输出。IDE 日志里有 `stopping serve: pid=... (SIGTERM)` 和 `serve exited: pid=... exitCode=...`。
 3. 操作：发起一次审查，在审查进行中（scip-python 运行时）关闭项目。
-   预期：同上，serve 和 scip-python 都退出（最多约 6 秒，超时会被强杀，日志里有 `killing`）。
+   预期：项目窗口立刻关闭，界面不卡顿（等待 serve 退出在后台进行）；之后 serve 和 scip-python 都退出（最多约 6 秒，超时会被强杀，日志里有 `killing`）。
 4. 操作：打开两个项目都打开工具窗口，然后 Cmd+Q 退出 IDE。
    预期：退出后没有残留的 serve 进程。
 5. 操作：同时打开两个项目的工具窗口。
    预期：两个页面互不影响（各自显示自己仓库的数据），关闭一个项目不影响另一个。
+6. IDE 崩溃或被强杀时 serve 也退出：
+   - 操作：打开工具窗口，发起一次审查，趁 scip-python 运行时在终端执行 `kill -9 <IDE 主进程 pid>`（`pgrep -f "PyCharm.app/Contents/MacOS"` 或对应 IDE 的路径可查 pid）。
+     预期：几秒内 `pgrep -fl "codeinsight.*serve"` 和 `pgrep -fl scip-python` 都没有输出（serve 读到 stdin 关闭后按 SIGTERM 同样的流程清理退出），数据目录 `scip/` 下没有残留的 `.tmp` 文件。
 
 ## 9. 设置修改
 

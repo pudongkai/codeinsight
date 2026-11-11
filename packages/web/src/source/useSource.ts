@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
-import { ApiError, api, errorMessage } from '../api/client';
+import { api } from '../api/client';
 import type { SourceResponse, SymbolInfo } from '../api/types';
+import { useApi } from '../browse/useApi';
 import { callSites, type CallSite } from './call-sites';
 
 /** 源码面板要显示的函数：快照里的符号 id */
@@ -26,22 +26,5 @@ async function load(t: SourceTarget): Promise<LoadedSource> {
 
 /** 取整个函数的源码和其中的调用点；快照已清理时调用 onGone */
 export function useSource(target: SourceTarget, onGone: () => void) {
-  const [state, setState] = useState<{ data?: LoadedSource; error?: string; loading: boolean }>({ loading: true });
-  useEffect(() => {
-    let cancelled = false;
-    setState({ loading: true });
-    load(target).then(
-      (data) => !cancelled && setState({ data, loading: false }),
-      (err: unknown) => {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.snapshotGone) onGone();
-        setState({ error: `读取源码失败：${errorMessage(err)}`, loading: false });
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-    // onGone 每次渲染都是新函数，只在目标变化时重新加载
-  }, [target.snapshotId, target.symbolId]);
-  return state;
+  return useApi(() => load(target), [target.snapshotId, target.symbolId], onGone);
 }

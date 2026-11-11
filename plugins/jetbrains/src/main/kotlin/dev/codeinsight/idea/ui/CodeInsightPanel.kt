@@ -46,6 +46,8 @@ class CodeInsightPanel(private val project: Project) : JPanel(BorderLayout()), D
     }
 
     private fun render(state: ServeState) {
+        // 启动失败时丢掉待审查标记，之后用户点"重试"只是重启 serve，不应意外发起审查
+        if (state is ServeState.Missing || state is ServeState.Failed || state == ServeState.NoProject) pendingReview = false
         disposeBrowser()
         removeAll()
         when (state) {
@@ -60,13 +62,12 @@ class CodeInsightPanel(private val project: Project) : JPanel(BorderLayout()), D
     }
 
     private fun showRunning(info: ServeInfo) {
-        val repo = service.repoRoot ?: return
         if (!JBCefApp.isSupported()) {
             val open = JButton("在浏览器中打开").apply { addActionListener { BrowserUtil.browse(info.loginUrl) } }
             showHtml(InstallGuide.noJcef(info.baseUrl), listOf(open))
             return
         }
-        val view = BrowserView(project, repo, info)
+        val view = BrowserView(project, info)
         browser = view
         add(view.component, BorderLayout.CENTER)
         if (pendingReview) {

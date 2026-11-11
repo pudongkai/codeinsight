@@ -1,5 +1,5 @@
 import { api } from '../api/client';
-import { entryLabel } from '../format';
+import { entryLabel, location } from '../format';
 import { useNav } from '../app/nav';
 import { useApi } from './useApi';
 
@@ -15,7 +15,7 @@ export function SymbolDetail({ snapshotId, id }: { snapshotId: number; id: strin
     <section className="panel" data-testid="symbol-detail">
       <h3>{s.qualifiedName}</h3>
       <button type="button" className="link" data-testid="symbol-location" onClick={open}>
-        {s.path}:{s.startLine}–{s.endLine}
+        {location(s.path, s.startLine)}–{s.endLine}
       </button>
       <pre className="sig">{s.name + s.displaySignature}</pre>
       {s.docstring && <pre className="doc">{s.docstring}</pre>}

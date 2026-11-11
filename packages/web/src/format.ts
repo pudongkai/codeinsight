@@ -28,6 +28,7 @@ export function entryLabel(e: { kind: string; framework: string; detail: Record<
   return `${e.framework} ${e.kind}${extra ? ` ${String(extra)}` : ''}`;
 }
 
+/** 代码位置的统一写法 `path:line` */
 export function location(path: string, line: number): string {
   return `${path}:${line}`;
 }

@@ -277,8 +277,9 @@ codeinsight review  [--repo .] [--base REF] [--head REF | --working]
                     [--intent TEXT | --intent-file PATH] [--no-llm]
                     [--format json|md|html] [--out PATH] [--open] [--data-dir DIR]
 codeinsight similar [--repo .] [--symbol KEY | --all] [--min-score 0.6] [--format json|md]
-codeinsight serve   [--repo .] [--port 0] [--open] [--data-dir DIR]
-                    # 启动后在 stdout 打一行 JSON：{"port":..,"token":"..","url":".."}；--open 时用系统默认浏览器打开 url
+codeinsight serve   [--repo .] [--port 0] [--open] [--data-dir DIR] [--exit-on-stdin-close]
+                    # 启动后在 stdout 打一行 JSON：{"port":..,"token":"..","url":"..","repo":"<仓库根绝对路径>","dataDir":"<数据目录绝对路径>"}；
+                    # --open 时用系统默认浏览器打开 url；--exit-on-stdin-close 时 stdin 关闭即按 SIGTERM 同样的流程退出（插件用）
 codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
 ```
 
@@ -446,6 +447,8 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
 | 插件依赖用户本机 Node | 安装门槛 | 工具窗口给出明确的安装指引和 Node 路径设置；P0–P2 不打包 Node，有用户反馈再评估 |
 | `node:sqlite` 在部分 Node 版本里仍标记为实验特性，API 可能调整 | Node 升级后存储层报错 | 只通过 store 模块访问数据库，换实现只改一处；CI 覆盖 Node 22 和最新 LTS |
 | 多个进程（serve、mcp、CLI）同时用一个数据目录 | 重复跑 scip-python、清理掉别人正在用的快照 | 快照锁和清理规则见 4.2"多进程并发" |
+| 被审查仓库的配置文件把 LLM 请求指向别处 | 用户的 API key 或其他环境变量被发到外部 | LLM 的 baseUrl、apiKey、apiKeyEnv 只从环境变量读取，仓库配置里的这几项忽略并出 warning |
+| `serve --open` 和插件在 JCEF 不可用时把带 `?token=` 的地址交给系统浏览器 | token 短时间出现在进程命令行，浏览器历史会记下重定向前的地址 | 只监听 127.0.0.1，token 每次启动 serve 重新生成，首次访问后换成 HttpOnly cookie 并重定向到不带 token 的地址；需要时再改成一次性登录码 |
 
 ## 7. 测试方案
 
@@ -521,7 +524,16 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
   - 内容：IntelliJ Platform Gradle Plugin 2.x，JDK 21 构建，最低 2025.1（`sinceBuild = 251`），只依赖 `com.intellij.modules.platform`；`pluginVerification { ides { recommended() } }`；设置页（Node 路径、codeinsight 路径、数据目录）；工具窗口：用 `EnvironmentUtil` 的环境查找 Node 并启动和结束 serve 进程、JCEF 加载 Web UI、`onLoadEnd` 时用 `JBCefJSQuery` 注入 JS 桥（`openFile`、`reviewWorking`）、JCEF 不可用时改为外部浏览器打开；`.codeinsight` 排除目录通知；"审查未提交改动"动作；找不到 Node 或 codeinsight 时显示安装指引
   - 完成标准：`./gradlew buildPlugin verifyPlugin` 通过（首次运行会下载被校验的 IDE，需要联网）；单测覆盖 serve 输出解析、Node 查找顺序；手工在 PyCharm 和 IntelliJ IDEA 里（用不需要付费许可的版本）打开小 Python 项目，改动后点"审查未提交改动"能看到报告，点击函数在编辑器中跳到对应行，首次启动时出现"将 .codeinsight 标记为排除目录"通知，点击后该目录变为排除目录且查找用法不再出现快照里的重复结果，从 Dock 启动 IDE 时也能找到 nvm / Homebrew 安装的 Node，关闭项目后 serve 进程退出
   - 已决定（2026-11-11，负责人经另一会话转达）：用 Homebrew 的 openjdk@21，构建时用 JAVA_HOME 指定，不改系统默认 Java；需要在 IDE 里手工操作的检查列成清单交负责人
-  - 验证：plugins/jetbrains 下 `JAVA_HOME=$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home ./gradlew test buildPlugin verifyPlugin` 通过：单测 18 条（serve 输出解析与 token 不外泄、Node / codeinsight 查找顺序、openFile 路径限制、用本仓库 cli 真实启动 serve 检查 401 / 302 / SIGTERM 退出），verifyPlugin 对 IC-251、IC-252、IU-253、IU-261、IU-262、IU-263 六个版本均为 Compatible；`pnpm -r build`、`pnpm lint`、`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm -r test`（core 123、server 33、cli 13、web 17）、`test:e2e` 10/10 通过，clauve `git status --porcelain` 为空。需要在 PyCharm / IntelliJ IDEA 里手工做的检查列在 plugins/jetbrains/MANUAL_CHECKS.md，交负责人执行。取舍：IntelliJ Platform Gradle Plugin 2.x、sinceBuild 251、只依赖 platform 模块，Kotlin 语言版本 2.1 与 2025.1 自带标准库一致、不打包标准库，`jvmDefault = NO_COMPATIBILITY` 避免默认方法转发被认成内部 API；JS 桥 `reviewWorking()` 的页面响应：插件先保存所有编辑器，再调页面的 `window.codeinsightPage.reviewWorking()`，由页面用 cookie 发起 `{working:true}` 审查并切到审查标签，页面未加载完时先记标记、注册后补做，token 只用于初始 URL；JCEF 不可用时提供“在浏览器中打开”；`.codeinsight` 排除提示每次打开项目检查一次，数据目录按插件设置和默认位置计算，不读 config / 环境变量覆盖值；Node / codeinsight 路径为 IDE 级设置，数据目录为项目级设置。待定：plugin id `dev.codeinsight`、vendor、图标为临时值，发布前确认。改动 plugins/jetbrains/、packages/web/src/{bridge.ts,app/App.tsx,review/ReviewPage.tsx}、packages/web/test/bridge.test.tsx
+  - 验证：plugins/jetbrains 下 `JAVA_HOME=$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home ./gradlew test buildPlugin verifyPlugin` 通过：单测 18 条（serve 输出解析与 token 不外泄、Node / codeinsight 查找顺序、openFile 路径限制、用本仓库 cli 真实启动 serve 检查 401 / 302 / SIGTERM 退出），verifyPlugin 对 IC-251、IC-252、IU-253、IU-261、IU-262、IU-263 六个版本均为 Compatible；`pnpm -r build`、`pnpm lint`、`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm -r test`（core 123、server 33、cli 13、web 17）、`test:e2e` 10/10 通过，clauve `git status --porcelain` 为空。需要在 PyCharm / IntelliJ IDEA 里手工做的检查列在 plugins/jetbrains/MANUAL_CHECKS.md，交负责人执行。取舍：IntelliJ Platform Gradle Plugin 2.x、sinceBuild 251、只依赖 platform 模块，Kotlin 语言版本 2.1 与 2025.1 自带标准库一致、不打包标准库，`jvmDefault = NO_COMPATIBILITY` 避免默认方法转发被认成内部 API；JS 桥 `reviewWorking()` 的页面响应：插件先保存所有编辑器，再调页面的 `window.codeinsightPage.reviewWorking()`，由页面用 cookie 发起 `{working:true}` 审查并切到审查标签，页面未加载完时先记标记、注册后补做，token 只用于初始 URL；JCEF 不可用时提供“在浏览器中打开”；`.codeinsight` 排除提示每次打开项目检查一次；Node / codeinsight 路径为 IDE 级设置，数据目录为项目级设置。待定：plugin id `dev.codeinsight`、vendor、图标为临时值，发布前确认。改动 plugins/jetbrains/、packages/web/src/{bridge.ts,app/App.tsx,review/ReviewPage.tsx}、packages/web/test/bridge.test.tsx
+
+- [x] 阶段8：代码审查修复（开发完成后整体代码审查两轮）
+  - 内容：LLM 配置与意图检查加固；Web 轮询与 IDE 协同修正；插件进程管理、启动方式与 JS 桥限制；去掉重复实现
+  - 验证：`pnpm -r build`、`pnpm lint`、`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm -r test`（core 140、web 35、server 33、cli 17）、`test:e2e` 10/10 通过；插件 `./gradlew test buildPlugin` 28 条通过，`verifyPlugin` 六个版本均为 Compatible；clauve 期望数字未改，clauve `git status --porcelain` 为空。改动：
+    - core：LLM 的 baseUrl / apiKey / apiKeyEnv 只从环境变量读，仓库配置里的这几项忽略并出 `config_llm_key_ignored`；LLM 配置写错时按未配置处理（`llm_not_configured` 带原因），不影响其他命令；意图检查缓存写失败只记日志，临时文件名带随机部分；输出上限按符号数估算，最终上限 `CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS`（默认 8192），截断时出 `llm_truncated` 不重试；模型漏掉的符号归入 unclear 组、重复 key 去重；没有改动符号时不调用 LLM（`intent_no_symbols`）；缓存 key 含 provider 和请求地址；请求失败信息不回显响应体；`similar` 查询不超过 64 个函数时直接精确计算，否则用 LSH；只有函数体的代码片段不计名字分、不走同名规则；`INTENT_SKIP_CODES` 由 core 导出供 Web 使用。
+    - Web：通用 `usePolling`，出错后间隔加倍重试（最多 10 秒），401 / 404 停止；再次打开当前审查重新读取；有 JS 桥时表单发起工作区审查先让 IDE 保存，等待期间表单禁用，10 秒无回调恢复并提示；意图面板对删除的函数取 base；快照清理检查两边；展开节点防重复请求。
+    - cli serve：启动输出增加 `repo`、`dataDir`；新增 `--exit-on-stdin-close`；退出过程中再收到信号只记日志。
+    - 插件：关闭项目时异步结束 serve；启动 serve 带 `--exit-on-stdin-close` 并保持 stdin；直接用 node + cli 的 JS 入口启动（Windows 不经 cmd），工作目录为用户主目录；openFile 按真实路径判断在仓库内；JS 桥只注入 serve 地址的页面，其他导航拦截；数据目录和仓库根取 serve 输出。
+  - 遗留（方案以外，未改）：工作区快照的源码面板读当前文件，建索引后文件改过时行号会错位；serve 审查任务没有并发上限；Windows 上结束 serve 不经 SIGTERM，不清理 scip-python；仓库配置写了 provider 时会使用用户环境里已有的厂商 key；插件只限制主浏览器的导航，弹窗不受限（不注入 JS 桥）。
 
 ## 9. 待确认问题
 

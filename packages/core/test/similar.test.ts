@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  EXACT_BODY_QUERY_MAX,
   extractPythonFiles,
   findDuplicates,
   initDataDir,
@@ -8,13 +9,15 @@ import {
   minhash,
   nameTokens,
   runReview,
-  shingleJaccard,
   shingles,
   signatureShape,
+  similarToCode,
   Store,
 } from '../src/index.js';
+import { jaccard } from '../src/util/collections.js';
 import type { DuplicateFinding, SymbolRow } from '../src/index.js';
 import { commitAll, initRepo, tempDir, writeFiles } from './helpers/git-repo.js';
+import path from 'node:path';
 
 /** 仓储层样板：结构相同，只有 SQL 和名字不同 */
 function repoFn(name: string, param: string, sql: string): string[] {
@@ -100,7 +103,7 @@ describe('similar building blocks', () => {
     expect([...index.query(minhash(b))]).toEqual(['a']);
     const [ma, mb] = [minhash(a), minhash(b)];
     const estimate = ma.filter((v, i) => v === mb[i]).length / ma.length;
-    expect(Math.abs(estimate - shingleJaccard(a, b))).toBeLessThan(0.15);
+    expect(Math.abs(estimate - jaccard(a, b))).toBeLessThan(0.15);
   });
 });
 
@@ -149,6 +152,25 @@ describe('findDuplicates', () => {
     expect(new Set(pairs).size).toBe(pairs.length);
     expect(pairs.length).toBe(10);
     expect(stats.queries).toBe(5);
+  });
+
+  it('switches to the LSH index when many functions are queried, with the same duplicates found', async () => {
+    const extra = Array.from({ length: EXACT_BODY_QUERY_MAX }, (_, i) => [`def helper_${i}(v):`, `    w = v * ${i}`, `    w = w + ${i}`, '    return w', ''].join('\n')).join('\n');
+    const syms = await symbolsOf({ 'pkg/repo.py': REPO_PY, 'pkg/new.py': NEW_PY, 'pkg/extra.py': extra });
+    const idsIn = (file: string) => syms.filter((s) => s.path === file && s.kind === 'function').map((s) => s.id);
+    const run = (queryIds: string[]) => findDuplicates({ symbols: syms, queryIds, excludeIds: new Set(queryIds), linkedPairs: new Set(), minScore: 0.6 });
+    const lshAdd = vi.spyOn(LshIndex.prototype, 'add');
+    try {
+      const few = run(idsIn('pkg/new.py'));
+      expect(lshAdd).not.toHaveBeenCalled();
+      const many = run([...idsIn('pkg/new.py'), ...idsIn('pkg/extra.py')]);
+      expect(many.stats.queries).toBeGreaterThan(EXACT_BODY_QUERY_MAX);
+      expect(lshAdd).toHaveBeenCalled();
+      expect(candidatesOf(many.findings, 'get_email_of_user', 'pkg/new.py')).toEqual(candidatesOf(few.findings, 'get_email_of_user', 'pkg/new.py'));
+      expect(candidatesOf(many.findings, 'get_email_of_user', 'pkg/new.py')).toEqual(['pkg/repo.py:select_user_email']);
+    } finally {
+      lshAdd.mockRestore();
+    }
   });
 });
 
@@ -229,4 +251,47 @@ describe('review step 8: duplicates', () => {
       store.close();
     }
   }, 120_000);
+});
+
+describe('similarToCode', () => {
+  /** 把符号写进一个新快照，返回 store 和快照 id */
+  async function storeWith(files: Record<string, string>): Promise<{ store: Store; snapshotId: number }> {
+    const store = new Store(path.join(tempDir('ci-similar-code-'), 'index.db'));
+    const snap = store.createSnapshot('commit', 'x', 'x');
+    store.insertSymbols((await symbolsOf(files)).map((s) => ({ ...s, snapshotId: snap.id })));
+    return { store, snapshotId: snap.id };
+  }
+
+  const BODY_ONLY = [
+    'with _use(conn) as c:',
+    '    with c.cursor() as cur:',
+    `        cur.execute("${EMAIL_SQL}", (user_id,))`,
+    '        row = cur.fetchone()',
+    '        return row[0] if row else None',
+  ].join('\n');
+
+  it('scores a body-only snippet without the name and never applies the same-name rule to it', async () => {
+    const { store, snapshotId } = await storeWith({ 'pkg/repo.py': REPO_PY, 'pkg/other.py': 'def snippet():\n    return 1\n' });
+    try {
+      const r = await similarToCode(store, snapshotId, BODY_ONLY, { minScore: 0.6 });
+      expect(r.queries.map((q) => q.name)).toEqual(['snippet']);
+      const c = r.findings[0]!.candidates;
+      expect(c[0]!.symbol).toMatchObject({ path: 'pkg/repo.py', name: 'select_user_email' });
+      expect(c.map((x) => x.symbol.path)).not.toContain('pkg/other.py');
+      // 名字不计分，函数体和签名形状按 5:2 归一：(0.5 * 1 + 0.2 * 0.5) / 0.7
+      expect(c[0]).toMatchObject({ score: 0.857, reasons: ['similar body (1.00)'] });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the name rules for a snippet that defines a named function', async () => {
+    const { store, snapshotId } = await storeWith({ 'lease/repo.py': WRAPPED });
+    try {
+      const r = await similarToCode(store, snapshotId, INLINE, { minScore: 0.6 });
+      expect(r.findings[0]!.candidates[0]).toMatchObject({ symbol: { path: 'lease/repo.py' }, reasons: ['same-name duplicate'], score: 0.5 });
+    } finally {
+      store.close();
+    }
+  });
 });

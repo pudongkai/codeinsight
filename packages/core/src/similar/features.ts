@@ -1,6 +1,7 @@
-import { shingleJaccard, shingles } from '../extract/normalize.js';
+import { shingles } from '../extract/normalize.js';
 import { detectLanguage } from '../model/language.js';
 import type { SymbolRow } from '../model/types.js';
+import { jaccard } from '../util/collections.js';
 
 /** 参与重复实现比较的符号类型 */
 export const FUNCTION_KINDS = new Set(['function', 'method']);
@@ -37,14 +38,7 @@ export function nameTokens(name: string): Set<string> {
 /** 名字相同为 1，否则为切词后 token 集合的 Jaccard */
 export function nameSimilarity(a: FunctionFeatures, b: FunctionFeatures): number {
   if (a.symbol.name === b.symbol.name) return 1;
-  return setJaccard(a.nameTokens, b.nameTokens);
-}
-
-function setJaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const x of a) if (b.has(x)) inter++;
-  return inter / (a.size + b.size - inter);
+  return jaccard(a.nameTokens, b.nameTokens);
 }
 
 /** 按顶层逗号切分参数列表，跳过括号、方括号、花括号和字符串里的逗号 */
@@ -116,7 +110,7 @@ export function shapeSimilarity(a: SignatureShape, b: SignatureShape): number {
 }
 
 export function bodySimilarityOf(a: FunctionFeatures, b: FunctionFeatures): number {
-  return shingleJaccard(a.shingles, b.shingles);
+  return jaccard(a.shingles, b.shingles);
 }
 
 /** 函数体行数：范围的总行数减去定义行（装饰器和多行签名会让它偏大，只用于排除太短的函数） */

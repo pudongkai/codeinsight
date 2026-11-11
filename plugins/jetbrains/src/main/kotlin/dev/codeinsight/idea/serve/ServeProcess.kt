@@ -1,34 +1,56 @@
 package dev.codeinsight.idea.serve
 
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.util.concurrency.AppExecutorUtil
+import dev.codeinsight.idea.runtime.ServeProgram
 import java.io.BufferedReader
 import java.io.File
 import java.nio.file.Path
 import java.util.ArrayDeque
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import kotlin.concurrent.thread
 
 private val LOG = logger<ServeProcess>()
 
-/** 启动 serve 的命令行和环境 */
+/** 启动 serve 的命令行、环境和工作目录 */
 data class ServeCommand(val argv: List<String>, val env: Map<String, String>, val workDir: Path) {
     companion object {
         /**
-         * npm 安装的 `codeinsight` 是带 `#!/usr/bin/env node` 的脚本，用找到的 Node 直接运行它，不依赖 PATH 里的 node；
-         * 其他形式（Windows 的 .cmd、版本管理器的 shim）直接执行。PATH 前面加上 Node 所在目录，serve 再起的子进程也用这个 Node。
+         * JS 入口用找到的 Node 直接运行，不依赖 PATH 里的 node，也不经过 cmd.exe（cmd 会解释路径里的 `&`、`%VAR%`）；
+         * 其他可执行文件（版本管理器的 shim、.exe）直接执行。PATH 前面加上 Node 所在目录，serve 再起的子进程也用这个 Node。
+         * 工作目录用 [workDir]（用户主目录）而不是仓库：Windows 按名字找程序时会先找当前目录，仓库里的同名程序不能被执行。
+         * `--exit-on-stdin-close` 让 serve 在插件进程消失（stdin 管道关闭）时自行退出。
          */
-        fun build(node: Path, codeinsight: Path, runWithNode: Boolean, repo: Path, dataDir: String?, env: Map<String, String>): ServeCommand {
-            val launcher = if (runWithNode) listOf(node.toString(), codeinsight.toString()) else listOf(codeinsight.toString())
-            val args = mutableListOf("serve", "--repo", repo.toString())
+        fun build(
+            node: Path,
+            program: ServeProgram,
+            repo: Path,
+            dataDir: String?,
+            env: Map<String, String>,
+            workDir: Path,
+            windows: Boolean,
+        ): ServeCommand {
+            val launcher = when (program) {
+                is ServeProgram.NodeScript -> listOf(node.toString(), program.script.toString())
+                is ServeProgram.Executable -> listOf(program.path.toString())
+            }
+            val args = mutableListOf("serve", "--repo", repo.toString(), "--exit-on-stdin-close")
             if (!dataDir.isNullOrBlank()) args += listOf("--data-dir", dataDir.trim())
+            return ServeCommand(launcher + args, childEnv(node, env, windows), workDir)
+        }
+
+        private fun childEnv(node: Path, env: Map<String, String>, windows: Boolean): Map<String, String> {
             val pathKey = env.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
             val nodeDir = node.parent?.toString()
             val newEnv = env.toMutableMap()
             if (nodeDir != null) newEnv[pathKey] = listOfNotNull(nodeDir, env[pathKey]).joinToString(File.pathSeparator)
-            return ServeCommand(launcher + args, newEnv, repo)
+            // serve 再起的子进程按名字找程序时不搜索当前目录
+            if (windows) newEnv["NoDefaultCurrentDirectoryInExePath"] = "1"
+            return newEnv
         }
     }
 }
@@ -39,6 +61,7 @@ class ServeLaunchException(message: String, val stderrTail: List<String>) : Exce
 /**
  * 正在运行的 `codeinsight serve` 进程。stdout 第一行是地址和 token（只交给 [ServeInfo]，不打日志），
  * stderr 是 serve 的日志，转到 IDE 日志的 debug 级别并保留最后几行。
+ * stdin 管道一直保持打开：IDE 崩溃或被强杀时管道随之关闭，serve 读到 EOF 后自行清理退出。
  */
 class ServeProcess private constructor(private val process: Process, val info: ServeInfo, private val stderr: StderrTail) {
     val pid: Long get() = process.pid()
@@ -51,8 +74,17 @@ class ServeProcess private constructor(private val process: Process, val info: S
         process.onExit().thenAccept { callback(it.exitValue()) }
     }
 
-    /** 先发 SIGTERM（serve 会结束 scip-python 子进程再退出），超时后强杀进程和它的子进程 */
-    fun stop() = terminate(process)
+    /** 请求 serve 退出（serve 会结束 scip-python 子进程再退出），等到超时后强杀进程和它的子进程。会阻塞，不要在 EDT 上调用 */
+    fun stop() = stopBlocking(process)
+
+    /**
+     * 只发出退出请求就返回，超时后的强杀放到 [scheduler] 上，可以在 EDT 上调用（项目关闭时）。
+     * IDE 退出时 JVM 可能等不到强杀，这时 serve 已收到 SIGTERM，stdin 管道也会随 IDE 进程关闭，serve 仍会退出。
+     */
+    fun stopAsync(scheduler: ScheduledExecutorService = AppExecutorUtil.getAppScheduledExecutorService()) {
+        val descendants = requestExit(process) ?: return
+        scheduler.schedule({ forceKill(process, descendants) }, STOP_TIMEOUT_S, TimeUnit.SECONDS)
+    }
 
     companion object {
         private const val START_TIMEOUT_S = 60L
@@ -64,13 +96,12 @@ class ServeProcess private constructor(private val process: Process, val info: S
             pb.environment().clear()
             pb.environment().putAll(cmd.env)
             val process = pb.start()
-            process.outputStream.close()
             val stderr = StderrTail(process.errorReader(), TAIL_LINES)
             LOG.info("serve process started: pid=${process.pid()} command=${cmd.argv.joinToString(" ")}")
             val info = try {
                 readInfo(process)
             } catch (e: ServeLaunchException) {
-                terminate(process)
+                stopBlocking(process)
                 stderr.awaitEnd()
                 throw ServeLaunchException(e.message ?: "serve failed to start", stderr.lines())
             }
@@ -106,13 +137,31 @@ class ServeProcess private constructor(private val process: Process, val info: S
             }
         }
 
-        private fun terminate(process: Process) {
-            if (!process.isAlive) return
-            // 父进程退出后子进程会被收养，提前记下才能在强杀时一起处理
+        private fun stopBlocking(process: Process) {
+            val descendants = requestExit(process) ?: return
+            process.waitFor(STOP_TIMEOUT_S, TimeUnit.SECONDS)
+            forceKill(process, descendants)
+        }
+
+        /**
+         * 关闭 stdin 并发 SIGTERM，两者都会让 serve 走同一套清理流程。返回此刻的子孙进程：
+         * 父进程退出后它们会被收养，提前记下才能在强杀时一起处理。进程已退出时返回 null。
+         */
+        private fun requestExit(process: Process): List<ProcessHandle>? {
+            if (!process.isAlive) return null
             val descendants = process.descendants().toList()
             LOG.info("stopping serve: pid=${process.pid()} (SIGTERM)")
+            try {
+                process.outputStream.close()
+            } catch (_: java.io.IOException) {
+                // 管道已断开说明 serve 已在退出
+            }
             process.destroy()
-            if (!process.waitFor(STOP_TIMEOUT_S, TimeUnit.SECONDS)) {
+            return descendants
+        }
+
+        private fun forceKill(process: Process, descendants: List<ProcessHandle>) {
+            if (process.isAlive) {
                 LOG.warn("serve did not exit within $STOP_TIMEOUT_S s after SIGTERM, killing: pid=${process.pid()}")
                 process.destroyForcibly()
                 process.waitFor(2, TimeUnit.SECONDS)

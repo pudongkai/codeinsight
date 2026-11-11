@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { location } from '../format';
 import { FlowGraph } from '../graph/FlowGraph';
 import type { GraphEdgeSpec, GraphNodeSpec } from '../graph/types';
 import { type NNode, type NeighborState, visibleNeighbors } from './neighbor-model';
@@ -21,7 +22,7 @@ function columnOf(n: NNode, maxCaller: number): number {
 function nodeSpec(n: NNode, maxCaller: number, loadingId: string | undefined, onExpand: (id: string) => void): GraphNodeSpec {
   const canExpand = n.side !== 'center' && !n.expanded;
   return {
-    id: n.info.id, label: n.info.name, sublabel: `${n.info.path}:${n.info.startLine}`, title: n.info.qualifiedName,
+    id: n.info.id, label: n.info.name, sublabel: location(n.info.path, n.info.startLine), title: n.info.qualifiedName,
     tone: n.side === 'center' ? 'center' : n.info.isTest ? 'test' : 'neighbor',
     badge: loadingId === n.info.id ? '加载中' : n.info.isTest ? '测试' : undefined,
     column: columnOf(n, maxCaller),

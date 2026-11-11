@@ -1,7 +1,7 @@
 import type { SymbolChange } from '@codeinsight/core/report/types';
 import type { SymbolTarget } from './actions';
 import { CallerCounts, ChangeBadge, EntryTag } from './ChangeBadge';
-import { changeTarget, refTarget } from './report-graph';
+import { changeTarget, refTarget, sideOf } from './report-graph';
 import { SymbolLink } from './SymbolLink';
 
 interface Props {
@@ -24,7 +24,7 @@ function Signature({ c }: { c: SymbolChange }) {
 export function ImpactPanel({ change: c, onOpen, onGraph }: Props) {
   if (!c) return <section className="panel impact" data-testid="impact-panel"><h3>影响面</h3><p className="muted">在改动清单或结构图里选择一个函数。</p></section>;
   const target = changeTarget(c);
-  const side = c.change === 'removed' ? 'base' : 'head';
+  const side = sideOf(c);
   return (
     <section className="panel impact" data-testid="impact-panel">
       <h3>影响面</h3>

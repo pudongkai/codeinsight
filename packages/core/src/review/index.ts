@@ -110,7 +110,7 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewReport> {
   progress('intent');
   const intent = await intentText(opts, v);
   const intentStep = await checkIntent(opts, intent, analysis.diffs, files);
-  const warnings = [...snapshotWarnings(snaps), ...unsupportedWarnings(files), ...intentStep.warnings];
+  const warnings = [...(opts.config.warnings ?? []), ...snapshotWarnings(snaps), ...unsupportedWarnings(files), ...intentStep.warnings];
   logWarnings(warnings);
   const totalMs = Date.now() - started;
   log.info('review_done', { files: files.length, modules: analysis.modules.length, duplicates: duplicates.length, intentGroups: intentStep.intentCheck?.length, warnings: warnings.length, snapshotsMs, totalMs });

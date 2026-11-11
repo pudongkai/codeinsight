@@ -1,4 +1,5 @@
 import type { Node } from 'web-tree-sitter';
+import { jaccard } from '../util/collections.js';
 
 /**
  * tree-sitter token 归一化，similar 和 moved 判断共用：
@@ -48,16 +49,7 @@ export function shingles(tokens: string[], k = SHINGLE_SIZE): Set<string> {
   return out;
 }
 
-/** 两个 shingle 集合的 Jaccard，任一为空时为 0；批量比较时先把每个符号的集合算好再调用 */
-export function shingleJaccard(sa: Set<string>, sb: Set<string>): number {
-  if (sa.size === 0 || sb.size === 0) return 0;
-  const [small, large] = sa.size <= sb.size ? [sa, sb] : [sb, sa];
-  let inter = 0;
-  for (const s of small) if (large.has(s)) inter++;
-  return inter / (sa.size + sb.size - inter);
-}
-
 /** 函数体相似度：shingle 集合的 Jaccard，两边都为空时为 0 */
 export function bodySimilarity(a: string[], b: string[], k = SHINGLE_SIZE): number {
-  return shingleJaccard(shingles(a, k), shingles(b, k));
+  return jaccard(shingles(a, k), shingles(b, k));
 }

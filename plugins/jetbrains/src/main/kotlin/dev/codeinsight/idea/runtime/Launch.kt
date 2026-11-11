@@ -5,7 +5,6 @@ import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.EnvironmentUtil
 import dev.codeinsight.idea.serve.ServeCommand
 import dev.codeinsight.idea.settings.CodeInsightSettings
-import java.nio.file.Files
 import java.nio.file.Path
 
 private val LOG = logger<RuntimeLocator>()
@@ -22,8 +21,9 @@ sealed interface Resolution {
 }
 
 /**
- * 按 [RuntimeLocator] 的顺序找到 Node 和 codeinsight，拼出启动 serve 的命令。
+ * 按 [RuntimeLocator] 的顺序找到 Node 和 codeinsight，拼出启动 serve 的命令；[repo] 用项目目录即可，serve 自己找仓库根目录。
  * `EnvironmentUtil.getEnvironmentMap()` 在 macOS 上要等登录 shell 环境加载完，不能在 EDT 上调用。
+ * Windows 上 codeinsight 是解析不出 JS 入口的 `.cmd` 时抛出 [dev.codeinsight.idea.serve.ServeLaunchException]。
  */
 fun resolveServeCommand(repo: Path, dataDir: String?): Resolution {
     val settings = CodeInsightSettings.getInstance().state
@@ -46,20 +46,6 @@ fun resolveServeCommand(repo: Path, dataDir: String?): Resolution {
         is Lookup.Found -> r
     }
     LOG.info("using codeinsight at ${ci.path} (from ${ci.origin})")
-    return Resolution.Ready(ServeCommand.build(node.path, ci.path, isNodeScript(ci.path), repo, dataDir, env))
-}
-
-/** npm 生成的入口是 JS 文件（或指向它的符号链接），或以 `#!...node` 开头的脚本 */
-private fun isNodeScript(path: Path): Boolean = try {
-    val real = path.toRealPath()
-    val name = real.fileName.toString()
-    if (name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")) {
-        true
-    } else {
-        val head = Files.newInputStream(real).use { it.readNBytes(256) }.decodeToString()
-        head.startsWith("#!") && head.lineSequence().first().contains("node")
-    }
-} catch (e: Exception) {
-    LOG.warn("cannot inspect $path", e)
-    false
+    val program = resolveServeProgram(ci.path, ctx.windows)
+    return Resolution.Ready(ServeCommand.build(node.path, program, repo, dataDir, env, ctx.home, ctx.windows))
 }
