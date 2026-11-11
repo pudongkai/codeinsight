@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { isGeneratedPath, isTestPath, type ClassifyOptions } from '../classify/index.js';
 import { dataDirInRepo, type CodeInsightConfig } from '../config/index.js';
@@ -81,6 +81,12 @@ async function prepareCommit(t: Target, layout: DataDirLayout): Promise<Prepared
   return { files: await listCommitFiles(t.root, t.commitSha), dir, read: (rel) => readFile(path.join(dir, rel)) };
 }
 
+/** 符号链接按链接本身复制，不把链接目标（可能在仓库外）的内容复制进快照 */
+async function copyEntry(src: string, dest: string): Promise<void> {
+  if ((await lstat(src)).isSymbolicLink()) await symlink(await readlink(src), dest);
+  else await copyFile(src, dest);
+}
+
 /** 工作区：只把清单里支持语言的文件和项目配置复制到快照目录，清单外的目录（如 venv）不会被 scip-python 扫描 */
 async function prepareWorking(t: Target, layout: DataDirLayout, config: CodeInsightConfig): Promise<Prepared> {
   const dir = snapshotDir(layout, t.contentKey);
@@ -90,7 +96,7 @@ async function prepareWorking(t: Target, layout: DataDirLayout, config: CodeInsi
     if (supportLevelOf(detectLanguage(rel)) === 'none' && !PROJECT_CONFIG_FILES.has(path.posix.basename(rel))) continue;
     const dest = path.join(dir, rel);
     await mkdir(path.dirname(dest), { recursive: true });
-    await copyFile(path.join(t.root, rel), dest).catch((err: Error) => log.warn('snapshot_copy_failed', { path: rel, error: err.message }));
+    await copyEntry(path.join(t.root, rel), dest).catch((err: Error) => log.warn('snapshot_copy_failed', { path: rel, error: err.message }));
   }
   log.info('snapshot_copied', { contentKey: t.contentKey, files: files.length });
   return { files, dir, read: (rel) => readFile(path.join(t.root, rel)) };

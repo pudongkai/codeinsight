@@ -25,6 +25,23 @@ describe('data dir', () => {
     expect(readFileSync(layout.emptyEnvPath, 'utf8').trim()).toBe('[]');
   });
 
+  it('removes scip-python temp outputs left by processes that no longer exist', async () => {
+    const layout = await initDataDir(tempDir());
+    const dead = spawn(process.execPath, ['-e', '']);
+    await new Promise((r) => dead.once('exit', r));
+    const stale = path.join(layout.scipDir, `k.scip.${dead.pid}.tmp`);
+    const own = path.join(layout.scipDir, `k.scip.${process.pid}.tmp`);
+    const other = path.join(layout.scipDir, 'k.scip');
+    for (const f of [stale, own, other]) writeFileSync(f, 'x');
+    await initDataDir(layout.root);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(own)).toBe(true);
+    expect(existsSync(other)).toBe(true);
+    writeFileSync(stale, 'x');
+    await cleanupSnapshots(new Store(layout.dbPath), layout);
+    expect(existsSync(stale)).toBe(false);
+  });
+
   it('warns when pyrightconfig.json has custom exclude without the data dir', async () => {
     const repo = tempDir();
     writeFileSync(path.join(repo, 'pyrightconfig.json'), '{\n // c\n "exclude": ["build"],\n}');

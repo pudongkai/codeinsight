@@ -1,3 +1,4 @@
+import { extractPythonFile, getPythonParser } from '../extract/index.js';
 import { log } from '../log.js';
 import type { SymbolRow } from '../model/types.js';
 import type { DuplicateFinding } from '../report/types.js';
@@ -221,4 +222,38 @@ export function similarInSnapshot(store: Store, snapshotId: number, opts: Simila
   const result = findDuplicates({ ...opts, symbols, linkedPairs: linkedPairs(store, snapshotId, linkIds) });
   log.info('similar_done', { snapshotId, mode: opts.queryIds ? 'symbols' : 'all', symbols: symbols.length, ...result.stats, minScore: opts.minScore, ms: Date.now() - started });
   return result;
+}
+
+/** 传入代码片段的虚拟路径，不会和仓库里的文件重名 */
+export const SNIPPET_PATH = '<snippet>/snippet.py';
+
+/** 解析代码片段里的函数；片段里没有函数定义时（只有一段函数体）包成一个名为 snippet 的函数 */
+async function snippetFunctions(code: string, snapshotId: number): Promise<SymbolRow[]> {
+  const parser = await getPythonParser();
+  const parse = (source: string) =>
+    extractPythonFile(parser, SNIPPET_PATH, source, { isTest: false, isGenerated: false })
+      .symbols.filter((s) => FUNCTION_KINDS.has(s.kind))
+      .map(({ nameLine: _l, nameCol: _c, ...s }) => ({ ...s, snapshotId }));
+  const found = parse(code);
+  if (found.length > 0) return found;
+  const body = code.split('\n').map((l) => '    ' + l).join('\n');
+  return parse(`def snippet():\n${body}\n`);
+}
+
+export interface SimilarToCodeResult extends SimilarResult {
+  /** 从代码片段里解析出的函数（finding 里的 symbol 指向它们） */
+  queries: SymbolRow[];
+}
+
+/**
+ * 找和一段尚未写入仓库的代码相似的已有函数（AI 写代码前查重）。片段不在调用图里，不做透传 / 包装排除。
+ */
+export async function similarToCode(store: Store, snapshotId: number, code: string, opts: { minScore: number; maxCandidates?: number }): Promise<SimilarToCodeResult> {
+  const started = Date.now();
+  const queries = await snippetFunctions(code, snapshotId);
+  const queryIds = queries.map((q) => q.id);
+  const symbols = [...store.getSymbols(snapshotId, { withTokens: true }), ...queries];
+  const result = findDuplicates({ symbols, queryIds, excludeIds: new Set(queryIds), linkedPairs: new Set(), ...opts });
+  log.info('similar_done', { snapshotId, mode: 'code', functions: queries.length, ...result.stats, minScore: opts.minScore, ms: Date.now() - started });
+  return { ...result, queries };
 }
