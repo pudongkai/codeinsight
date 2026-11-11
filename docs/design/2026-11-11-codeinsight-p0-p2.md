@@ -1,6 +1,6 @@
 # CodeInsight P0–P2 技术方案：Python 结构化审查、CLI/MCP 与 JetBrains 插件
 
-开发状态: RUNNING
+开发状态: DONE
 方案评审: 通过（2026-11-11）
 需求来源: 2026-11-11 头脑风暴对话，以及在 clauve、bluewhale 上的验证结论
 作者: steve@data-coding.com　　日期: 2026-11-11
