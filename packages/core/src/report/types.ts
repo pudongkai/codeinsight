@@ -5,6 +5,9 @@
 
 export const REPORT_SCHEMA_VERSION = 1;
 
+/** 单文件 HTML 报告里内嵌报告 JSON 的 `<script type="application/json">` 元素 id（cli 写入，web 读取） */
+export const EMBEDDED_REPORT_ELEMENT_ID = 'codeinsight-report';
+
 export type FileChangeStatus = 'added' | 'removed' | 'modified' | 'renamed';
 export type SymbolChangeKind = 'added' | 'removed' | 'modified' | 'signature_changed' | 'moved';
 

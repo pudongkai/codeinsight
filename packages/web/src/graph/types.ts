@@ -1,0 +1,27 @@
+export type NodeTone = 'center' | 'added' | 'removed' | 'modified' | 'moved' | 'neighbor' | 'test' | 'overflow';
+export type EdgeTone = 'normal' | 'added' | 'removed';
+
+/** 图上的一个节点（结构图和邻居图共用） */
+export interface GraphNodeSpec {
+  id: string;
+  label: string;
+  sublabel?: string;
+  tone: NodeTone;
+  badge?: string;
+  title?: string;
+  /** 布局中的列号（从左到右），不给时由布局算法决定 */
+  column?: number;
+  /** 渲染为节点元素上的 `data-*` 属性 */
+  attrs?: Record<string, string>;
+  onExpand?: () => void;
+}
+
+export interface GraphEdgeSpec {
+  id: string;
+  source: string;
+  target: string;
+  tone: EdgeTone;
+}
+
+export const NODE_WIDTH = 230;
+export const NODE_HEIGHT = 58;

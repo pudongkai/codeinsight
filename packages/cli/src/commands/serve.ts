@@ -1,11 +1,10 @@
-import { spawn } from 'node:child_process';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { killActiveScipProcesses, log, ReviewArgsError } from '@codeinsight/core';
 import type { Resolver } from '@codeinsight/core';
 import { startHttpServer, type RunningHttpServer } from '@codeinsight/server';
+import { openBrowser } from '../open-browser.js';
+import { DEFAULT_STATIC_DIR } from '../web-assets.js';
 import { openWorkspace } from './workspace.js';
 
 export const SERVE_USAGE = `Usage: codeinsight serve [--repo .] [--port 0] [--open] [--data-dir DIR]
@@ -13,9 +12,6 @@ export const SERVE_USAGE = `Usage: codeinsight serve [--repo .] [--port 0] [--op
 Start the local web UI / HTTP API on 127.0.0.1 (random port by default).
 Prints one JSON line to stdout: {"port":..,"token":"..","url":".."}. --open opens the url in the default browser.
 `;
-
-/** Web UI 构建产物在 cli 发布目录里的位置（dist/commands → 包根目录/web） */
-export const DEFAULT_STATIC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'web');
 
 function parseServeArgs(argv: string[]) {
   const { values } = parseArgs({
@@ -32,15 +28,6 @@ function parseServeArgs(argv: string[]) {
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new ReviewArgsError(`--port must be an integer between 0 and 65535: ${values.port}`);
   return { ...values, port };
-}
-
-/** 用系统默认浏览器打开 url；失败只记日志 */
-export function openBrowser(url: string): void {
-  const [cmd, args] =
-    process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '""', url]] : ['xdg-open', [url]];
-  const child = spawn(cmd as string, args as string[], { stdio: 'ignore', detached: true });
-  child.on('error', (err) => log.warn('browser_open_failed', { error: err.message }));
-  child.unref();
 }
 
 export interface ServeDeps {
