@@ -1,6 +1,8 @@
 import { GitError, ReviewArgsError } from '@codeinsight/core';
 import { runIndex } from './commands/index.js';
 import { runReviewCommand } from './commands/review.js';
+import { runMcpCommand } from './commands/mcp.js';
+import { runServeCommand } from './commands/serve.js';
 import { runSimilarCommand } from './commands/similar.js';
 
 const USAGE = `Usage: codeinsight <command> [options]
@@ -17,6 +19,8 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   index: runIndex,
   review: runReviewCommand,
   similar: runSimilarCommand,
+  serve: runServeCommand,
+  mcp: runMcpCommand,
 };
 
 export async function runCli(argv: string[]): Promise<number> {

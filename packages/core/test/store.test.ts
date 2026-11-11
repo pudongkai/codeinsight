@@ -76,11 +76,28 @@ describe('store', () => {
   it('marks interrupted reviews as failed and keeps only 20', () => {
     const store = new Store(path.join(tempDir(), 'index.db'));
     for (let i = 0; i < 25; i++) store.createReview({ i });
-    expect(store.listReviews(100)).toHaveLength(20);
+    // 还在 running 的不清理
+    expect(store.listReviews(100)).toHaveLength(25);
     // 模拟一个已经退出的进程留下的任务
     store.db.prepare('UPDATE reviews SET pid = 999999999').run();
-    expect(store.failInterruptedReviews()).toBe(20);
+    expect(store.failInterruptedReviews()).toBe(25);
     expect(store.listReviews(1)[0]!.status).toBe('failed');
+    store.createReview({ i: 25 });
+    expect(store.listReviews(100)).toHaveLength(20);
+    store.close();
+  });
+
+  it('never prunes a review that is still running', () => {
+    const store = new Store(path.join(tempDir(), 'index.db'));
+    const first = store.createReview({ first: true });
+    for (let i = 0; i < 25; i++) store.finishReview(store.createReview({ i }), { ok: true });
+    expect(store.getReview(first)?.status).toBe('running');
+    const ids = store.listReviews(100).map((r) => r.id);
+    expect(ids).toHaveLength(21);
+    expect(ids).toContain(first);
+    store.finishReview(first, { ok: true });
+    store.createReview({ last: true });
+    expect(store.getReview(first)).toBeUndefined();
     store.close();
   });
 });

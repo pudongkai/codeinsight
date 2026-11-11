@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { realpath, rename, rm, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -36,9 +36,19 @@ interface ExitInfo {
   stderr: string;
 }
 
-function runProcess(args: string[], cwd: string, timeoutMs: number): Promise<ExitInfo> {
+interface ActiveRun {
+  /** 输出的临时文件 */
+  tmp: string;
+  closed: Promise<void>;
+}
+
+/** 本进程正在运行的 scip-python 子进程，进程退出前用 killActiveScipProcesses 结束它们 */
+const active = new Map<ChildProcess, ActiveRun>();
+
+function runProcess(args: string[], cwd: string, timeoutMs: number, tmp: string): Promise<ExitInfo> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
+    active.set(child, { tmp, closed: new Promise((r) => child.once('close', () => r())) });
     let stderr = '';
     let timedOut = false;
     child.stderr.on('data', (d: Buffer) => {
@@ -50,10 +60,12 @@ function runProcess(args: string[], cwd: string, timeoutMs: number): Promise<Exi
     }, timeoutMs);
     child.on('error', (err) => {
       clearTimeout(timer);
+      active.delete(child);
       reject(err);
     });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
+      active.delete(child);
       resolve({ code, signal, timedOut, stderr });
     });
   });
@@ -76,7 +88,7 @@ export async function runScipPython(opts: ScipRunOptions): Promise<void> {
   log.info('scip_python_start', { args: args.slice(1), timeoutMs: opts.timeoutMs });
   const started = Date.now();
   try {
-    const exit = await runProcess(args, cwd, opts.timeoutMs);
+    const exit = await runProcess(args, cwd, opts.timeoutMs, tmp);
     log.info('scip_python_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, ms: Date.now() - started });
     if (exit.timedOut) throw new ScipRunError(`scip-python timed out after ${opts.timeoutMs}ms\n${tail(exit.stderr)}`);
     if (exit.code !== 0) throw new ScipRunError(`scip-python exited with code ${exit.code ?? exit.signal}\n${tail(exit.stderr)}`);
@@ -86,4 +98,19 @@ export async function runScipPython(opts: ScipRunOptions): Promise<void> {
   } finally {
     await rm(tmp, { force: true });
   }
+}
+
+/**
+ * 结束本进程启动的所有 scip-python 子进程并删除它们的临时输出（serve / mcp 退出前调用，避免留下孤儿进程和 .tmp 文件）。
+ * 返回结束的进程数；对应的构建会按解析失败处理。
+ */
+export async function killActiveScipProcesses(): Promise<number> {
+  const runs = [...active.entries()];
+  for (const [child] of runs) child.kill('SIGKILL');
+  await Promise.all(runs.map(async ([, run]) => {
+    await run.closed;
+    await rm(run.tmp, { force: true });
+  }));
+  if (runs.length > 0) log.info('scip_python_killed', { count: runs.length });
+  return runs.length;
 }

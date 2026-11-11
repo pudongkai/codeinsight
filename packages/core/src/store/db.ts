@@ -300,6 +300,11 @@ export class Store {
     return (this.db.prepare('SELECT * FROM files WHERE snapshot_id = ? ORDER BY path').all(snapshotId) as Row[]).map(toFile);
   }
 
+  getFile(snapshotId: number, filePath: string): FileRow | undefined {
+    const r = this.db.prepare('SELECT * FROM files WHERE snapshot_id = ? AND path = ?').get(snapshotId, filePath) as Row | undefined;
+    return r ? toFile(r) : undefined;
+  }
+
   getSymbols(snapshotId: number, opts: { withTokens?: boolean } = {}): SymbolRow[] {
     const rows = this.db.prepare('SELECT * FROM symbols WHERE snapshot_id = ?').all(snapshotId) as Row[];
     return rows.map((r) => toSymbol(r, opts.withTokens ?? false));
@@ -312,6 +317,24 @@ export class Store {
 
   findSymbolsByName(snapshotId: number, name: string): SymbolRow[] {
     const rows = this.db.prepare('SELECT * FROM symbols WHERE snapshot_id = ? AND name = ?').all(snapshotId, name) as Row[];
+    return rows.map((r) => toSymbol(r, false));
+  }
+
+  /**
+   * 按名字搜索符号（不区分大小写的子串匹配）：名字完全相同 > 前缀 > 子串，同一档里正式代码在测试代码前，再按名字长度和名字排序。
+   * kind 不传时不含 module 符号。
+   */
+  searchSymbols(snapshotId: number, query: string, opts: { kind?: string; limit: number }): SymbolRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT *, CASE WHEN lower(name) = lower(:q) THEN 0 WHEN instr(lower(name), lower(:q)) = 1 THEN 1 ELSE 2 END AS match_rank
+         FROM symbols
+         WHERE snapshot_id = :sid AND instr(lower(name), lower(:q)) > 0
+           AND ((:kind IS NULL AND kind <> 'module') OR kind = :kind)
+         ORDER BY match_rank, is_test, length(name), name, path, start_line
+         LIMIT :limit`,
+      )
+      .all({ sid: snapshotId, q: query, kind: opts.kind ?? null, limit: opts.limit }) as Row[];
     return rows.map((r) => toSymbol(r, false));
   }
 
@@ -348,6 +371,10 @@ export class Store {
     const count = (table: string): number =>
       Number((this.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE snapshot_id = ?`).get(snapshotId) as Row).n);
     return { files: count('files'), symbols: count('symbols'), edges: count('edges'), entries: count('entries') };
+  }
+
+  getEntriesForSymbol(snapshotId: number, symbolId: string): EntryRow[] {
+    return (this.db.prepare('SELECT * FROM entries WHERE snapshot_id = ? AND symbol_id = ?').all(snapshotId, symbolId) as Row[]).map(toEntry);
   }
 
   getEntries(snapshotId: number): EntryRow[] {
@@ -401,7 +428,10 @@ export class Store {
     return n;
   }
 
+  /** 只保留最近 keep 条；还在 running 的任务不删，它结束时还要写回结果 */
   pruneReviews(keep = MAX_REVIEWS): void {
-    this.db.prepare('DELETE FROM reviews WHERE id NOT IN (SELECT id FROM reviews ORDER BY id DESC LIMIT ?)').run(keep);
+    this.db
+      .prepare("DELETE FROM reviews WHERE status <> 'running' AND id NOT IN (SELECT id FROM reviews ORDER BY id DESC LIMIT ?)")
+      .run(keep);
   }
 }

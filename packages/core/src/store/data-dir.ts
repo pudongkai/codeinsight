@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { link, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Store } from './db.js';
@@ -53,7 +53,24 @@ export async function initDataDir(root: string): Promise<DataDirLayout> {
   const gi = path.join(root, '.gitignore');
   if (!existsSync(gi)) await writeFile(gi, '*\n');
   if (!existsSync(layout.emptyEnvPath)) await writeFile(layout.emptyEnvPath, '[]\n');
+  await removeStaleScipTemps(layout);
   return layout;
+}
+
+/** scip-python 临时输出 `<key>.scip.<pid>.tmp`：写它的进程已不存在时删除（进程被强行结束时留下的） */
+export async function removeStaleScipTemps(layout: DataDirLayout): Promise<string[]> {
+  const names = await readdir(layout.scipDir).catch(() => [] as string[]);
+  const removed: string[] = [];
+  for (const name of names) {
+    const m = /\.scip\.(\d+)\.tmp$/.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid || isProcessAlive(pid)) continue;
+    await rm(path.join(layout.scipDir, name), { force: true });
+    removed.push(name);
+  }
+  if (removed.length > 0) log.info('scip_temp_removed', { files: removed.length });
+  return removed;
 }
 
 // ---- pyright exclude 检查 ----
@@ -336,5 +353,6 @@ export async function cleanupSnapshots(store: Store, layout: DataDirLayout, opts
     removed.push(snap.id);
   }
   if (removed.length > 0) log.info('snapshots_cleaned', { removed: removed.length });
+  await removeStaleScipTemps(layout);
   return removed;
 }
