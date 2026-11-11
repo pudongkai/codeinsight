@@ -10,7 +10,7 @@ export interface SnapshotRow {
   contentKey: string;
   extractStatus: StepStatus;
   resolverStatus: StepStatus;
-  /** 失败原因或跳过原因 */
+  /** 失败原因、跳过原因；ok 时为解析结果的提示（如 SCIP 定义对不上的比例），没有时为 null */
   resolverError: string | null;
   createdAt: number;
   lastUsedAt: number;

@@ -475,14 +475,15 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
   - 完成标准：`pnpm install && pnpm -r build && pnpm -r test` 通过；store 测试覆盖建表、写入读取五类实体（含 reviews）、schema 版本不一致时重建；git 测试在临时仓库里覆盖提交区间、工作区（含未跟踪文件、排除被忽略文件和仓库内数据目录）、`git archive` 导出；数据目录测试覆盖：初始化后 `git status --porcelain` 不出现 `.codeinsight`；`pyrightconfig.json` 自定义了 exclude 且不含 `.codeinsight` 时给出警告，含时不警告；锁测试覆盖两个进程抢同一把锁时后者等待、持锁进程已退出时锁被回收、清理跳过持锁快照
   - 验证：`pnpm install && pnpm -r build && pnpm -r test`（core 33/33）、`pnpm lint` 通过；独立验证两轮共 16 个问题已修：快照锁改为 link 原子创建 + guard 保护下确认 token 再删除、只释放自己的锁、损坏锁 5 秒后按失效回收，锁测试改为 6 个真实子进程 × 3 轮检查持锁区间不重叠；提交导出由 `git archive` 改为 `ls-tree` + `cat-file --batch` 写出（不受 `.gitattributes` 的 export-ignore / export-subst 影响，与文件清单一致，跳过子模块，目标目录先清空）；git 函数统一按仓库根目录工作并固定 diff 参数（`--no-relative --no-ext-diff --ignore-submodules=all`）；新增 core 日志（stderr，`CODEINSIGHT_LOG` 控制级别）；pyright exclude 按 glob 匹配；`index.db` 损坏时重建。未处理：guard 文件自身的失效回收（持有者卡住超过 10 秒）仍有小概率竞争；schema 版本不一致删库时不检查旧版进程是否还开着库。改动 packages/core/src/{store/data-dir.ts,store/db.ts,git/index.ts,log.ts}、packages/core/test/
 
-- [~] 阶段2：Python 提取层与 scip-python 解析
+- [x] 阶段2：Python 提取层与 scip-python 解析
   - 涉及模块：packages/core/src/{extract,resolve,scip,snapshot}、packages/core/test/fixtures/、packages/cli/src/commands/index.ts
   - 依赖：阶段1
   - 验证方式：独立
   - 内容：web-tree-sitter 加载 Python 语法；提取类、函数、方法、嵌套函数、docstring、body_hash、norm_tokens；display_signature、module 符号；入口识别（4.4 节表格）；token 归一化；解析器接口 `Resolver` 与 `ScipPythonResolver`（运行 scip-python 并传 `--environment`、读取 index.scip、按 4.4 节转换成边、顶层代码引用归属 module 符号）；快照构建流水线（4.5）；`codeinsight index` 命令（含 `--ref`）
   - 完成标准：`pnpm --filter @codeinsight/core test` 通过，fixtures 覆盖别名导入、调用与引用区分、外部符号丢弃、各框架入口；单测覆盖 scip-python 失败时提取结果照常入库、`resolver_status=failed`；设置 `CODEINSIGHT_CLAUVE` 后集成测试通过：在 80cf8e1 上 lease 版 `insert_audit_log` 调用方 7（正式 7、测试 0）、`select_release_by_version` 调用方 30（正式 14、测试 16）、正式代码到测试代码的边为 0，且 clauve 的 `git status --porcelain` 不变
+  - 验证：`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm --filter @codeinsight/core test` 66/66（clauve 80cf8e1：lease 版 `insert_audit_log` 调用方 7（正式 7、测试 0）、`select_release_by_version` 30（正式 14、测试 16）、正式→测试边 0，clauve `git status --porcelain` 前后为空）、`pnpm -r build`、`pnpm lint` 通过；独立验证三轮，问题已修：快照根没有 pyright 配置时在快照副本里写 `{}` 的 pyrightconfig.json，防止 Pyright 把上层工作区当项目根；拿锁后一律重新检查复用，等待过别人时失败结果也直接复用；解析失败的快照下次只重跑解析（提取结果复用）；调用判断只看同一条语句（扫描续行，处理字符串内反斜杠换行和 CRLF）；同名多个定义时引用连到最后一个；docstring 跳过开头注释；去缩进支持 tab；display_signature 保留字符串原文、只去参数列表最外层的尾逗号。取舍：scip-python 固定带 `--project-version`，`--cwd` 用真实路径，索引为空按失败；body_hash 为「装饰器 + 函数体」（不含签名，签名变化看 display_signature），只改装饰器算 modified；类同样含类装饰器和类体（含方法），module 为整个文件，类和模块是否列为 modified 由阶段 3 处理；SCIP 定义对不上超过 1% 时状态仍为 ok，说明写进 resolver_error；构建 warning 不入库，阶段 3 从 resolver_status / resolver_error 生成。改动 packages/core/src/{extract,resolve,scip,snapshot}、packages/core/src/store/db.ts（snapshotStats）、packages/cli/src/commands/index.ts、packages/core/test/
 
-- [ ] 阶段3：结构化 diff、影响面与审查报告
+- [~] 阶段3：结构化 diff、影响面与审查报告
   - 涉及模块：packages/core/src/{review,report,graph}、packages/cli/src/commands/review.ts
   - 依赖：阶段2
   - 验证方式：独立
