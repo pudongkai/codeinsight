@@ -1,6 +1,6 @@
 # CodeInsight P0–P2 技术方案：Python 结构化审查、CLI/MCP 与 JetBrains 插件
 
-开发状态: RUNNING
+开发状态: BLOCKED
 方案评审: 通过（2026-11-11）
 需求来源: 2026-11-11 头脑风暴对话，以及在 clauve、bluewhale 上的验证结论
 作者: steve@data-coding.com　　日期: 2026-11-11
@@ -515,11 +515,12 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
   - 完成标准：`pnpm --filter @codeinsight/web build` 和组件测试通过；Playwright 测试在 fixtures 仓库上启动 serve，自动检查：发起工作区审查后出现改动清单、搜索一个函数后邻居图有预期的调用方、展开一层后节点数增加、无 JS 桥时点击函数显示源码面板；`codeinsight review --repo <fixtures 仓库> --format html --out /tmp/r.html` 生成的文件离线打开能看到改动清单；手工检查：`git clone ~/project/Clauve /tmp/clauve-80cf8e1 && git -C /tmp/clauve-80cf8e1 checkout 80cf8e1`，再 `codeinsight serve --repo /tmp/clauve-80cf8e1 --data-dir /tmp/ci-web --open` 后在浏览器中：对 fc4c752 发起审查能看到审查的全部面板；入口列表里能看到 FastAPI 接口；搜索 `insert_audit_log` 后选 `server/modules/lease/repository.py` 那一份，邻居图左侧有 7 个调用方，展开其中一个能再加载一层；源码面板里点击一个调用能跳到被调用函数的邻居图
   - 验证：`pnpm -r build`（core → web → cli，cli 构建时复制 web 产物到 packages/cli/web/）、`pnpm lint`、`pnpm -r test`（core 121+2 跳过、server 33、cli 12+1 跳过、web 组件 15）通过；`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm --filter @codeinsight/web test:e2e` 通过：fixtures 上工作区审查出现改动清单、搜索后邻居图有预期调用方、展开一层节点数增加、无 JS 桥时显示源码面板、token 不出现在 URL / document.cookie / localStorage；`review --format html --out` 生成的报告以 file:// 离线打开（拦截所有网络请求）能看到改动清单，意图文本里的 `</script>` 按原文显示；clauve 检查（/tmp/clauve-80cf8e1、`--data-dir /tmp/ci-web`）入口列表 151 个 FastAPI 入口、lease 版 `insert_audit_log` 邻居图 7 个调用方、展开一层节点 9→11、源码面板点击调用跳到被调用函数、fc4c752 审查各面板都显示，截图在 /tmp/ci-web-shots/；clauve `git status --porcelain` 前后为空。取舍：结构图只画 1 层邻居（改动函数、topProd 调用方、边变化另一端，最多 60 个改动函数），离线 HTML 报告不调接口也能画；离线报告不含源码，有 JS 桥交给 IDE，否则只提示文件位置；单击设为中心、双击打开源码；`review --open` 隐含 html，不给 `--out` 时写到系统临时目录；HTML 报告带 CSP `default-src 'none'`，约 1.9MB（含 ELK）；Playwright 不在 `pnpm -r test` 里，单独 `test:e2e`。待定：JS 桥 `reviewWorking()` 页面如何响应留到阶段 7；4.4 第 6 条的重复实现误报阈值还没调，待负责人看过界面后决定。改动 packages/web/、packages/cli/src/{commands/review.ts,commands/serve.ts,commands/html-report.ts,open-browser.ts,web-assets.ts}、packages/cli/scripts/copy-web.mjs、packages/core/src/report/types.ts
 
-- [ ] 阶段7：JetBrains 插件
+- [!] 阶段7：JetBrains 插件
   - 涉及模块：plugins/jetbrains
   - 依赖：阶段6
   - 内容：IntelliJ Platform Gradle Plugin 2.x，JDK 21 构建，最低 2025.1（`sinceBuild = 251`），只依赖 `com.intellij.modules.platform`；`pluginVerification { ides { recommended() } }`；设置页（Node 路径、codeinsight 路径、数据目录）；工具窗口：用 `EnvironmentUtil` 的环境查找 Node 并启动和结束 serve 进程、JCEF 加载 Web UI、`onLoadEnd` 时用 `JBCefJSQuery` 注入 JS 桥（`openFile`、`reviewWorking`）、JCEF 不可用时改为外部浏览器打开；`.codeinsight` 排除目录通知；"审查未提交改动"动作；找不到 Node 或 codeinsight 时显示安装指引
   - 完成标准：`./gradlew buildPlugin verifyPlugin` 通过（首次运行会下载被校验的 IDE，需要联网）；单测覆盖 serve 输出解析、Node 查找顺序；手工在 PyCharm 和 IntelliJ IDEA 里（用不需要付费许可的版本）打开小 Python 项目，改动后点"审查未提交改动"能看到报告，点击函数在编辑器中跳到对应行，首次启动时出现"将 .codeinsight 标记为排除目录"通知，点击后该目录变为排除目录且查找用法不再出现快照里的重复结果，从 Dock 启动 IDE 时也能找到 nvm / Homebrew 安装的 Node，关闭项目后 serve 进程退出
+  - 阻塞：构建需要 JDK 21，本机只有 OpenJDK 11（/Users/pudongkai/Library/Java/JavaVirtualMachines/ms-11.0.32.1）。需要负责人决定是否安装 JDK 21（以及用哪个发行版、怎么装），首次 `./gradlew buildPlugin verifyPlugin` 还会联网下载 Gradle 和被校验的 IDE；手工检查需要在 PyCharm 和 IntelliJ IDEA 里装插件操作
 
 ## 9. 待确认问题
 
