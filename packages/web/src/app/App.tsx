@@ -26,7 +26,7 @@ export function App() {
             <BrowseView currentSnapshotId={status?.snapshot?.id} trail={n.trail} onHome={n.home} onPickCrumb={n.pickCrumb} />
           </div>
           <div hidden={n.tab !== 'review'}>
-            <ReviewPage status={status} refreshStatus={() => void refresh()} goneNotice={n.reviewGone} resetGone={n.resetReviewGone} />
+            <ReviewPage status={status} refreshStatus={() => void refresh()} goneNotice={n.reviewGone} resetGone={n.resetReviewGone} onHostReview={() => n.switchTab('review')} />
           </div>
         </div>
         {n.source && (
