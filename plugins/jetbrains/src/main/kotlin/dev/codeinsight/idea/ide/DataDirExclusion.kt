@@ -14,7 +14,7 @@ import com.intellij.openapi.util.Key
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
-import java.nio.file.InvalidPathException
+import dev.codeinsight.idea.serve.ServeInfo
 import java.nio.file.Path
 
 private val LOG = logger<DataDirExclusion>()
@@ -27,23 +27,19 @@ object DataDirExclusion {
     const val NOTIFICATION_GROUP = "CodeInsight"
     private val CHECKED = Key.create<Boolean>("codeinsight.dataDirExclusionChecked")
 
-    /** 与 serve 一致：留空为 `<repo>/.codeinsight`，相对路径按仓库根目录解析；不在仓库内（或就是仓库根）时返回 null */
-    fun dataDirInRepo(repo: Path, setting: String?): Path? {
-        val raw = setting?.trim().orEmpty().ifEmpty { ".codeinsight" }
-        val dir = try {
-            repo.resolve(raw).normalize()
-        } catch (_: InvalidPathException) {
-            return null
-        }
+    /** serve 报告的数据目录在仓库内（且不是仓库根本身）时才需要排除 */
+    fun needsExclusion(repo: Path, dataDir: Path): Boolean {
         val root = repo.normalize()
-        return dir.takeIf { it != root && it.startsWith(root) }
+        val dir = dataDir.normalize()
+        return dir != root && dir.startsWith(root)
     }
 
-    /** 每个项目每次打开只检查一次（后台线程调用） */
-    fun checkOnce(project: Project, repo: Path, setting: String?) {
+    /** 每个项目每次打开只检查一次（后台线程调用）；目录用 serve 输出的实际值 */
+    fun checkOnce(project: Project, info: ServeInfo) {
         if (project.isDisposed || project.getUserData(CHECKED) == true) return
         project.putUserData(CHECKED, true)
-        val dir = dataDirInRepo(repo, setting) ?: return
+        if (!needsExclusion(info.repo, info.dataDir)) return
+        val dir = info.dataDir
         val vf = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(dir) ?: return
         val module = ApplicationManager.getApplication().runReadAction(Computable<Module?> {
             val index = ProjectFileIndex.getInstance(project)

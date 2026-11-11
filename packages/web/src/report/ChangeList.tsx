@@ -1,4 +1,5 @@
 import type { ModuleChange, SymbolChange } from '@codeinsight/core/report/types';
+import { location } from '../format';
 import { CallerCounts, ChangeBadge, EntryTag } from './ChangeBadge';
 
 interface Props {
@@ -15,9 +16,7 @@ function ChangeRow({ c, selected, onSelect }: { c: SymbolChange; selected: boole
       {c.isTest && <span className="tag">测试</span>}
       <EntryTag entry={c.entry} />
       <CallerCounts c={c} />
-      <span className="loc">
-        {c.path}:{c.startLine}
-      </span>
+      <span className="loc">{location(c.path, c.startLine)}</span>
     </li>
   );
 }

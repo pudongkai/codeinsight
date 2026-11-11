@@ -1,7 +1,7 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { completeWithLog, createLlmClient, DEFAULT_ANTHROPIC_MODEL, LlmError, loadConfig, setLogSink } from '../src/index.js';
+import { completeWithLog, createLlmClient, DEFAULT_ANTHROPIC_MODEL, LlmError, LlmTruncatedError, loadConfig, setLogSink } from '../src/index.js';
 import { tempDir } from './helpers/git-repo.js';
 
 interface Captured {
@@ -15,6 +15,9 @@ let server: Server;
 let baseUrl: string;
 const captured: Captured[] = [];
 let failNext = false;
+let truncateNext = false;
+/** 错误响应体里的内容，不能出现在错误信息里 */
+const ECHOED = 'echoed-prompt-text';
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -26,7 +29,11 @@ beforeAll(async () => {
       if (failNext) {
         failNext = false;
         res.statusCode = 529;
-        res.end('{"error":{"type":"overloaded_error"}}');
+        res.end(JSON.stringify({ error: { type: 'overloaded_error', message: ECHOED } }));
+      } else if (truncateNext) {
+        truncateNext = false;
+        if (req.url!.endsWith('/v1/messages')) res.end(JSON.stringify({ content: [{ type: 'text', text: '{"groups":[' }], stop_reason: 'max_tokens' }));
+        else res.end(JSON.stringify({ choices: [{ message: { content: '{"groups":[' }, finish_reason: 'length' }] }));
       } else if (req.url!.endsWith('/v1/messages')) res.end(JSON.stringify({ content: [{ type: 'text', text: '{"groups":[]}' }] }));
       else res.end(JSON.stringify({ choices: [{ message: { content: '{"groups":[]}' } }] }));
     });
@@ -70,16 +77,27 @@ describe('LLM clients against a local fake server', () => {
       const err = await completeWithLog(client, REQ, { items: 3, attempt: 1 }).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(LlmError);
       expect((err as LlmError).status).toBe(529);
+      expect((err as LlmError).message).toBe('HTTP 529 (overloaded_error)');
       expect(captured.at(-1)!.headers.authorization).toBe('Bearer sk-secret-123');
     } finally {
       setLogSink(restore);
       if (level === undefined) delete process.env.CODEINSIGHT_LOG;
       else process.env.CODEINSIGHT_LOG = level;
     }
-    expect(lines.some((l) => l.includes('llm_request') && l.includes('items=3') && l.includes('model=llama'))).toBe(true);
+    expect(lines.some((l) => l.includes('llm_request') && l.includes('items=3') && l.includes('model=llama') && l.includes(`endpoint=${baseUrl}`) && l.includes('maxTokens=100'))).toBe(true);
     expect(lines.some((l) => l.includes('llm_failed') && l.includes('status=529'))).toBe(true);
     expect(lines.join('\n')).not.toContain('sk-secret-123');
     expect(lines.join('\n')).not.toContain('hello');
+    expect(lines.join('\n')).not.toContain(ECHOED);
+  });
+
+  it('raises LlmTruncatedError when the reply hits the output limit', async () => {
+    const anthropic = createLlmClient({ provider: 'anthropic', model: 'm-a', apiKey: 'k', baseUrl });
+    truncateNext = true;
+    await expect(anthropic.complete(REQ)).rejects.toBeInstanceOf(LlmTruncatedError);
+    const openai = createLlmClient({ provider: 'openai-compatible', model: 'llama', baseUrl });
+    truncateNext = true;
+    await expect(openai.complete(REQ)).rejects.toThrow('max_tokens=100');
   });
 
   it('requires an API key for anthropic', () => {
@@ -94,6 +112,8 @@ describe('LLM config', () => {
     expect(DEFAULT_ANTHROPIC_MODEL).toBe('claude-sonnet-5-5');
     const own = await loadConfig(repo, { env: { CODEINSIGHT_LLM_PROVIDER: 'anthropic', CODEINSIGHT_LLM_MODEL: 'claude-other' } });
     expect(own.llm?.model).toBe('claude-other');
-    await expect(loadConfig(repo, { env: { CODEINSIGHT_LLM_PROVIDER: 'openai-compatible' } })).rejects.toThrow('model is missing');
+    const missing = await loadConfig(repo, { env: { CODEINSIGHT_LLM_PROVIDER: 'openai-compatible' } });
+    expect(missing.llm).toBeUndefined();
+    expect(missing.llmProblem).toContain('model is missing');
   });
 });

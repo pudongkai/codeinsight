@@ -1,8 +1,8 @@
 import type { ReviewReport } from '@codeinsight/core/report/types';
-import { useEffect, useRef } from 'react';
-import type { StatusResponse } from '../api/types';
+import { useEffect, useRef, useState } from 'react';
+import type { ReviewParams, StatusResponse } from '../api/types';
 import { useNav } from '../app/nav';
-import { registerPage } from '../bridge';
+import { hostBridge, registerPage } from '../bridge';
 import type { ReportActions, SymbolTarget } from '../report/actions';
 import { ReportView } from '../report/ReportView';
 import { ReviewForm } from './ReviewForm';
@@ -25,20 +25,58 @@ interface Props {
   onHostReview?(): void;
 }
 
-/** 插件发起的工作区审查：切到审查页并显示这次审查的进度和报告 */
-function useHostReviewRequests(start: (p: { working: true }) => void, onHostReview: (() => void) | undefined) {
+/** 表单交给插件后最多等这么久回调；超时后放开表单，避免插件没响应时一直不能再提交 */
+export const HOST_REVIEW_TIMEOUT_MS = 10_000;
+export const HOST_TIMEOUT_NOTICE = 'IDE 没有响应保存请求，请重新发起审查。';
+
+/**
+ * 工作区审查要让 IDE 先保存编辑器：有 JS 桥时页面表单不直接发起，而是调用插件的 reviewWorking，
+ * 插件保存后回调 codeinsightPage.reviewWorking，由它带上表单参数发起审查。
+ * 等待回调期间 waiting 为 true，表单不可再提交，避免连点发起两次、第二次丢掉表单参数；超时后放开并给出提示。
+ * codeinsightPage.reviewWorking 自己总是直接发起审查，不会再回到插件，避免来回调用。
+ */
+function useWorkingReview(start: (p: ReviewParams) => void, onHostReview: (() => void) | undefined) {
   const latest = useRef({ start, onHostReview });
   latest.current = { start, onHostReview };
-  useEffect(
-    () =>
-      registerPage({
-        reviewWorking: () => {
-          latest.current.onHostReview?.();
-          latest.current.start({ working: true });
-        },
-      }),
-    [],
-  );
+  // 表单交给插件后等待回调时的参数；插件自己的"审查未提交改动"动作没有表单参数
+  const pending = useRef<ReviewParams | undefined>(undefined);
+  const timer = useRef<number | undefined>(undefined);
+  const [waiting, setWaiting] = useState(false);
+  const [notice, setNotice] = useState<string>();
+  const settle = (timedOut: boolean) => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    pending.current = undefined;
+    setWaiting(false);
+    setNotice(timedOut ? HOST_TIMEOUT_NOTICE : undefined);
+  };
+  const settleRef = useRef(settle);
+  settleRef.current = settle;
+  useEffect(() => {
+    const unregister = registerPage({
+      reviewWorking: () => {
+        const params = pending.current ?? { working: true };
+        settleRef.current(false);
+        latest.current.onHostReview?.();
+        latest.current.start(params);
+      },
+    });
+    return () => {
+      unregister();
+      window.clearTimeout(timer.current);
+    };
+  }, []);
+  const submit = (params: ReviewParams) => {
+    const host = hostBridge();
+    if (!params.working || typeof host?.reviewWorking !== 'function') return start(params);
+    if (pending.current) return;
+    pending.current = params;
+    setWaiting(true);
+    setNotice(undefined);
+    timer.current = window.setTimeout(() => settleRef.current(true), HOST_REVIEW_TIMEOUT_MS);
+    host.reviewWorking();
+  };
+  return { submit, waiting, notice };
 }
 
 function useReportActions(report: ReviewReport | undefined): ReportActions | undefined {
@@ -57,7 +95,7 @@ function useReportActions(report: ReviewReport | undefined): ReportActions | und
 /** 审查页：发起审查、进度、历史记录和报告 */
 export function ReviewPage({ status, refreshStatus, goneNotice, resetGone, onHostReview }: Props) {
   const { id, job, error, start, open } = useReviewJob(refreshStatus);
-  useHostReviewRequests((p) => void start(p), onHostReview);
+  const host = useWorkingReview((p) => void start(p), onHostReview);
   useEffect(resetGone, [id]);
   const report = job?.status === 'done' ? job.report : undefined;
   const probeGone = useSnapshotProbe(report);
@@ -65,11 +103,12 @@ export function ReviewPage({ status, refreshStatus, goneNotice, resetGone, onHos
   return (
     <div className="review-page" data-testid="review-page">
       <div className="review-side">
-        <ReviewForm llmConfigured={status?.llmConfigured ?? false} busy={job?.status === 'running'} onSubmit={(p) => void start(p)} />
+        <ReviewForm llmConfigured={status?.llmConfigured ?? false} busy={job?.status === 'running' || host.waiting} busyText={host.waiting ? '等待 IDE 保存…' : undefined} onSubmit={host.submit} />
         <ReviewHistory reviews={status?.reviews ?? []} currentId={id} onOpen={open} />
       </div>
       <div className="review-main">
         {error && <div className="error">{error}</div>}
+        {host.notice && <div className="error" data-testid="host-timeout">{host.notice}</div>}
         {job?.status === 'running' && <div className="panel" data-testid="review-progress">审查 #{job.id} 进行中：{STEPS[job.progress ?? ''] ?? '确定版本和改动文件'}…</div>}
         {job?.status === 'failed' && <div className="error" data-testid="review-failed">审查 #{job.id} 失败：{job.error}</div>}
         {report && <ReportView report={report} actions={actions} notice={probeGone || goneNotice ? SNAPSHOT_GONE_NOTICE : undefined} />}

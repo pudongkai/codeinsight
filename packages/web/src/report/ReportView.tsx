@@ -2,6 +2,7 @@ import type { ReviewReport, SymbolChange } from '@codeinsight/core/report/types'
 import { REPORT_SCHEMA_VERSION } from '@codeinsight/core/report/types';
 import { useState } from 'react';
 import { openInHost } from '../bridge';
+import { location } from '../format';
 import type { ReportActions, SymbolTarget } from './actions';
 import { ChangeList } from './ChangeList';
 import { DuplicatesPanel } from './DuplicatesPanel';
@@ -26,7 +27,7 @@ function useOpener(actions: ReportActions | undefined) {
   const open = (t: SymbolTarget) => {
     if (openInHost({ path: t.path, line: t.startLine, removed: t.removed })) return;
     if (actions) actions.showSource(t);
-    else setOffline(`离线报告不含源码，位置：${t.path}:${t.startLine}`);
+    else setOffline(`离线报告不含源码，位置：${location(t.path, t.startLine)}`);
   };
   return { open, offline };
 }

@@ -1,4 +1,5 @@
 import type { SymbolChangeKind } from '../report/types.js';
+import { groupBy } from '../util/collections.js';
 
 /** 结构摘要里的一个改动符号；只有结构信息，不含函数体 */
 export interface IntentItem {
@@ -50,13 +51,8 @@ function itemLine(i: IntentItem): string {
 }
 
 function groupItems(items: IntentItem[]): Map<string, IntentItem[]> {
-  const out = new Map<string, IntentItem[]>();
-  for (const i of [...items].sort((a, b) => a.module.localeCompare(b.module) || a.key.localeCompare(b.key))) {
-    const list = out.get(i.module);
-    if (list) list.push(i);
-    else out.set(i.module, [i]);
-  }
-  return out;
+  const sorted = [...items].sort((a, b) => a.module.localeCompare(b.module) || a.key.localeCompare(b.key));
+  return groupBy(sorted, (i) => i.module);
 }
 
 /**

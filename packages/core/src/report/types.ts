@@ -113,9 +113,26 @@ export type WarningCode =
   | 'llm_disabled'
   | 'llm_failed'
   | 'llm_invalid_response'
+  | 'llm_truncated'
   | 'intent_missing'
   | 'intent_truncated'
+  | 'intent_no_symbols'
+  | 'config_llm_key_ignored'
   | (string & {});
+
+/**
+ * 出现这些 code 时意图检查没有给出结果，界面用它们说明没做检查的原因。
+ * intent_truncated 只是部分符号没发送、检查仍有结果，config_llm_key_ignored 是配置提示，都不在其中。
+ */
+export const INTENT_SKIP_CODES: readonly WarningCode[] = [
+  'llm_not_configured',
+  'llm_disabled',
+  'llm_failed',
+  'llm_invalid_response',
+  'llm_truncated',
+  'intent_missing',
+  'intent_no_symbols',
+];
 
 export interface Warning {
   code: WarningCode;

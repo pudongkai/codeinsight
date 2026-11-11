@@ -34,7 +34,8 @@ export function useNavigation(refreshStatus: () => void) {
       refreshStatus();
       setTrail([]);
       setSource(undefined);
-      if (origin === 'review') {
+      // 审查页里打开的源码，或从审查报告进入的邻居图：回到审查页并在报告上提示
+      if (tab === 'review' || origin === 'review') {
         setReviewGone(true);
         setTab('review');
       } else setBanner('索引已更新，原来的快照已清理，已回到入口列表。');

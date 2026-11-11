@@ -17,7 +17,6 @@ import dev.codeinsight.idea.serve.ServeInfo
 import dev.codeinsight.idea.serve.ServeLaunchException
 import dev.codeinsight.idea.serve.ServeProcess
 import dev.codeinsight.idea.settings.CodeInsightProjectSettings
-import java.nio.file.Files
 import java.nio.file.Path
 
 private val LOG = logger<CodeInsightService>()
@@ -45,8 +44,8 @@ class CodeInsightService(private val project: Project) : Disposable {
     private var generation = 0
     private val listeners = mutableListOf<(ServeState) -> Unit>()
 
-    /** 仓库根目录：项目目录或它上层第一个含 `.git` 的目录 */
-    val repoRoot: Path? by lazy { project.guessProjectDir()?.toNioPathOrNull()?.let(::findGitRoot) }
+    /** 传给 serve 的 `--repo`；仓库根目录由 serve 定位，见 [ServeInfo.repo] */
+    private val projectDir: Path? by lazy { project.guessProjectDir()?.toNioPathOrNull() }
 
     fun addListener(parent: Disposable, listener: (ServeState) -> Unit) {
         synchronized(listeners) { listeners += listener }
@@ -60,7 +59,7 @@ class CodeInsightService(private val project: Project) : Disposable {
             generation += 1
             generation
         }
-        val repo = repoRoot ?: return publish(gen, ServeState.NoProject)
+        val repo = projectDir ?: return publish(gen, ServeState.NoProject)
         publish(gen, ServeState.Starting)
         AppExecutorUtil.getAppExecutorService().execute { launch(gen, repo) }
     }
@@ -80,7 +79,7 @@ class CodeInsightService(private val project: Project) : Disposable {
         val next = try {
             when (val r = resolveServeCommand(repo, dataDir)) {
                 is Resolution.Missing -> ServeState.Missing(r.what)
-                is Resolution.Ready -> startProcess(gen, r)
+                is Resolution.Ready -> startProcess(gen, r, repo)
             }
         } catch (e: ServeLaunchException) {
             LOG.warn("serve failed to start: ${e.message}")
@@ -90,10 +89,10 @@ class CodeInsightService(private val project: Project) : Disposable {
             ServeState.Failed(e.message ?: e.javaClass.simpleName, emptyList())
         }
         publish(gen, next)
-        if (next is ServeState.Running) DataDirExclusion.checkOnce(project, repo, dataDir)
+        if (next is ServeState.Running) DataDirExclusion.checkOnce(project, next.info)
     }
 
-    private fun startProcess(gen: Int, ready: Resolution.Ready): ServeState {
+    private fun startProcess(gen: Int, ready: Resolution.Ready, projectDir: Path): ServeState {
         val p = ServeProcess.start(ready.command)
         synchronized(this) {
             if (gen != generation || project.isDisposed) {
@@ -103,7 +102,7 @@ class CodeInsightService(private val project: Project) : Disposable {
             process = p
         }
         p.onExit { code -> onProcessExit(gen, p, code) }
-        return ServeState.Running(p.info)
+        return ServeState.Running(p.info.localizedTo(projectDir))
     }
 
     private fun onProcessExit(gen: Int, p: ServeProcess, code: Int) {
@@ -126,29 +125,23 @@ class CodeInsightService(private val project: Project) : Disposable {
         }, project.disposed)
     }
 
-    private fun stopProcess() {
-        val p = synchronized(this) {
-            generation += 1
-            process.also { process = null }
-        }
-        p?.stop()
+    private fun detachProcess(): ServeProcess? = synchronized(this) {
+        generation += 1
+        process.also { process = null }
     }
 
+    /** 会等待旧进程退出，只在后台线程调用 */
+    private fun stopProcess() {
+        detachProcess()?.stop()
+    }
+
+    /** 项目关闭时在 EDT 上调用：只发出退出请求，等待和强杀在后台进行，不卡界面 */
     override fun dispose() {
-        stopProcess()
+        detachProcess()?.stopAsync()
     }
 
     companion object {
         fun getInstance(project: Project): CodeInsightService = project.service()
-
-        fun findGitRoot(start: Path): Path {
-            var dir: Path? = start
-            while (dir != null) {
-                if (Files.exists(dir.resolve(".git"))) return dir
-                dir = dir.parent
-            }
-            return start
-        }
     }
 }
 

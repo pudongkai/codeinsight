@@ -14,6 +14,10 @@
     "./report/types": {
       "types": "./dist/report/types.d.ts",
       "default": "./dist/report/types.js"
+    },
+    "./util/collections": {
+      "types": "./dist/util/collections.d.ts",
+      "default": "./dist/util/collections.js"
     }
   },
   "scripts": {

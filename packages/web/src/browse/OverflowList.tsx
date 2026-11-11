@@ -1,3 +1,4 @@
+import { groupBy } from '@codeinsight/core/util/collections';
 import type { NNode } from './neighbor-model';
 
 interface Props {
@@ -8,9 +9,7 @@ interface Props {
 }
 
 function groupByFile(nodes: NNode[]): [string, NNode[]][] {
-  const groups = new Map<string, NNode[]>();
-  for (const n of nodes) groups.set(n.info.path, [...(groups.get(n.info.path) ?? []), n]);
-  return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  return [...groupBy(nodes, (n) => n.info.path)].sort(([a], [b]) => a.localeCompare(b));
 }
 
 /** 折叠掉的调用方 / 被调用方，按文件分组 */

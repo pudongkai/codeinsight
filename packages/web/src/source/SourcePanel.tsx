@@ -1,4 +1,5 @@
 import type { SymbolInfo } from '../api/types';
+import { location } from '../format';
 import { splitLine, type CallSite } from './call-sites';
 import { useSource, type SourceTarget } from './useSource';
 
@@ -35,11 +36,11 @@ export function SourcePanel({ target, onNavigate, onClose, onGone }: Props) {
   return (
     <aside className="panel source-panel" data-testid="source-panel">
       <div className="panel-head">
-        <h3>{data ? `${data.symbol.qualifiedName}  ${data.symbol.path}:${data.symbol.startLine}` : '源码'}</h3>
+        <h3>{data ? `${data.symbol.qualifiedName}  ${location(data.symbol.path, data.symbol.startLine)}` : '源码'}</h3>
         <button type="button" className="small" onClick={onClose}>关闭</button>
       </div>
       {loading && <p className="muted">加载中…</p>}
-      {error && <div className="error">{error}</div>}
+      {error && <div className="error">读取源码失败：{error}</div>}
       {data && (
         <pre className="src" data-testid="source-code">
           {lines.map((text, i) => {

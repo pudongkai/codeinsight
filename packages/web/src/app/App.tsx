@@ -9,7 +9,7 @@ import { useStatus } from './useStatus';
 /** serve 托管的页面：浏览视图和审查页，右侧为源码面板 */
 export function App() {
   const { status, error, refresh, reindex } = useStatus();
-  const n = useNavigation(() => void refresh());
+  const n = useNavigation(refresh);
   return (
     <NavContext.Provider value={n.nav}>
       <header>
@@ -26,11 +26,12 @@ export function App() {
             <BrowseView currentSnapshotId={status?.snapshot?.id} trail={n.trail} onHome={n.home} onPickCrumb={n.pickCrumb} />
           </div>
           <div hidden={n.tab !== 'review'}>
-            <ReviewPage status={status} refreshStatus={() => void refresh()} goneNotice={n.reviewGone} resetGone={n.resetReviewGone} onHostReview={() => n.switchTab('review')} />
+            <ReviewPage status={status} refreshStatus={refresh} goneNotice={n.reviewGone} resetGone={n.resetReviewGone} onHostReview={() => n.switchTab('review')} />
           </div>
         </div>
         {n.source && (
           <SourcePanel
+            key={`${n.source.snapshotId}:${n.source.symbolId}`}
             target={n.source}
             onClose={n.closeSource}
             onGone={n.nav.snapshotGone}

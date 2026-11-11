@@ -37,6 +37,8 @@ type ClientResult = { client: LlmClient } | { warning: Warning };
 
 function llmClient(opts: ReviewOptions): ClientResult | undefined {
   if (opts.llmClient) return { client: opts.llmClient };
+  const problem = opts.config.llmProblem;
+  if (problem) return { warning: { code: 'llm_not_configured', level: 'warning', message: `intent check skipped: invalid LLM configuration: ${problem}` } };
   if (!opts.config.llm) return undefined;
   try {
     return { client: createLlmClient(opts.config.llm) };
@@ -74,7 +76,10 @@ export async function checkIntent(opts: ReviewOptions, intent: ReviewReport['int
     log.info('intent_skipped', { reason: 'llm_not_configured' });
     return info('llm_not_configured', 'intent check skipped: no LLM configured (set llm in codeinsight.config.json or CODEINSIGHT_LLM_PROVIDER)');
   }
-  if ('warning' in c) return { warnings: [c.warning] };
+  if ('warning' in c) {
+    log.info('intent_skipped', { reason: 'llm_not_configured', detail: c.warning.message });
+    return { warnings: [c.warning] };
+  }
   if (!intent?.text.trim()) {
     log.info('intent_skipped', { reason: 'no_intent_text' });
     return { warnings: [{ code: 'intent_missing', level: 'warning', message: 'intent check skipped: no intent text (use --intent or --intent-file when reviewing the working tree)' }] };

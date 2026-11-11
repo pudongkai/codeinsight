@@ -1,5 +1,5 @@
 /** HTTP API 的响应形状（与 packages/server/src/http/routes 一致） */
-import type { ReviewReport, SymbolRef } from '@codeinsight/core/report/types';
+import type { ReviewReport } from '@codeinsight/core/report/types';
 
 export interface SymbolInfo {
   id: string;
@@ -121,10 +121,4 @@ export interface SourceResponse {
   end: number;
   totalLines: number;
   content: string;
-}
-
-export interface SimilarResponse {
-  snapshotId: number;
-  minScore: number;
-  candidates: { symbol: SymbolRef; score: number; reasons: string[] }[];
 }

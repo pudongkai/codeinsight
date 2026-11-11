@@ -1,45 +1,69 @@
 package dev.codeinsight.idea.ide
 
-import dev.codeinsight.idea.CodeInsightService
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
 import java.nio.file.Path
 
 class PathRulesTest {
-    private val repo = Path.of("/work/repo")
+    private val tmp: Path = Files.createTempDirectory("ci-paths").toRealPath()
+    private val repo: Path = Files.createDirectories(tmp.resolve("repo"))
+    private val outside: Path = Files.createDirectories(tmp.resolve("outside"))
+
+    @After
+    fun cleanup() {
+        tmp.toFile().deleteRecursively()
+    }
+
+    private fun file(dir: Path, rel: String): Path {
+        val p = dir.resolve(rel)
+        Files.createDirectories(p.parent)
+        return Files.writeString(p, "x")
+    }
 
     @Test
-    fun `openFile only accepts relative paths inside the repository`() {
-        assertEquals(Path.of("/work/repo/pkg/a.py"), SourceNavigator.resolveInRepo(repo, "pkg/a.py"))
-        assertEquals(Path.of("/work/repo/a.py"), SourceNavigator.resolveInRepo(repo, "pkg/../a.py"))
-        assertNull(SourceNavigator.resolveInRepo(repo, "../other/a.py"))
-        assertNull(SourceNavigator.resolveInRepo(repo, "/etc/passwd"))
+    fun `openFile only accepts existing relative paths inside the repository`() {
+        val a = file(repo, "pkg/a.py")
+        val top = file(repo, "a.py")
+        file(outside, "a.py")
+        assertEquals(a, SourceNavigator.resolveInRepo(repo, "pkg/a.py"))
+        assertEquals(top, SourceNavigator.resolveInRepo(repo, "pkg/../a.py"))
+        assertNull(SourceNavigator.resolveInRepo(repo, "../outside/a.py"))
+        assertNull(SourceNavigator.resolveInRepo(repo, outside.resolve("a.py").toString()))
+        assertNull(SourceNavigator.resolveInRepo(repo, "pkg/missing.py"))
         assertNull(SourceNavigator.resolveInRepo(repo, ""))
         assertNull(SourceNavigator.resolveInRepo(repo, "."))
     }
 
     @Test
-    fun `data directory is resolved like serve and only checked when inside the repository`() {
-        assertEquals(Path.of("/work/repo/.codeinsight"), DataDirExclusion.dataDirInRepo(repo, null))
-        assertEquals(Path.of("/work/repo/.codeinsight"), DataDirExclusion.dataDirInRepo(repo, "  "))
-        assertEquals(Path.of("/work/repo/build/ci"), DataDirExclusion.dataDirInRepo(repo, "build/ci"))
-        assertEquals(Path.of("/work/repo/x"), DataDirExclusion.dataDirInRepo(repo, "/work/repo/x"))
-        assertNull(DataDirExclusion.dataDirInRepo(repo, "/tmp/ci"))
-        assertNull(DataDirExclusion.dataDirInRepo(repo, "../ci"))
-        assertNull(DataDirExclusion.dataDirInRepo(repo, "."))
+    fun `openFile rejects symbolic links inside the repository that point outside it`() {
+        val secret = file(outside, ".ssh/id_rsa")
+        Files.createSymbolicLink(repo.resolve("link"), secret.parent)
+        Files.createSymbolicLink(repo.resolve("key"), secret)
+        assertNull(SourceNavigator.resolveInRepo(repo, "link/id_rsa"))
+        assertNull(SourceNavigator.resolveInRepo(repo, "key"))
     }
 
     @Test
-    fun `repository root is the nearest ancestor with a git directory`() {
-        val root = Files.createTempDirectory("ci-git")
-        try {
-            Files.createDirectories(root.resolve(".git"))
-            val sub = Files.createDirectories(root.resolve("a/b"))
-            assertEquals(root, CodeInsightService.findGitRoot(sub))
-        } finally {
-            root.toFile().deleteRecursively()
-        }
+    fun `openFile accepts links that stay inside the repository and keeps the path the IDE uses`() {
+        val real = file(repo, "src/real.py")
+        Files.createSymbolicLink(repo.resolve("alias.py"), real)
+        assertEquals(repo.resolve("alias.py"), SourceNavigator.resolveInRepo(repo, "alias.py"))
+        val repoLink = Files.createSymbolicLink(tmp.resolve("repo-link"), repo)
+        assertEquals(repoLink.resolve("src/real.py"), SourceNavigator.resolveInRepo(repoLink, "src/real.py"))
+    }
+
+    @Test
+    fun `data directory reported by serve needs exclusion only when it is inside the repository`() {
+        val root = Path.of("/work/repo")
+        assertTrue(DataDirExclusion.needsExclusion(root, Path.of("/work/repo/.codeinsight")))
+        assertTrue(DataDirExclusion.needsExclusion(root, Path.of("/work/repo/build/ci")))
+        assertFalse(DataDirExclusion.needsExclusion(root, Path.of("/tmp/ci")))
+        assertFalse(DataDirExclusion.needsExclusion(root, Path.of("/work/repo-other")))
+        assertFalse(DataDirExclusion.needsExclusion(root, root))
     }
 }

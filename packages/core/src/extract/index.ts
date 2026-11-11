@@ -5,7 +5,7 @@ import { extractPythonFile, type FileFlags } from './python.js';
 import type { ExtractedEntry, ExtractedFile } from './types.js';
 
 export * from './types.js';
-export { bodySimilarity, normalizeTokens, shingleJaccard, shingles, SHINGLE_SIZE } from './normalize.js';
+export { bodySimilarity, normalizeTokens, shingles, SHINGLE_SIZE } from './normalize.js';
 export { extractPythonFile, moduleDottedName, restoreExtractedFile, sha1 } from './python.js';
 export { getPythonParser } from './parser.js';
 

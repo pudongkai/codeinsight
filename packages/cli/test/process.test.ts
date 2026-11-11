@@ -72,6 +72,81 @@ describe('codeinsight serve process', () => {
   });
 });
 
+describe('codeinsight serve --exit-on-stdin-close', () => {
+  it('shuts down like SIGTERM when stdin is closed', async () => {
+    const dataDir = tempDir('ci-proc-data-');
+    const pidFile = path.join(tempDir('ci-proc-pid-'), 'pid');
+    const child = spawn(process.execPath, [SERVE_HELPER, FAKE_SCIP, '--repo', makeRepo(), '--data-dir', dataDir, '--exit-on-stdin-close'], {
+      env: { ...baseEnv(), FAKE_SCIP_PID_FILE: pidFile },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+    try {
+      await until(() => existsSync(pidFile) && stdout.includes('\n'));
+      const scipPid = Number(readFileSync(pidFile, 'utf8'));
+      expect(alive(scipPid)).toBe(true);
+      child.stdin.end();
+      expect(await exited).toBe(0);
+      expect(stderr).toContain('stdin_closed');
+      await until(() => !alive(scipPid), 5000);
+      expect(readdirSync(path.join(dataDir, 'scip')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }
+  });
+
+  it('ignores a SIGTERM that arrives while shutting down and still cleans up scip-python', async () => {
+    const dataDir = tempDir('ci-proc-data-');
+    const pidFile = path.join(tempDir('ci-proc-pid-'), 'pid');
+    const child = spawn(process.execPath, [SERVE_HELPER, FAKE_SCIP, '--repo', makeRepo(), '--data-dir', dataDir, '--exit-on-stdin-close'], {
+      env: { ...baseEnv(), FAKE_SCIP_PID_FILE: pidFile, SERVE_HELPER_SIGTERM_ON_STDIN_END: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+    try {
+      await until(() => existsSync(pidFile) && stdout.includes('\n'));
+      const scipPid = Number(readFileSync(pidFile, 'utf8'));
+      child.stdin.end();
+      expect(await exited).toBe(0);
+      expect(stderr).toContain('stdin_closed');
+      expect(stderr).toContain('serve_signal_ignored');
+      expect(stderr).toContain('serve_stopped');
+      await until(() => !alive(scipPid), 5000);
+      expect(readdirSync(path.join(dataDir, 'scip')).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }
+  });
+
+  it('keeps running after stdin is closed without the option', async () => {
+    const child = spawn(process.execPath, [MAIN, 'serve', '--repo', makeRepo(), '--data-dir', tempDir('ci-proc-data-')], {
+      env: { ...baseEnv(), CODEINSIGHT_LOG: 'silent' },
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    let stdout = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    const exited = new Promise<number | null>((r) => child.once('exit', (code) => r(code)));
+    try {
+      await until(() => stdout.includes('\n'));
+      child.stdin.end();
+      await new Promise((r) => setTimeout(r, 500));
+      expect(child.exitCode).toBeNull();
+      child.kill('SIGTERM');
+      expect(await exited).toBe(0);
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }
+  });
+});
+
 describe('codeinsight mcp process', () => {
   it('serves a tool over stdio and writes nothing but JSON-RPC to stdout', async () => {
     const transport = new StdioClientTransport({

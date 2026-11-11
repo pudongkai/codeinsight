@@ -1,6 +1,22 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildStructureSummary, initDataDir, loadConfig, runIntentCheck, runReview, Store } from '../src/index.js';
+import {
+  buildStructureSummary,
+  initDataDir,
+  intentCacheKey,
+  LlmTruncatedError,
+  loadConfig,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  maxOutputTokens,
+  MIN_RESPONSE_TOKENS,
+  responseTokenLimit,
+  runIntentCheck,
+  runReview,
+  setLogSink,
+  Store,
+  UNGROUPED_SUMMARY,
+} from '../src/index.js';
 import type { IntentItem, LlmClient, LlmRequest, ReviewOptions, ReviewReport, SymbolRef } from '../src/index.js';
 import { commitAll, initRepo, tempDir, writeFiles } from './helpers/git-repo.js';
 
@@ -8,7 +24,7 @@ import { commitAll, initRepo, tempDir, writeFiles } from './helpers/git-repo.js'
 class FakeLlm implements LlmClient {
   readonly provider = 'fake';
   readonly calls: LlmRequest[] = [];
-  constructor(private readonly replies: (string | Error)[], readonly model = 'fake-model') {}
+  constructor(private readonly replies: (string | Error)[], readonly model = 'fake-model', readonly baseUrl?: string) {}
   complete(req: LlmRequest): Promise<string> {
     this.calls.push(structuredClone(req));
     const r = this.replies[Math.min(this.calls.length - 1, this.replies.length - 1)]!;
@@ -117,13 +133,125 @@ describe('intent check with a fake LLM', () => {
   });
 });
 
+/** 收集一段代码运行期间的日志行（临时打开全部级别，不受外部 CODEINSIGHT_LOG 影响） */
+async function captureLogs<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const lines: string[] = [];
+  const restore = setLogSink((l) => lines.push(l));
+  const level = process.env.CODEINSIGHT_LOG;
+  process.env.CODEINSIGHT_LOG = 'debug';
+  try {
+    return { result: await fn(), lines };
+  } finally {
+    setLogSink(restore);
+    if (level === undefined) delete process.env.CODEINSIGHT_LOG;
+    else process.env.CODEINSIGHT_LOG = level;
+  }
+}
+
+describe('intent check robustness', () => {
+  it('lets two concurrent checks write the same cache key', async () => {
+    const cacheDir = tempDir('ci-llm-cache-');
+    const [a, b] = await Promise.all([runIntentCheck(input(new FakeLlm([GOOD_REPLY]), cacheDir)), runIntentCheck(input(new FakeLlm([GOOD_REPLY]), cacheDir))]);
+    expect(a.findings).toHaveLength(2);
+    expect(b.findings).toEqual(a.findings);
+    expect(readdirSync(cacheDir)).toHaveLength(1);
+    expect(readdirSync(cacheDir)[0]).toMatch(/^[0-9a-f]{64}\.json$/);
+  });
+
+  it('still returns the result when the cache cannot be written', async () => {
+    const blocker = path.join(tempDir('ci-llm-cache-'), 'not-a-dir');
+    writeFileSync(blocker, '');
+    const { result, lines } = await captureLogs(() => runIntentCheck(input(new FakeLlm([GOOD_REPLY]), path.join(blocker, 'llm-cache'))));
+    expect(result.warnings).toEqual([]);
+    expect(result.findings).toHaveLength(2);
+    expect(lines.some((l) => l.includes('WARN llm_cache_write_failed'))).toBe(true);
+  });
+
+  it('stops with llm_truncated when the reply hits the output limit, without retrying or caching', async () => {
+    const cacheDir = tempDir('ci-llm-cache-');
+    const llm = new FakeLlm([new LlmTruncatedError(1234)]);
+    const r = await runIntentCheck(input(llm, cacheDir));
+    expect(llm.calls).toHaveLength(1);
+    expect(r.findings).toBeUndefined();
+    expect(r.warnings).toMatchObject([{ code: 'llm_truncated', level: 'warning', message: expect.stringContaining('1234') }]);
+    expect(r.warnings[0]!.message).toContain('CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS');
+    expect(readdirSync(cacheDir)).toEqual([]);
+  });
+
+  it('sizes the output limit by the number of symbols, within the bounds', async () => {
+    const llm = new FakeLlm([GOOD_REPLY]);
+    await runIntentCheck(input(llm));
+    expect(llm.calls[0]!.maxTokens).toBe(responseTokenLimit(ITEMS.map((i) => i.key)));
+    expect(responseTokenLimit([])).toBe(MIN_RESPONSE_TOKENS);
+    expect(responseTokenLimit(['a#function#b#'])).toBeGreaterThan(MIN_RESPONSE_TOKENS);
+    expect(responseTokenLimit(Array.from({ length: 2000 }, (_, i) => `pkg/m.py#function#f${i}#`), DEFAULT_MAX_OUTPUT_TOKENS)).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
+  });
+
+  it('caps the output limit by CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS, ignoring invalid values', async () => {
+    const many = Array.from({ length: 2000 }, (_, i) => `pkg/m.py#function#f${i}#`);
+    expect(maxOutputTokens({})).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
+    expect(maxOutputTokens({ CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS: '4096' })).toBe(4096);
+    expect(responseTokenLimit(many, maxOutputTokens({ CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS: '4096' }))).toBe(4096);
+    expect(responseTokenLimit(many, maxOutputTokens({ CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS: '32000' }))).toBe(32000);
+    for (const bad of ['abc', '0', '-5', '1.5']) {
+      const { result, lines } = await captureLogs(async () => maxOutputTokens({ CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS: bad }));
+      expect(result).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
+      expect(lines.some((l) => l.includes('WARN llm_max_output_tokens_invalid'))).toBe(true);
+    }
+  });
+
+  it('sends the cap from the environment variable with the request', async () => {
+    const prev = process.env.CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS;
+    process.env.CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS = '1050';
+    try {
+      const llm = new FakeLlm([GOOD_REPLY]);
+      await runIntentCheck(input(llm));
+      expect(llm.calls[0]!.maxTokens).toBe(1050);
+    } finally {
+      if (prev === undefined) delete process.env.CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS;
+      else process.env.CODEINSIGHT_LLM_MAX_OUTPUT_TOKENS = prev;
+    }
+  });
+
+  it('puts symbols the model left out into an unclear group and shows each symbol once', async () => {
+    const reply = JSON.stringify({
+      groups: [
+        { verdict: 'mentioned', summary: 'Login', symbols: ['pkg/a.py#function#login#', 'pkg/a.py#function#login#'] },
+        { verdict: 'unmentioned', summary: 'Login again', symbols: ['pkg/a.py#function#login#'] },
+      ],
+    });
+    const r = await runIntentCheck(input(new FakeLlm([reply])));
+    expect(r.findings!.map((f) => ({ verdict: f.verdict, summary: f.summary, keys: f.symbols.map((s) => s.key), modules: f.modules }))).toEqual([
+      { verdict: 'mentioned', summary: 'Login', keys: ['pkg/a.py#function#login#'], modules: ['pkg'] },
+      { verdict: 'unclear', summary: UNGROUPED_SUMMARY, keys: ['admin/org.py#function#create_org#', 'pkg/a.py#function#lock_after_failures#'], modules: ['admin', 'pkg'] },
+    ]);
+  });
+
+  it('does not call the LLM when there are no changed symbols', async () => {
+    const llm = new FakeLlm([new Error('must not be called')]);
+    const r = await runIntentCheck({ ...input(llm), items: [], refs: new Map() });
+    expect(llm.calls).toHaveLength(0);
+    expect(r.findings).toBeUndefined();
+    expect(r.warnings).toMatchObject([{ code: 'intent_no_symbols', level: 'info' }]);
+  });
+
+  it('keys the cache by provider and base URL as well as the model', () => {
+    const base = intentCacheKey({ provider: 'openai-compatible', model: 'm', baseUrl: 'http://a/v1' }, 'i', 's');
+    expect(intentCacheKey({ provider: 'openai-compatible', model: 'm', baseUrl: 'http://b/v1' }, 'i', 's')).not.toBe(base);
+    expect(intentCacheKey({ provider: 'anthropic', model: 'm', baseUrl: 'http://a/v1' }, 'i', 's')).not.toBe(base);
+    expect(intentCacheKey({ provider: 'openai-compatible', model: 'm', baseUrl: 'http://a/v1' }, 'i', 's')).toBe(base);
+  });
+});
+
 const V1: Record<string, string> = {
   'pkg/__init__.py': '',
   'pkg/auth.py': ['def login(user):', '    """Log a user in."""', "    return 'SECRET_BODY_MARKER'", ''].join('\n'),
 };
 
-async function reviewRepo(extra: Partial<ReviewOptions> & { configEnv?: NodeJS.ProcessEnv; working?: boolean } = {}): Promise<{ report: ReviewReport; cacheDir: string }> {
-  const repo = initRepo(V1);
+type ReviewExtra = Partial<ReviewOptions> & { configEnv?: NodeJS.ProcessEnv; working?: boolean; repoConfig?: unknown };
+
+async function reviewRepo(extra: ReviewExtra = {}): Promise<{ report: ReviewReport; cacheDir: string }> {
+  const repo = initRepo(extra.repoConfig ? { ...V1, 'codeinsight.config.json': JSON.stringify(extra.repoConfig) } : V1);
   writeFiles(repo, { 'pkg/auth.py': V1['pkg/auth.py']! + ['', '', 'def lock(user):', '    """Lock the account."""', '    user.locked = True', '    return user', ''].join('\n') });
   if (!extra.working) commitAll(repo, 'Lock accounts after failed logins');
   const config = await loadConfig(repo, { dataDir: tempDir('ci-data-'), env: extra.configEnv ?? {} });
@@ -176,6 +304,16 @@ describe('review step 9: intent check', () => {
     const without = await reviewRepo({ working: true, llmClient: new FakeLlm([reply]) });
     expect(without.report.intentCheck).toBeUndefined();
     expect(without.report.warnings).toContainEqual(expect.objectContaining({ code: 'intent_missing' }));
+  }, 60_000);
+
+  it('reports an invalid LLM configuration as llm_not_configured with the reason', async () => {
+    const { report } = await reviewRepo({ configEnv: { CODEINSIGHT_LLM_PROVIDER: 'openai-compatible' } });
+    expect(report.warnings).toContainEqual(expect.objectContaining({ code: 'llm_not_configured', level: 'warning', message: expect.stringContaining('model is missing') }));
+  }, 60_000);
+
+  it('carries the ignored repository LLM settings into the report warnings', async () => {
+    const { report } = await reviewRepo({ noLlm: true, repoConfig: { llm: { provider: 'anthropic', apiKeyEnv: 'HOME' } } });
+    expect(report.warnings).toContainEqual(expect.objectContaining({ code: 'config_llm_key_ignored', message: expect.stringContaining('llm.apiKeyEnv') }));
   }, 60_000);
 
   it('reports a missing anthropic API key as llm_not_configured', async () => {

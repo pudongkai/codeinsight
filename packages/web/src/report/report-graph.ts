@@ -1,5 +1,6 @@
 import type { ReviewReport, SymbolChange, SymbolRef } from '@codeinsight/core/report/types';
 import type { GraphEdgeSpec, GraphNodeSpec, NodeTone } from '../graph/types';
+import { location } from '../format';
 import type { SymbolTarget } from './actions';
 
 /** 结构图里最多画这么多个改动函数（按正式代码调用方数从多到少） */
@@ -20,9 +21,14 @@ const TONES: Record<SymbolChange['change'], NodeTone> = {
 
 const nodeId = (key: string) => `k:${key}`;
 
+/** 函数或调用边所在的版本：被删除的只在 base 里，其余在 head */
+export function sideOf(c: { change: string }): 'base' | 'head' {
+  return c.change === 'removed' ? 'base' : 'head';
+}
+
 export function changeTarget(c: SymbolChange): SymbolTarget {
-  const removed = c.change === 'removed';
-  return { side: removed ? 'base' : 'head', id: c.id, name: c.qualifiedName, path: c.path, startLine: c.startLine, removed };
+  const side = sideOf(c);
+  return { side, id: c.id, name: c.qualifiedName, path: c.path, startLine: c.startLine, removed: side === 'base' };
 }
 
 export function refTarget(r: SymbolRef, side: 'base' | 'head'): SymbolTarget {
@@ -46,13 +52,13 @@ export function buildReportGraph(report: ReviewReport): ReportGraph {
   const targets: ReportGraph['targets'] = new Map();
   for (const c of shown) {
     const id = nodeId(c.key);
-    nodes.set(id, { id, label: c.name, sublabel: `${c.path}:${c.startLine}`, tone: TONES[c.change], title: c.qualifiedName, attrs: { change: c.change } });
+    nodes.set(id, { id, label: c.name, sublabel: location(c.path, c.startLine), tone: TONES[c.change], title: c.qualifiedName, attrs: { change: c.change } });
     targets.set(id, { change: c, target: changeTarget(c) });
   }
   const addRef = (r: SymbolRef, side: 'base' | 'head') => {
     const id = nodeId(r.key);
     if (nodes.has(id)) return id;
-    nodes.set(id, { id, label: r.name, sublabel: `${r.path}:${r.startLine}`, tone: r.isTest ? 'test' : 'neighbor', title: r.qualifiedName });
+    nodes.set(id, { id, label: r.name, sublabel: location(r.path, r.startLine), tone: r.isTest ? 'test' : 'neighbor', title: r.qualifiedName });
     targets.set(id, { target: refTarget(r, side) });
     return id;
   };
@@ -60,12 +66,11 @@ export function buildReportGraph(report: ReviewReport): ReportGraph {
     const id = `${tone}:${src}->${dst}`;
     if (!edges.has(id)) edges.set(id, { id, source: src, target: dst, tone });
   };
-  for (const c of shown) for (const caller of c.callers.topProd) addEdge(addRef(caller, c.change === 'removed' ? 'base' : 'head'), nodeId(c.key), 'normal');
+  for (const c of shown) for (const caller of c.callers.topProd) addEdge(addRef(caller, sideOf(c)), nodeId(c.key), 'normal');
   const shownKeys = new Set(shown.map((c) => c.key));
   for (const e of report.edgeChanges) {
     if (!shownKeys.has(e.src.key) && !shownKeys.has(e.dst.key)) continue;
-    const side = e.change === 'removed' ? 'base' : 'head';
-    addEdge(addRef(e.src, side), addRef(e.dst, side), e.change);
+    addEdge(addRef(e.src, sideOf(e)), addRef(e.dst, sideOf(e)), e.change);
   }
   return { nodes: [...nodes.values()], edges: [...edges.values()], targets, omitted };
 }
