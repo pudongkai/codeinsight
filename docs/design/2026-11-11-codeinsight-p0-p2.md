@@ -371,6 +371,8 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
 2. 函数体相似度：对 tree-sitter token 序列做归一化（标识符替换为 `ID`，数字替换为 `NUM`，**字符串字面量保留原文**，避免把只有 SQL 不同的仓储样板代码误判为重复），计算 5-gram shingle 的 Jaccard。用 MinHash（128 个 hash）建 LSH 索引，全库扫描时只对 LSH 命中的组合算精确值。
 3. 排除：新函数直接调用候选函数（透传或包装，不算重复）；函数体不足 3 行。
 4. 评分：`score = 0.5 * 函数体相似度 + 0.3 * 名字相似度 + 0.2 * 签名形状相似度`（参数个数、是否有返回值），默认只报告 ≥ 0.6 的候选，每个函数最多 3 个。`reasons` 写明是哪几项命中的。
+5. 同名重复：不同模块里名字完全相同、签名形状也相同的非测试函数，单独作为"同名重复"候选报告（`reasons` 标明同名重复），不受第 3 步"函数体不足 3 行"和 0.6 门槛的限制。用于发现"一份已改为调用公共函数、另一份还是旧实现"这类各自演变的复制（如 clauve 的两份 `select_user_org_id`）。（2026-11-11 确认）
+6. 已知问题：只有 SQL 不同的仓储层短函数（如 `select_X_by_id`、`insert_*`）函数体相似度偏高，误报较多。同名重复规则也会报出常见的同名小函数（如各模块的 `_use`、`register`、`main`、不同类的 `__init__`）。先保持现有评分和阈值，到阶段 6 在界面上看过实际效果后再调整。
 
 **意图偏离（intent）**
 
@@ -491,13 +493,14 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
   - 完成标准：单测在临时仓库里覆盖 added / removed / modified（含 `displaySignatureBefore`）/ moved（含两个同名函数同时搬家时一对一配对正确）、解析失败时仍输出函数级 diff 和 warning；集成测试 `review --base fc4c752~1 --head fc4c752 --format json` 中 admin_api.py 有 16 个 `added` 函数，非 Python 文件带 `language_unsupported`；同一 base 第二次审查时不再运行 scip-python（日志里能看到缓存命中）
   - 验证：`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm -r test`（core 92/92）、`pnpm -r build`、`pnpm lint` 通过；clauve `review --base fc4c752~1 --head fc4c752 --format json` 中 admin_api.py 16 个 added、非 Python 文件带 `language_unsupported`，同一 base/head 第二次审查日志有 `snapshot_cache_hit` 且不运行 scip-python；80cf8e1 上用审查实际使用的调用方统计核对仍为 7 / 30（14+16）/ 0；clauve `git status --porcelain` 前后为空。独立验证一轮，7 个问题已修：同名重复定义按组内 body_hash 再按顺序配对；类自身 hash 忽略单独的 `pass` / `...`；moved 配对先按 body_hash 直接配，剩余的 shingle 只算一次；改动里没有支持语言的文件时不建快照；首个提交与空树比较；显式 `working:false` 且没有 head 时审查 HEAD~1..HEAD。取舍：类的 body_hash 只含类装饰器和类体中除方法、嵌套类外的部分（改方法不连带类），`SCHEMA_VERSION` 升到 2，旧库打开时重建；module 符号不进改动清单；只对改动文件做符号 diff；moved 相似度阈值 0.9，排序为 body_hash 相同 > 相似度 > 路径相似度 > qualified_name 相同 > key；递归不算调用方；影响面沿 call + reference 向上 `impactDepth` 层，不含 import；边变化比较 (kind, 目标 key)，base 目标搬家后先映射到 head；任一边解析失败时边变化为空、该边调用方和影响面为 0 并带 `resolver_failed`；报告在方案字段外加了 snapshotId、SymbolChange.id/isTest、FileChange.oldPath、Warning 结构、timings；CLI 只支持 json/md（html 属阶段 6），不写 reviews 表（属阶段 5）。改动 packages/core/src/{review,report,graph}、packages/cli/src/commands/review.ts，以及 extract/python.ts、extract/normalize.ts、store/{schema,db}.ts、git/index.ts、snapshot/build.ts
 
-- [~] 阶段4：重复实现与意图偏离
+- [x] 阶段4：重复实现与意图偏离
   - 涉及模块：packages/core/src/{similar,intent,llm}、packages/cli/src/commands/similar.ts
   - 依赖：阶段3
   - 内容：similar 模块（候选、MinHash/LSH、评分、排除规则）并接入 review 第 8 步；`codeinsight similar` 命令；LLM 客户端（anthropic、openai-compatible，配置、缓存、首次提示）；intent 模块并接入 review 第 9 步；`--intent`、`--intent-file`、`--no-llm`
   - 完成标准：单测覆盖重复、透传包装、SQL 样板三种情况，以及 intent 的假 LLM 解析、非法 key 过滤、缓存命中；集成测试 `similar --all` 包含 `select_org_by_id`、`_ensure_same_org`、`select_user_org_id`、`insert_lease`；未配置 LLM 时 review 正常完成并带 `llm_not_configured` warning
+  - 验证：`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm -r test`（core 121/121、cli 5/5）、`pnpm -r build`、`pnpm lint` 通过；clauve 80cf8e1 上 `similar --all` 四组都在（insert_lease 0.821、_ensure_same_org 0.848、select_org_by_id 0.75、select_user_org_id 0.5 同名重复），有候选的函数 141 个；7 / 30（14+16）/ 0 不变，clauve `git status --porcelain` 前后为空；未配置 LLM 时 review 带 `llm_not_configured`。决定（2026-11-11，主管经另一会话转达）：加 4.4 第 5 条同名重复规则；样板误报见第 6 条，阶段 6 再调。取舍：`similar` 加 `--ref`、`--data-dir`；函数体相似度 ≥ 0.5 作为候选；签名形状 = 0.5 × 参数个数比 + 0.5 × 是否有返回值一致（不计 self/cls 和单独的 `*`、`/`）；函数体行数按结束行 − 开始行；透传/包装按两者间任一方向的 call/reference 边排除；`--all` 每对只报一次；LLM 摘要用真实 symbol key，token 按字符数估算；anthropic 默认模型 `claude-sonnet-5-5`；`--no-llm` 记 `llm_disabled`（info），请求失败记 `llm_failed` 不重试，两次不合格记 `llm_invalid_response` 不写缓存；首次调用提示每进程每个 provider+模型一次。改动 packages/core/src/{similar,intent,llm}、review/llm-steps.ts、review/{index,versions}.ts、report/{types,markdown}.ts、config/index.ts，packages/cli/src/commands/{similar,workspace}.ts
 
-- [ ] 阶段5：本地 HTTP 服务与 MCP
+- [~] 阶段5：本地 HTTP 服务与 MCP
   - 涉及模块：packages/server/src/{http,mcp}、packages/cli/src/commands/{serve,mcp}.ts
   - 依赖：阶段4
   - 验证方式：独立

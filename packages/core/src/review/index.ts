@@ -4,6 +4,7 @@ import type { ReviewReport, SymbolChange, Warning } from '../report/types.js';
 import type { Store } from '../store/db.js';
 import { fileChanges, groupByModule, resolverWarnings, symbolChange, unsupportedWarnings, type SymbolFacts } from './assemble.js';
 import { callerSummaries, edgeChanges, impactSummaries, loadGraphSide, type GraphSide } from './impact.js';
+import { checkIntent, findReviewDuplicates } from './llm-steps.js';
 import { diffSymbols, type SymbolDiff } from './symbol-diff.js';
 import { changedFiles, prepareSnapshots, resolveVersions, type PreparedSnapshots, type ReviewOptions, type Versions } from './versions.js';
 
@@ -45,7 +46,9 @@ function countChanges(changes: SymbolChange[]): Record<string, number> {
   return counts;
 }
 
-async function intentFromCommits(v: Versions): Promise<ReviewReport['intent']> {
+/** 意图文本：--intent / --intent-file 优先，否则审查提交区间时取区间内的提交说明 */
+async function intentText(opts: ReviewOptions, v: Versions): Promise<ReviewReport['intent']> {
+  if (opts.intent) return opts.intent;
   if (v.head.working || v.base.sha === v.head.sha) return undefined;
   const text = await commitMessages(v.root, v.base.sha, v.head.sha);
   return text ? { source: 'commits', text } : undefined;
@@ -58,6 +61,7 @@ function snapshotWarnings(snaps: PreparedSnapshots): Warning[] {
 }
 
 interface Analysis {
+  diffs: SymbolDiff[];
   modules: ReviewReport['modules'];
   edgeChanges: ReviewReport['edgeChanges'];
 }
@@ -70,7 +74,7 @@ function analyze(opts: ReviewOptions, snaps: PreparedSnapshots, paths: Set<strin
   const changes = diffs.map((d) => symbolChange(d, facts));
   const edges = edgeChanges(diffs, base, head);
   log.info('review_diff', { ...countChanges(changes), edgeChanges: edges.length, baseResolved: base.resolved, headResolved: head.resolved });
-  return { modules: groupByModule(changes, opts.config.moduleDepth), edgeChanges: edges };
+  return { diffs, modules: groupByModule(changes, opts.config.moduleDepth), edgeChanges: edges };
 }
 
 /** warning 级逐条记录；提示级按 code 汇总条数，避免不支持语言的文件很多时刷屏 */
@@ -84,8 +88,9 @@ function logWarnings(warnings: Warning[]): void {
 }
 
 /**
- * 审查两个版本之间的改动（review 流程第 1–7、10 步）：确定版本和改动文件 → 两个版本并行准备快照 →
- * 函数级 diff → 调用方、影响面和边变化 → 按模块分组 → 组装报告。解析失败不算错误，写进 warnings。
+ * 审查两个版本之间的改动（review 流程）：确定版本和改动文件 → 两个版本并行准备快照 →
+ * 函数级 diff → 调用方、影响面和边变化 → 按模块分组 → 重复实现 → 意图偏离 → 组装报告。
+ * 解析失败、LLM 未配置或失败都不算错误，写进 warnings。
  */
 export async function runReview(opts: ReviewOptions): Promise<ReviewReport> {
   const started = Date.now();
@@ -100,11 +105,15 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewReport> {
   progress('analysis');
   const paths = new Set(changed.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path])));
   const analysis = analyze(opts, snaps, paths);
-  const warnings = [...snapshotWarnings(snaps), ...unsupportedWarnings(files)];
+  progress('similar');
+  const duplicates = findReviewDuplicates(opts, snaps.head, analysis.diffs);
+  progress('intent');
+  const intent = await intentText(opts, v);
+  const intentStep = await checkIntent(opts, intent, analysis.diffs, files);
+  const warnings = [...snapshotWarnings(snaps), ...unsupportedWarnings(files), ...intentStep.warnings];
   logWarnings(warnings);
-  const intent = await intentFromCommits(v);
   const totalMs = Date.now() - started;
-  log.info('review_done', { files: files.length, modules: analysis.modules.length, warnings: warnings.length, snapshotsMs, totalMs });
+  log.info('review_done', { files: files.length, modules: analysis.modules.length, duplicates: duplicates.length, intentGroups: intentStep.intentCheck?.length, warnings: warnings.length, snapshotsMs, totalMs });
   return {
     schemaVersion: 1,
     repo: v.root,
@@ -114,7 +123,8 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewReport> {
     files,
     modules: analysis.modules,
     edgeChanges: analysis.edgeChanges,
-    duplicates: [],
+    duplicates,
+    ...(intentStep.intentCheck ? { intentCheck: intentStep.intentCheck } : {}),
     warnings,
     timings: { totalMs, snapshotsMs, analysisMs: totalMs - snapshotsMs },
   };

@@ -1,4 +1,4 @@
-import type { EdgeChange, FileChange, ModuleChange, ReviewReport, SymbolChange, Warning } from './types.js';
+import type { DuplicateFinding, EdgeChange, FileChange, IntentFinding, ModuleChange, ReviewReport, SymbolChange, Warning } from './types.js';
 
 /** 边变化超过这个数时只列出前面部分，避免报告过长 */
 const MAX_EDGE_LINES = 200;
@@ -79,6 +79,36 @@ function edgeLines(edges: EdgeChange[]): string[] {
   return lines;
 }
 
+/** 重复实现候选（审查报告和 `codeinsight similar --format md` 共用） */
+export function duplicatesToMarkdown(findings: DuplicateFinding[], title = '## Possible duplicates'): string[] {
+  if (findings.length === 0) return [];
+  const lines = [title, '', '| Symbol | Similar to | Score | Reasons |', '| --- | --- | --- | --- |'];
+  for (const f of findings) {
+    for (const [i, c] of f.candidates.entries()) {
+      const symbol = i === 0 ? `\`${cell(f.symbol.qualifiedName)}\` (\`${f.symbol.path}:${f.symbol.startLine}\`)` : '';
+      lines.push(`| ${symbol} | \`${cell(c.symbol.qualifiedName)}\` (\`${c.symbol.path}:${c.symbol.startLine}\`) | ${c.score.toFixed(2)} | ${cell(c.reasons.join('; '))} |`);
+    }
+  }
+  lines.push('');
+  return lines;
+}
+
+const VERDICT_ORDER: IntentFinding['verdict'][] = ['unmentioned', 'unclear', 'mentioned'];
+
+function intentCheckLines(findings: IntentFinding[] | undefined): string[] {
+  if (!findings) return [];
+  if (findings.length === 0) return ['## Intent check', '', 'No groups returned.', ''];
+  const lines = ['## Intent check', ''];
+  for (const verdict of VERDICT_ORDER) {
+    for (const f of findings.filter((x) => x.verdict === verdict)) {
+      const symbols = f.symbols.map((s) => `\`${s.qualifiedName}\``).join(', ');
+      lines.push(`- **${verdict}**: ${f.summary.replace(/\s*\n\s*/g, ' ')}${f.modules.length ? ` (${f.modules.join(', ')})` : ''}${symbols ? ` — ${symbols}` : ''}`);
+    }
+  }
+  lines.push('');
+  return lines;
+}
+
 function fileLines(files: FileChange[]): string[] {
   if (files.length === 0) return [];
   const lines = ['## Files', '', '| Status | Path | Language | +/- |', '| --- | --- | --- | --- |'];
@@ -98,7 +128,9 @@ export function reportToMarkdown(r: ReviewReport): string {
     ...header(r),
     ...warningLines(r.warnings),
     ...intent,
+    ...intentCheckLines(r.intentCheck),
     ...moduleLines(r.modules, impactDepth),
+    ...duplicatesToMarkdown(r.duplicates),
     ...edgeLines(r.edgeChanges),
     ...fileLines(r.files),
   ].join('\n');

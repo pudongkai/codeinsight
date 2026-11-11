@@ -87,11 +87,14 @@ export interface EdgeChange {
   change: 'added' | 'removed';
 }
 
+/** 重复实现：symbol 为新增或搬家的函数（全库扫描时为任一函数），candidates 按 score 从高到低，最多 3 个 */
 export interface DuplicateFinding {
   symbol: SymbolRef;
+  /** reasons 写明命中的项，如 `same name`、`similar body (0.82)`、`same signature shape` */
   candidates: { symbol: SymbolRef; score: number; reasons: string[] }[];
 }
 
+/** 意图偏离：LLM 把改动分组后的一组；symbols 只含改动清单里的符号，modules 为这些符号所在模块 */
 export interface IntentFinding {
   verdict: 'mentioned' | 'unmentioned' | 'unclear';
   summary: string;
@@ -99,7 +102,17 @@ export interface IntentFinding {
   modules: string[];
 }
 
-export type WarningCode = 'resolver_failed' | 'resolver_note' | 'language_unsupported' | 'llm_not_configured' | (string & {});
+export type WarningCode =
+  | 'resolver_failed'
+  | 'resolver_note'
+  | 'language_unsupported'
+  | 'llm_not_configured'
+  | 'llm_disabled'
+  | 'llm_failed'
+  | 'llm_invalid_response'
+  | 'intent_missing'
+  | 'intent_truncated'
+  | (string & {});
 
 export interface Warning {
   code: WarningCode;
@@ -116,7 +129,7 @@ export interface ReviewTimings {
   totalMs: number;
   /** 两个版本快照的准备（构建或复用） */
   snapshotsMs: number;
-  /** 函数级 diff、调用方、影响面和边变化 */
+  /** 函数级 diff、调用方、影响面、边变化、重复实现和意图偏离 */
   analysisMs: number;
 }
 
@@ -137,7 +150,7 @@ export interface ReviewReport {
   modules: ModuleChange[];
   edgeChanges: EdgeChange[];
   duplicates: DuplicateFinding[];
-  /** 未配置 LLM 时不存在 */
+  /** 未配置 LLM、加了 --no-llm、没有意图文本或 LLM 调用失败时不存在，原因见 warnings */
   intentCheck?: IntentFinding[];
   warnings: Warning[];
   timings?: ReviewTimings;
