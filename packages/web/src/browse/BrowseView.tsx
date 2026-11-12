@@ -30,7 +30,7 @@ function CenterView({ center }: { center: Crumb }) {
           <input type="checkbox" data-testid="toggle-tests" checked={showTests} onChange={(e) => setShowTests(e.target.checked)} /> 显示测试代码
         </label>
         <ShowModelsToggle value={showModels} onChange={setShowModels} />
-        <span className="muted">单击节点设为中心，双击查看源码，“展开”再加载一层；双指滑动平移，双指捏合或按住 ⌘ / Ctrl 滚动缩放</span>
+        <span className="muted">单击节点设为中心，双击查看源码，“展开”再加载一层；鼠标拖动平移，双指捏合或按住 ⌘ / Ctrl 滚动缩放</span>
       </div>
       {error && <div className="error">{error}</div>}
       {loading === 'center' && <p className="muted">加载调用关系…</p>}

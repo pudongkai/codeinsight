@@ -112,7 +112,7 @@ async function viewport(page: Page) {
   });
 }
 
-test('trackpad gestures: two-finger scroll pans, pinch (ctrl + wheel) and ⌘/Ctrl + scroll zoom', async ({ page }) => {
+test('trackpad gestures: two-finger scroll leaves the graph alone, pinch (ctrl + wheel) and ⌘/Ctrl + scroll zoom', async ({ page }) => {
   await openApp(page);
   const graph = await openNeighborGraphOfF(page);
   const box = (await graph.boundingBox())!;
@@ -122,11 +122,9 @@ test('trackpad gestures: two-finger scroll pans, pinch (ctrl + wheel) and ⌘/Ct
 
   const v0 = await viewport(page);
   await page.mouse.wheel(40, 60);
-  await expect.poll(async () => (await viewport(page)).y).not.toBe(v0.y);
+  await page.waitForTimeout(300);
   const v1 = await viewport(page);
-  expect(v1.zoom).toBeCloseTo(v0.zoom, 5);
-  expect(v1.x).toBeLessThan(v0.x);
-  expect(v1.y).toBeLessThan(v0.y);
+  expect(v1).toEqual(v0);
 
   // 捏合：Chrome 里是带 ctrlKey 的 wheel 事件，不伴随按键事件
   await graph.locator('.react-flow__pane').dispatchEvent('wheel', { deltaY: -40, ctrlKey: true, clientX: box.x + 200, clientY: box.y + 200 });
