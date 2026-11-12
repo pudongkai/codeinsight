@@ -7,7 +7,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.jcef.JBCefApp
 import com.intellij.util.ui.JBUI
 import dev.codeinsight.idea.CodeInsightService
 import dev.codeinsight.idea.ServeState
@@ -37,7 +36,7 @@ class CodeInsightPanel(private val project: Project) : JPanel(BorderLayout()), D
         val state = service.state
         when {
             browser != null -> browser!!.requestReviewWorking()
-            state is ServeState.Running && !JBCefApp.isSupported() -> BrowserUtil.browse(state.info.loginUrl)
+            state is ServeState.Running && !jcefSupported() -> BrowserUtil.browse(state.info.loginUrl)
             else -> {
                 pendingReview = true
                 service.start()
@@ -62,7 +61,7 @@ class CodeInsightPanel(private val project: Project) : JPanel(BorderLayout()), D
     }
 
     private fun showRunning(info: ServeInfo) {
-        if (!JBCefApp.isSupported()) {
+        if (!jcefSupported()) {
             val open = JButton("在浏览器中打开").apply { addActionListener { BrowserUtil.browse(info.loginUrl) } }
             showHtml(InstallGuide.noJcef(info.baseUrl), listOf(open))
             return

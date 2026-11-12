@@ -10,7 +10,7 @@
    cd plugins/jetbrains
    JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ./gradlew buildPlugin
    ```
-   产物：`plugins/jetbrains/build/distributions/codeinsight-jetbrains-0.1.0.zip`。
+   产物：`plugins/jetbrains/build/distributions/codeinsight-jetbrains-0.1.0.zip`，用于 2026.2 及以后的 IDE。2025.1–2026.1 的 IDE 用 `./gradlew -PideTarget=251 buildPlugin` 打出的 `codeinsight-jetbrains-0.1.0-251.zip`（2026.2 起 JCEF 是单独的插件，两个版本段的依赖声明不同）。
 2. 让 `codeinsight` 命令可用（还没发布到 npm 时用本仓库）：
    ```
    pnpm -r build
