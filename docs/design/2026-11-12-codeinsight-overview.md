@@ -1,6 +1,6 @@
 # CodeInsight 系统概览技术方案：AI 分析系统功能、模块、边界与对话问答
 
-开发状态: TODO
+开发状态: DONE
 方案评审: 通过（2026-11-12）
 需求来源: 2026-11-12 用户反馈：“现在的效果还是差点意思，只能看到调用链，但是对于一个新接手的系统来说，看不懂。能不能结合 AI，分析系统的功能、模块、边界等”
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-12
@@ -114,7 +114,7 @@ P0–P2（见 `docs/design/2026-11-11-codeinsight-p0-p2.md`）做完后，CodeIn
 
 `server/modules` 整体约 924，整个仓库约 1 600。billing、lease 都是没有子目录的业务目录。模块内部按 `api.py` / `service.py` / `repository.py` 分层，billing 里 import 了 `stripe`、`psycopg`。
 
-另有 17 个非测试 Python 文件没有任何非 module 符号（如 `server/database.py` 只在模块顶层创建 `psycopg_pool.ConnectionPool`，以及只做再导出的 `__init__.py`、只读配置的文件），它们不计规模，但 import 和环境变量读取要算进所在模块。
+另有 19 个非测试 Python 文件没有任何非 module 符号（如 `server/database.py` 只在模块顶层创建 `psycopg_pool.ConnectionPool`，以及只做再导出的 `__init__.py`、只读配置的文件），它们不计规模，但 import 和环境变量读取要算进所在模块。
 
 按 4.4 的输入规则粗算 clauve 一次完整生成：14 个模块，有入口的模块 9 个（account、auth、billing、credential、lease、release、usage_stats、`server/console`、`server/*`），共 24 次请求（14 次模块摘要 + 9 次功能命名 + 1 次系统简介），输入约 5.3 万 token（不发源码片段约 4.2 万），输出上限合计约 4.9 万 token。
 
@@ -703,7 +703,7 @@ interface ChatResult {
 
 **集成测试（`CODEINSIGHT_CLAUVE=~/projects/clauve`，与已有 clauve 集成测试一样用 `index --ref 80cf8e1` 的提交快照，`--data-dir` 指到临时目录，不改 clauve）**
 - 模块：14 个模块与 4.4 第 1 步列出的一致；billing、lease 各是一个模块（没被拆开）；所有参与划分的文件恰好属于一个模块；`server/tests` 不在任何模块里；用同一份划分记录跑两次结果完全相同
-- 外部依赖：billing 有 payment: stripe、database: psycopg；`server/database.py` 归入 `server/*`，`server/*` 有 database: psycopg_pool；17 个没有符号的非测试文件都属于某个模块
+- 外部依赖：billing 有 payment: stripe、database: psycopg；`server/database.py` 归入 `server/*`，`server/*` 有 database: psycopg_pool；19 个没有符号的非测试文件都属于某个模块
 - 功能：所有 HTTP 接口（不含 middleware 等）恰好各属于一个功能
 - 边界：每条问题的示例调用点都能在 edges 表里找到；首次跑出的各类问题数量人工核对后写进测试
 - 用假 LLM 跑完整概览：请求 24 次（14 次模块摘要 + 9 次功能命名 + 1 次系统简介），与估算一致；`--no-llm` 再生成一次 0 次请求且模块名称全部来自缓存；第二次 0 次请求；在临时目录里从 80cf8e1 复制一份仓库，只改 `server/modules/lease/api.py` 的 HTTP 处理函数 `heartbeat`（原来直接调用 2 个函数：`server/common/response.py` 的 `ok` 和 `server/modules/lease/service.py` 的 `heartbeat`），在函数体里加一次对 `server/modules/billing/access.py` 的 `ensure_org_enabled` 的调用（连同 import），使它的直接调用变为 3 个、新调用落在功能命名输入的前 8 个里；重新生成后只请求 lease 的模块摘要、lease 的功能命名和系统简介（3 次），billing 不重新请求，模块划分不变
@@ -721,63 +721,76 @@ interface ChatResult {
 
 ## 8. 开发计划
 
-- [ ] 阶段1：路径检查移到 core，按快照读文件
+- [x] 阶段1：路径检查移到 core，按快照读文件
   - 涉及模块：packages/core/src/{util/paths.ts,snapshot/source.ts}、packages/server/src/http/{paths.ts,routes/source.ts}、packages/web/src/source/
   - 依赖：无
   - 验证方式：独立
   - 内容：`checkRelativePath`、`resolveInside` 移到 core（server 改为调用并把 core 的错误转成 403）；`snapshot/source.ts`（4.4“按快照读文件”，含指向快照外的符号链接改走工作区 + content_hash 比较）；`/api/source` 改用它，新增 409 `file_changed`；Web 源码面板对 `file_changed` 的提示
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过，已有源码接口和路径穿越测试不改期望值仍通过；core 单测覆盖第 7 节“路径和读文件”各项；server 测试覆盖工作区快照返回快照副本内容、非 Python 文件改动后 409
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（core 155、server 35、web 48、cli 16）；独立验证通过，按建议补了副本缺失时改读工作区的用例；改动 core/src/{util/paths.ts,snapshot/source.ts}、server/src/http/{paths.ts,routes/source.ts}、web/src/source/useSource.ts 及对应测试
 
-- [ ] 阶段2：模块划分与划分记录
+- [x] 阶段2：模块划分与划分记录
   - 涉及模块：packages/core/src/overview/{partition,partition-state}.ts、packages/core/src/config/、packages/core/test/fixtures/py-shop/
   - 依赖：无
   - 内容：4.4 第 1 步（整体 / 拆开、直接文件组的 id 规则、按文件拆、合并过碎、没有符号的文件的归属、沿用记录和 2 倍范围、`sizes` 只在重新判断时更新、`ModuleIndex`）；划分记录读写（临时文件改名、阈值变化时重置）；`moduleMinSize`、`moduleMaxSize`、`leafSplitSize` 配置；py-shop fixtures
-  - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm --filter @codeinsight/core test` 通过；core 单测覆盖第 7 节“划分”各项（含改函数体使调用边变化后归属不变、多次小幅增长累计超过 2 倍时重新判断、`app/leaf` 在阈值两侧 id 相同）；`CODEINSIGHT_CLAUVE=~/projects/clauve pnpm --filter @codeinsight/core test` 中 clauve 划分得到 4.4 第 1 步列出的 14 个模块，billing、lease 都没被拆开，17 个没有符号的非测试文件都有归属，跑两次结果相同，clauve `git status --porcelain` 前后一致
+  - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm --filter @codeinsight/core test` 通过；core 单测覆盖第 7 节“划分”各项（含改函数体使调用边变化后归属不变、多次小幅增长累计超过 2 倍时重新判断、`app/leaf` 在阈值两侧 id 相同）；`CODEINSIGHT_CLAUVE=~/projects/clauve pnpm --filter @codeinsight/core test` 中 clauve 划分得到 4.4 第 1 步列出的 14 个模块，billing、lease 都没被拆开，19 个没有符号的非测试文件都有归属，跑两次结果相同，clauve `git status --porcelain` 前后一致
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（core 170 过 3 跳过）；`CODEINSIGHT_CLAUVE` 下 clauve 划分得到 14 个模块，billing、lease 未拆，19 个没有符号的非测试文件（18 个 `__init__.py` + `server/database.py`，原文 17 为计数错误，已改）都有归属，两次结果相同，clauve 工作区无变化；记录里根目录键用 `.`，“规模未超过 2 倍 moduleMinSize 时沿用合并记录”对已长回阈值以上的模块同样适用；改动 core/src/overview/{partition,partition-state}.ts、core/src/config/index.ts、core/test/fixtures/py-shop/、core/test/{partition,config,clauve.integration}.test.ts
 
-- [ ] 阶段3：模块事实、外部依赖、边界问题与功能分组
+- [x] 阶段3：模块事实、外部依赖、边界问题与功能分组
   - 涉及模块：packages/core/src/overview/{types,facts,external,external-table,boundary,features,snippets,structure,markdown}.ts、packages/core/src/model/entry.ts、packages/core/src/extract/python.ts、packages/core/src/config/、packages/core/package.json、packages/web/src/marks/marks.ts
   - 依赖：阶段1、阶段2
   - 内容：4.4 第 2–8 步；`collectImportModules`（完整点分名 + 相对导入标记）和最长前缀匹配的分类表（含 psycopg_pool，`email` 只认 `email.mime` / `email.message`）；`OverviewReport` 类型；结构结果汇总与进程内缓存；概览转 Markdown；`isHttpApi`、`httpRoute` 移到 core（web 改为引用）；core 子路径导出 `./overview/types`、`./model/entry`；`overview.layers`、`overview.externalCategories` 配置
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（web 的标记测试不改期望值）；core 单测覆盖第 7 节“模块事实、外部依赖和边界”“功能分组”“源码片段”各项（含 `common/settings.py` 的 psycopg_pool 和两个环境变量）；clauve 集成测试中外部依赖（含 `server/*` 的 psycopg_pool）、功能、边界各项通过，7 / 30（14+16）/ 0 不变，clauve `git status --porcelain` 前后一致
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（core 190 过 4 跳过，web 标记测试期望值未改）；clauve 集成 4 项通过，7 / 30（14+16）/ 0 不变，`server/*` 有 psycopg_pool，147 个 HTTP 接口各属一个功能，边界 cycle 1（server/console 与 6 个业务模块）、layer_violation 0、layer_skip 1（release api→repository）、private_access 1（credential→account `_write_audit`）；指向 module 符号的边计入 weight 但不作示例首选、不参与分层和私有检查；新增 warning `external_files_skipped`、`layers_not_detected`；改动 core/src/overview/{types,facts,external,external-table,boundary,features,snippets,structure,markdown}.ts、model/entry.ts、extract/python.ts、config/index.ts、partition-state.ts（`pickThresholds`）、snapshot/source.ts（`readFailureReason`）、report/markdown.ts（导出 `markdownCell`）、web/src/marks/marks.ts
 
-- [ ] 阶段4：LLM 公共逻辑抽取、overviews 表与单任务控制
+- [x] 阶段4：LLM 公共逻辑抽取、overviews 表与单任务控制
   - 涉及模块：packages/core/src/{llm/{index,cache,ask-json,setup}.ts,intent,review/llm-steps.ts,store,config}、packages/core/test/helpers/fake-llm-server.mjs
   - 依赖：阶段3
   - 验证方式：独立
   - 内容：`postJson` 返回响应头、`LlmError.retryAfterMs`；LLM 缓存（key 用 llmIdentity）、`ask-json`（`transientRetries`，默认 0）、`setup.ts`（客户端创建和首次提示）抽成公共逻辑，intent 和 review 改为调用且行为不变；配置“只能更严格”的合并（含 `CODEINSIGHT_SEND_SOURCE`）；`EXTRA_SCHEMA_SQL`（先查 `sqlite_master`，缺表才开事务建表，不升版本）；overviews 表的 Store 读写、清理、“当前概览”和“上一次名称”的选取、同时只能有一个生成任务（`BEGIN IMMEDIATE` + pid 检查）；假 LLM 服务（非流式）
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过，已有 intent、review、store 测试不改期望值仍通过（intent 遇到 429 仍不重试）；core 单测覆盖第 7 节“配置”及“存储”中 overviews 相关各项（版本 3 的库加表后原数据还在、表都在时不开写事务、当前概览的选取规则、两个任务同时开始时第二个被拒绝、pid 已退出的 running 记录改为 failed）；`ask-json` 单测用假 LLM 覆盖 429 按 retry-after 重试和不合格 JSON 重试 1 次
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（core 220 过 4 跳过），intent/review/store 原测试期望值未改，intent 遇 429 不重试；独立验证第 1 轮驳回 4 项已修（本进程 pid 但非本进程开始的 running 记录视为已退出；prune 每种快照额外保留最新一条 has_llm=1 记录；`sendSource` 非布尔值按关闭并加 warning `config_value_invalid`；环境变量已设上限时不再误报 `config_limit_ignored`），`confirmTokens` 接受 0；intent 缓存 key 保留原公式，首次提示按 provider+模型+提示文字去重，retry-after 最多等 60s；改动 core/src/{util/atomic-file.ts,llm/{index,cache,ask-json,setup}.ts,intent,review/llm-steps.ts,config,store/{schema,transaction,db,overviews}.ts}、test/helpers/{fake-llm-server.mjs,overview-worker.mjs}
 
-- [ ] 阶段5：AI 摘要与 overview 命令
+- [x] 阶段5：AI 摘要与 overview 命令
   - 涉及模块：packages/core/src/overview/{summarize,estimate,index}.ts、packages/core/src/util/pool.ts、packages/cli/src/commands/overview.ts
   - 依赖：阶段4
   - 内容：并发执行器；4.4 第 9–11 步（三类请求的输入字段、公开符号排序后取前 60、截断、稳定命名、缓存、`noLlm` 只查缓存、失败与重试、失败过半时停止、估算、组装）；`runOverview` 写 overviews 表和划分记录；`codeinsight overview`（`--no-llm`、`--no-source`、`--estimate`、`--yes`、`--format`、`--out`、生成前提示）
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过；core 单测覆盖第 7 节“AI 部分”“估算”各项；cli 测试用假 LLM 跑 `overview --estimate`（假 LLM 0 次请求、不写划分记录）、`overview --format json`（含 system 和模块名称）、`overview --no-llm`（0 次请求、命中缓存的模块有名称）、超过阈值无 `--yes` 时退出码 2、另一进程持有 running 记录时退出码 1、未配置 LLM 时生成结构部分带 `llm_not_configured`；clauve 集成测试中“用假 LLM 跑完整概览”各项通过（24 次请求、第二次 0 次、改 lease 的 `heartbeat` 后只请求 3 次）
+  - 验证：`pnpm -r build`、`pnpm lint`、`CODEINSIGHT_CLAUVE=~/projects/clauve pnpm -r test` 通过（core 235、cli 23）；clauve 假 LLM 第一次 24 次（14+9+1，与估算一致）、第二次和 `--no-llm` 0 次、改 lease `heartbeat` 后 3 次；`sendSource=false` 时模型类体前 15 行也不发送；`ai.inputTokens/outputTokens` 为估算值；新增 warning `llm_aborted`、`overview_system_failed`、`overview_input_truncated`；CLI 先估算再检查运行中任务；intent 的 JSON 回复解析移到 `llm/ask-json.ts` 共用；改动 core/src/overview/{summarize,summarize-input,estimate,index,snippets,structure}.ts、util/pool.ts、cli/src/commands/{overview,output}.ts
 
-- [ ] 阶段6：LLM 工具调用、流式输出与问答核心
+- [x] 阶段6：LLM 工具调用、流式输出与问答核心
   - 涉及模块：packages/core/src/{llm/{sse,chat,anthropic-chat,openai-chat}.ts,ask,store}、packages/core/package.json、packages/core/test/helpers/fake-llm-server.mjs、packages/cli/src/commands/ask.ts
   - 依赖：阶段5
   - 验证方式：独立
   - 内容：SSE 解析；可选的 `LlmClient.chat`（两种协议的流式文本和工具调用、消息格式转换、`tool_choice`、AbortSignal、不支持工具的提示、截断处理、anthropic 提示缓存）；4.4 问答流程和 7 个工具（含关闭源码发送时的行为、通用错误码）；`ask/events.ts`、`ask/links.ts` 及子路径导出；chat_sessions、chat_messages 表（加进 `EXTRA_SCHEMA_SQL`）及 Store 读写和清理；`codeinsight ask`；假 LLM 服务加流式和工具调用
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过；core 单测覆盖第 7 节“LLM chat”“问答循环”“问答工具”及“存储”中会话相关各项，两种协议各有一个“搜索符号 → 读源码 → 回答”的完整用例；cli 测试用假 LLM 跑 `codeinsight ask "..."`，stdout 有回答文字、stderr 有工具调用进度，`--no-source` 时假 LLM 收到的工具结果里没有函数体，未配置 LLM 时退出码 1
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（core 288 过 5 跳过，cli 26 过 1 跳过），两种协议各有“搜索符号 → 读源码 → 回答”完整用例；独立验证第 1 轮驳回 6 项已修（grep_code 跳过读不了的文件；同一轮内按 maxToolChars 累计、超限的调用回“已达上限”；日志只记 questionChars；流式请求首字节后改为空闲超时 `idleTimeoutMs` 默认 60s；grep 用一次查出的文件行并检查中止，新增 `readSnapshotFileRow`；openai 同 index 不同 id 另开调用）；AskEvent 的 messageId 可选，所属模块取当前概览，`createSession` 标题可后补；改动 core/src/llm/{sse,chat,anthropic-chat,openai-chat,index}.ts、core/src/ask/、core/src/store/{chats,schema,db}.ts、core/src/snapshot/source.ts、cli/src/commands/ask.ts
 
-- [ ] 阶段7：HTTP 接口与 MCP
+- [x] 阶段7：HTTP 接口与 MCP
   - 涉及模块：packages/server/src/{http,jobs,mcp}、packages/cli/src/commands/serve.ts
   - 依赖：阶段6
   - 验证方式：独立
   - 内容：概览任务（照 ReviewJobs 写，配合 overviews 表的 running 检查）；4.3 节概览和问答的全部路由（`DELETE`、`GET /api/overview?id=` 和 `newerStructureId`、NDJSON 流、409 / 429、断开时中止、删除会话时中止回答、`/api/status` 新字段）；MCP `get_overview`（没有概览时不调 LLM、不写划分记录）；serve 关闭时等概览任务和进行中的问答结束
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过；server 测试覆盖第 7 节“服务测试”中概览、问答、认证、MCP 各项；跑完无遗留 serve / mcp / scip-python 进程
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（server 58），ps 无测试遗留进程；独立验证第 1 轮驳回 3 项已修（OverviewJobs 构造时调 `failInterrupted()` 把中断的 running 改 failed；MCP 输出超 30000 字符时先缩模块表、功能和边界问题保留，仍超限按行截断；`overviewStale`、`PendingSet` 共用）；serve 关闭仍最多等 `SHUTDOWN_GRACE_MS`（3s），未完成的概览下次启动改 failed；快照未就绪时 `GET /api/overview` 返回 `currentContentKey:null` 而非 503；`needsConfirm` 只在真会发请求时为 true；改动 server/src/{jobs/{overview-jobs,ask-runs,pending}.ts,http/routes/{overview,chat,status}.ts,http/{context,server,respond}.ts,mcp/{overview-tool,server}.ts}、core/src/store/overviews.ts、core/src/overview/{estimate,markdown}.ts
 
-- [ ] 阶段8：Web 概览页
+- [x] 阶段8：Web 概览页
   - 涉及模块：packages/web/src/{overview,app,api,browse,source}、packages/web/e2e/
   - 依赖：阶段7
   - 内容：概览标签（默认标签规则）；系统简介卡片、过期提示和“有更新的结构概览”提示；生成弹窗（点击时才估算、源码开关、二次确认、未配置 LLM 的说明）和进度；模块列表；模块依赖图；模块详情（含外部依赖和环境变量）；功能列表（`expandCallees`）；外部依赖页；边界问题列表；`Nav.openSourceAt`；当前快照里符号或文件不存在时的提示
   - 完成标准：`pnpm --filter @codeinsight/web build` 和组件测试通过（模块图节点和边颜色、功能分组、`expandCallees` 展开、符号不存在的提示、`newerStructureId` 提示）；`pnpm --filter @codeinsight/web test:e2e` 中第 7 节 Playwright 的“fixtures 仓库”各项和“clauve 模块列表”通过（e2e 子进程环境用 `cleanEnv()` 加 `fakeLlmEnv(url)`）；已有 e2e 用例全部通过
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（web 69）；`pnpm --filter @codeinsight/web test:e2e` 14 过（新增概览 5 个），`CODEINSIGHT_CLAUVE` 下 clauve e2e 6 过（含模块列表 9 个业务模块），无遗留进程；未配置 LLM 时弹窗不调估算，只给配置说明和“生成结构概览”；橙色边含 layer_violation 和 layer_skip，只给跨模块的问题上色；模块超过 80 个时只画有问题的模块和权重前 80 的边，可切换全部；打开符号前先在当前快照查位置；刷新后不接上进行中的生成进度，再点生成时复用同一任务；改动 web/src/{overview/,app/{nav,useNavigation,App,useCurrentLinks}.ts(x),api/{types,client}.ts,browse/,source/,graph/}、web/e2e/{overview,clauve-overview}.spec.ts
 
-- [ ] 阶段9：Web 问答页与插件内检查
+- [x] 阶段9：Web 问答页与插件内检查
   - 涉及模块：packages/web/src/{chat,app,api}、packages/web/e2e/、packages/web/package.json、plugins/jetbrains/MANUAL_CHECKS.md
   - 依赖：阶段8
   - 内容：问答标签；会话列表；NDJSON 流读取（失败时退回一次性显示）；回答渲染（`react-markdown`、自定义 `urlTransform` 只放行 `sym:` / `src:`、自定义 `components.a`、不渲染 HTML）；工具调用进度；停止；首次使用提示（记录 provider、模型、源码开关，任一变化时再提示）；未配置 LLM 的说明；`limited` / `cancelled` / 失败的显示；过期提示；在 MANUAL_CHECKS.md 里加 IDE 内的概览和问答检查项
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（组件测试覆盖：`sym:` 调 openSymbol、`src:` 调 openSourceAt 且行号正确、`javascript:` 和 http 链接渲染为不可点击的文字、回答里的 HTML 按文字显示、provider / 模型 / 源码开关任一变化时重新出现首次提示）；`test:e2e` 中第 7 节 Playwright 的“问答”各项通过；已有 e2e 用例全部通过；手工检查清单写进 plugins/jetbrains/MANUAL_CHECKS.md
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（web 83）；`pnpm --filter @codeinsight/web test:e2e` 19 过 6 跳过（clauve 用例需设变量），新增问答 5 项全过，无遗留进程；`/api/status` 的 snapshot 加 `contentKey` 用于回答过期提示；不放行的链接用 `data-address` 保留原地址显示；新建会话在发第一个问题时才创建；首次提示确认前发送按钮不可用；改动 web/src/{chat/,api/{stream,client,types}.ts,app/{App,useNavigation}.tsx}、web/e2e/chat.spec.ts、server/src/http/routes/status.ts、plugins/jetbrains/MANUAL_CHECKS.md 第 11 节
+
+- [x] 阶段10：代码审查修复
+  - 内容：两轮代码审查发现的问题。划分记录增加“按文件拆”和“保持独立”两类决定（`direct`/`directSizes`、`merges` 为 null 表示保持独立、`mergeSizes`），同样按 0.5–2 倍范围沿用，兼容旧记录；首次按文件聚类改为邻接表加堆增量合并；根目录文件组 id 统一为 `#<组名>`；概览中所有排序改用码点比较（`util/compare.ts`）；模块摘要输入的模型只按本模块内引用数排序（`rankedOwnModels`），其他模块的改动不再使本模块缓存失效；结构计算共用一次查出的文件行读取文件；`OverviewModule.httpApis`；需要确认时估算只写 stderr，不覆盖 `--out`；`sliceLines` 起点超出文件末尾时返回末尾一段；相对路径检查合并为不依赖 Node 的 `isSafeRelativePath`；问题长度检查合并为 `isQuestionTooLong`；`effectiveSendSource`、`addToSet`、`overview/module-id.ts`、`startOverview` 供 CLI 和 serve 共用、`lastNamedParams()` 作为 `--no-llm` 的缓存身份；Web：其他会话回答中时禁用发送、停止只作用于回答中的会话、会话详情读回前禁用发送、NDJSON 解析失败单独报错并取消读取、概览轮询出错后可重新生成、按路径打开源码只读目标行前后 200 行、`useJobPolling` 公共 hook
+  - 验证：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过（core 301 过 5 跳过，web 92，server 59，cli 26 过 1 跳过）；`CODEINSIGHT_CLAUVE` 下 core 集成测试 5 项通过（14 个模块，24 / 0 / 3 次请求）；`pnpm --filter @codeinsight/web test:e2e` 19 过 6 跳过；无遗留进程
 
 ## 9. 待确认问题
 
