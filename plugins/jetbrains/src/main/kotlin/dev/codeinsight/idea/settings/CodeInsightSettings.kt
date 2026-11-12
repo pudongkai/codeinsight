@@ -10,7 +10,7 @@ import com.intellij.openapi.project.Project
 
 /** IDE 级设置：Node 和 codeinsight 的路径，留空时自动查找 */
 @Service(Service.Level.APP)
-@State(name = "CodeInsightSettings", storages = [Storage("codeinsight.xml")])
+@State(name = "dev.codeinsight.Settings", storages = [Storage("codeinsight.xml")])
 class CodeInsightSettings : PersistentStateComponent<CodeInsightSettings.Data> {
     data class Data(var nodePath: String = "", var codeinsightPath: String = "")
 
@@ -29,7 +29,7 @@ class CodeInsightSettings : PersistentStateComponent<CodeInsightSettings.Data> {
 
 /** 项目级设置：数据目录（留空为仓库内的 `.codeinsight/`）。存在 workspace.xml，不随项目配置提交 */
 @Service(Service.Level.PROJECT)
-@State(name = "CodeInsightProjectSettings", storages = [Storage(StoragePathMacros.WORKSPACE_FILE)])
+@State(name = "dev.codeinsight.ProjectSettings", storages = [Storage(StoragePathMacros.WORKSPACE_FILE)])
 class CodeInsightProjectSettings : PersistentStateComponent<CodeInsightProjectSettings.Data> {
     data class Data(var dataDir: String = "")
 

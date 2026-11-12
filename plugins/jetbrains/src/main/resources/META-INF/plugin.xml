@@ -9,7 +9,7 @@
     <p>在 IDE 里审查未提交改动：函数级改动、调用方和影响面、重复实现、意图偏离。需要本机安装 Node ≥ 22.13 和 codeinsight。</p>
     ]]></description>
 
-    <depends>com.intellij.modules.platform</depends>
+    <!-- @DEPENDENCIES@ 构建时按目标 IDE 版本替换，见 build.gradle.kts -->
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="CodeInsight" anchor="right" icon="/icons/codeinsight.svg"
