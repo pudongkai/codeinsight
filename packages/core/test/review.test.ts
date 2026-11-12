@@ -263,6 +263,33 @@ describe('review edge cases', () => {
     expect(report.warnings.filter((w) => w.code.startsWith('resolver'))).toEqual([]);
   }, 120_000);
 
+  it('carries model kinds and HTTP entries of changed symbols, top callers and edge ends into the report', async () => {
+    const repo = initRepo({
+      'app/schemas.py': 'from pydantic import BaseModel\n\n\nclass Item(BaseModel):\n    name: str\n',
+      'app/api.py': [
+        'from fastapi import APIRouter', 'from app.schemas import Item', '', 'router = APIRouter()', '', '',
+        '@router.get("/items/{item_id}")', 'def read_item(item_id: int):', '    return build(item_id)', '', '',
+        'def build(item_id):', '    return item_id', '',
+      ].join('\n'),
+    });
+    writeFiles(repo, {
+      'app/schemas.py': 'from pydantic import BaseModel\n\n\nclass Item(BaseModel):\n    name: str\n    size: int = 0\n\n\nclass ItemOut(Item):\n    id: int\n',
+      'app/api.py': [
+        'from fastapi import APIRouter', 'from app.schemas import Item, ItemOut', '', 'router = APIRouter()', '', '',
+        '@router.get("/items/{item_id}")', 'def read_item(item_id: int):', '    return build(item_id)', '', '',
+        'def build(item_id):', '    return ItemOut(name="x", id=item_id)', '',
+      ].join('\n'),
+    });
+    commitAll(repo, 'models');
+    const report = await (await setup(repo)).review({ head: 'HEAD' });
+    expect(byName(report, 'Item')).toMatchObject([{ change: 'modified', modelKind: 'pydantic' }]);
+    expect(byName(report, 'ItemOut')).toMatchObject([{ change: 'added', modelKind: 'pydantic' }]);
+    const build = byName(report, 'build')[0]!;
+    expect(build.modelKind).toBeUndefined();
+    expect(build.callers.topProd).toMatchObject([{ name: 'read_item', entry: { kind: 'http', detail: { method: 'GET', path: '/items/{item_id}' } } }]);
+    expect(report.edgeChanges.find((e) => e.src.name === 'build' && e.dst.name === 'ItemOut')?.dst).toMatchObject({ modelKind: 'pydantic' });
+  }, 120_000);
+
   it('reviews the HEAD commit when working is false and no head is given', async () => {
     const env = await setup(twoCommitRepo());
     const report = await env.review({ working: false });

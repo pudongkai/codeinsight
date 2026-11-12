@@ -3,6 +3,7 @@ import type { Node, Parser } from 'web-tree-sitter';
 import { dedupeQualifiedNames, makeSymbolKey, symbolIdFromKey } from '../model/symbol-key.js';
 import type { SymbolRow } from '../model/types.js';
 import { decoratorEntry, djangoRoutes, fileFrameworks } from './entries.js';
+import { baseVars, classHints } from './models.js';
 import { normalizeTokens } from './normalize.js';
 import type { ExtractedEntry, ExtractedFile, ExtractedSymbol, ImportBinding } from './types.js';
 
@@ -17,6 +18,8 @@ export interface FileFlags {
 interface RawSymbol extends Omit<ExtractedSymbol, 'id' | 'symbolKey' | 'parentId'> {
   parent: number | null;
   decorators: Node[];
+  /** 类的定义节点，模型识别要读基类列表 */
+  classDef?: Node;
 }
 
 interface WalkContext {
@@ -180,7 +183,9 @@ function addDefinition(ctx: WalkContext, def: Node, outer: Node, scopeIdx: numbe
     isGenerated: ctx.flags.isGenerated,
     nameLine: nameNode.startPosition.row,
     nameCol: nameNode.startPosition.column,
+    modelKind: null,
     decorators: outer === def ? [] : outer.namedChildren.filter((n) => n.type === 'decorator'),
+    ...(kind === 'class' ? { classDef: def } : {}),
   });
   if (body) walk(ctx, body, ctx.out.length - 1);
 }
@@ -217,21 +222,22 @@ function moduleSymbol(path: string, root: Node, source: string, flags: FileFlags
     isGenerated: flags.isGenerated,
     nameLine: 0,
     nameCol: 0,
+    modelKind: null,
     decorators: [],
   };
 }
 
 /** 去重 qualified_name 后计算 symbol_key、id 和 parent_id */
-function finalizeSymbols(raw: RawSymbol[]): { symbols: ExtractedSymbol[]; decorators: Node[][] } {
+function finalizeSymbols(raw: RawSymbol[]): { symbols: ExtractedSymbol[]; decorators: Node[][]; classDefs: (Node | undefined)[] } {
   const deduped = dedupeQualifiedNames(raw);
   const ids = deduped.map((s) => symbolIdFromKey(makeSymbolKey(s)));
-  const symbols = deduped.map(({ parent, decorators: _decorators, ...rest }, i): ExtractedSymbol => ({
+  const symbols = deduped.map(({ parent, decorators: _decorators, classDef: _def, ...rest }, i): ExtractedSymbol => ({
     ...rest,
     symbolKey: makeSymbolKey(rest),
     id: ids[i]!,
     parentId: parent === null ? null : ids[parent]!,
   }));
-  return { symbols, decorators: raw.map((s) => s.decorators) };
+  return { symbols, decorators: raw.map((s) => s.decorators), classDefs: raw.map((s) => s.classDef) };
 }
 
 function importRows(root: Node): [number, number][] {
@@ -260,7 +266,7 @@ function bindName(out: Map<string, ImportBinding>, nameNode: Node, toBinding: (n
   }
 }
 
-/** 收集 import 别名，用于 Django 路由跨文件查找处理函数 */
+/** 收集 import 别名，用于 Django 路由和模型类的基类跨文件查找 */
 function collectImports(filePath: string, root: Node): Map<string, ImportBinding> {
   const out = new Map<string, ImportBinding>();
   for (const stmt of root.descendantsOfType(['import_statement', 'import_from_statement'])) {
@@ -290,7 +296,10 @@ function decoratorEntries(symbols: ExtractedSymbol[], decorators: Node[][], fram
   return entries;
 }
 
-/** 提取一个 Python 文件：module 符号、类、函数、方法、嵌套函数，以及装饰器形式的入口 */
+/**
+ * 提取一个 Python 文件：module 符号、类、函数、方法、嵌套函数，装饰器形式的入口，以及模型识别的线索。
+ * 符号的 modelKind 要等全部文件提取完后由 resolveModels 填写
+ */
 export function extractPythonFile(parser: Parser, filePath: string, source: string, flags: FileFlags): ExtractedFile {
   const tree = parser.parse(source);
   if (!tree) throw new Error(`tree-sitter failed to parse ${filePath}`);
@@ -298,7 +307,7 @@ export function extractPythonFile(parser: Parser, filePath: string, source: stri
     const root = tree.rootNode;
     const ctx: WalkContext = { path: filePath, source, flags, out: [moduleSymbol(filePath, root, source, flags)] };
     walk(ctx, root, 0);
-    const { symbols, decorators } = finalizeSymbols(ctx.out);
+    const { symbols, decorators, classDefs } = finalizeSymbols(ctx.out);
     const isUrls = /(^|\/)urls\.py$/.test(filePath);
     return {
       path: filePath,
@@ -306,7 +315,9 @@ export function extractPythonFile(parser: Parser, filePath: string, source: stri
       entries: decoratorEntries(symbols, decorators, fileFrameworks(root)),
       importRows: importRows(root),
       djangoRoutes: isUrls ? djangoRoutes(root) : [],
-      imports: isUrls ? collectImports(filePath, root) : new Map(),
+      imports: collectImports(filePath, root),
+      classes: classHints(symbols, classDefs, decorators),
+      baseVars: baseVars(root),
     };
   } finally {
     tree.delete();

@@ -1,5 +1,6 @@
 import type { ModuleChange, SymbolChange } from '@codeinsight/core/report/types';
 import { location } from '../format';
+import { SymbolMarks } from '../marks/SymbolMarks';
 import { CallerCounts, ChangeBadge, EntryTag } from './ChangeBadge';
 
 interface Props {
@@ -13,6 +14,7 @@ function ChangeRow({ c, selected, onSelect }: { c: SymbolChange; selected: boole
     <li className={`change-row${selected ? ' selected' : ''}`} data-testid="change-row" data-change={c.change} data-name={c.qualifiedName} onClick={() => onSelect(c)}>
       <ChangeBadge change={c.change} />
       <span className="qname">{c.qualifiedName}</span>
+      <SymbolMarks symbol={c} />
       {c.isTest && <span className="tag">测试</span>}
       <EntryTag entry={c.entry} />
       <CallerCounts c={c} />

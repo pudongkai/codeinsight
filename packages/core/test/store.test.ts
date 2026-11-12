@@ -10,7 +10,7 @@ function sampleSymbol(snapshotId: number, key: string): SymbolRow {
   return {
     snapshotId, id: symbolIdFromKey(key), symbolKey: key, kind: 'function', name: 'f', qualifiedName: 'f',
     signature: '', displaySignature: '(a, b=1)', parentId: null, path: 'a.py', startLine: 1, endLine: 3,
-    bodyHash: 'h', normTokens: ['def', 'ID', '(', 'ID', ')'], docstring: 'doc', isTest: false, isGenerated: false,
+    bodyHash: 'h', normTokens: ['def', 'ID', '(', 'ID', ')'], docstring: 'doc', isTest: false, isGenerated: false, modelKind: null,
   };
 }
 

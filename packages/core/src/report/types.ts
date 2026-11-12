@@ -21,6 +21,10 @@ export interface SymbolRef {
   path: string;
   startLine: number;
   isTest: boolean;
+  /** 数据模型类的类别（pydantic、sqlalchemy、django、dataclass 等），不是模型时不存在 */
+  modelKind?: string;
+  /** 入口信息（只在调用方列表和调用边变化里给出），界面据此标出 HTTP 接口 */
+  entry?: EntryInfo;
 }
 
 export interface FileChange {
@@ -73,6 +77,8 @@ export interface SymbolChange {
   /** moved 时为 base 里的 symbol_key */
   movedFrom?: string;
   entry?: EntryInfo;
+  /** 数据模型类的类别，不是模型时不存在 */
+  modelKind?: string;
   /** 取 head；removed 取 base。解析失败时为 0，见 warnings */
   callers: CallerSummary;
   impact: ImpactSummary;

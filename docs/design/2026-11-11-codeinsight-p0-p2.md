@@ -535,6 +535,17 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
     - 插件：关闭项目时异步结束 serve；启动 serve 带 `--exit-on-stdin-close` 并保持 stdin；直接用 node + cli 的 JS 入口启动（Windows 不经 cmd），工作目录为用户主目录；openFile 按真实路径判断在仓库内；JS 桥只注入 serve 地址的页面，其他导航拦截；数据目录和仓库根取 serve 输出。
   - 遗留（方案以外，未改）：工作区快照的源码面板读当前文件，建索引后文件改过时行号会错位；serve 审查任务没有并发上限；Windows 上结束 serve 不经 SIGTERM，不清理 scip-python；仓库配置写了 provider 时会使用用户环境里已有的厂商 key；插件只限制主浏览器的导航，弹窗不受限（不注入 JS 桥）。
 
+- [x] 阶段9：Web UI 交互与符号标记（负责人 2026-11-12 提出，本节内容覆盖 4.2–4.4 中对应描述）
+  - 内容：
+    - 触控板手势：双指捏合缩放，双指滑动平移，按住 ⌘ / Ctrl 滚动也缩放；鼠标拖拽平移不变。
+    - 符号标记：图节点、入口列表、搜索结果、符号详情、审查改动清单和影响面里标出"接口"（kind=http 的入口，不含 FastAPI middleware，节点提示里显示方法和路径）、"模型"、"方法"（kind=method）。
+    - 模型识别（Python，提取层）：类的基类按"同文件类 → import（跟随 `__init__.py` 再导出，最多 5 层）→ 外部已知基类"查找，项目内的类递归判断；已知基类为 pydantic `BaseModel` / `RootModel` / `GenericModel`、`SQLModel`、Django `*.models.Model`、`db.Model` 或 `SQLAlchemy()` 实例的 `.Model`、`declarative_base()` / `registry().generate_base()` 生成的基类的子类、`TypedDict`、`NamedTuple`；装饰器 `dataclass`（含 pydantic 版）、attrs、`@as_declarative`；直接继承 `DeclarativeBase` 或带 `@as_declarative` 的类只是基类，不算模型；星号导入等找不到来源的名字，快照里恰好一个同名类时用它。不识别函数式 `NamedTuple(...)` / `namedtuple()`、`BaseSettings`、Django `AbstractUser` 等、`@mapper_registry.mapped`、动态或条件导入。
+    - 存储：symbols 新增可空列 `model_kind`（pydantic / sqlmodel / sqlalchemy / django / typeddict / namedtuple / dataclass / attrs），`SCHEMA_VERSION` 升到 3；模型不是入口，entries 表不变。
+    - 接口字段（都是可选）：HTTP `SymbolInfo.modelKind`、`SymbolInfo.entry`（每个符号一条，优先 http）；报告 `SymbolChange.modelKind`、`SymbolRef.modelKind`、`SymbolRef.entry`（entry 只在 callers.topProd 和 edgeChanges 两端）。Markdown 报告和 MCP 输出暂不显示标记。
+    - 邻居图分页：4.4 浏览流程里"超过 30 个按文件折叠成'还有 N 个'"改为按节点、按方向分页，每页 5 个；中心节点的翻页在图上方（左上游、右下游，"第 x / y 页，共 n 个"），展开出来的节点超过 5 个时在节点内翻页；页内顺序为层级 → 正式代码在前 → 路径和行号；换中心回到第 1 页。审查报告结构图不分页（报告里每个改动只带前 5 个正式调用方）。
+    - "显示模型"开关：邻居图和结构图共用，默认打开；关闭时隐藏模型节点及只连到它们的边，计数按隐藏后算并提示"已隐藏 m 个模型"，中心节点是模型时不隐藏；选择存在 localStorage `codeinsight.graph.showModels`（只存布尔值，不可用时按默认处理）；搜索结果、入口列表、改动清单不受影响。
+  - 验证：`pnpm -r build`、`pnpm lint`、`CODEINSIGHT_CLAUVE=~/project/Clauve pnpm -r test`（core 148、server 34、web 47、cli 17）、`test:e2e` 13/13 通过（新增触控板手势检查；clauve 的 7 个调用方改为按"第 1 / 2 页，共 7 个"并跨页收集名字核对）；clauve 80cf8e1 上 94 个类识别出 46 个模型（34 个 pydantic 请求/响应模型、12 个 dataclass，与源码里 12 处 `@dataclass` 一致），Enum、Exception 等未误标；入口列表 147 个"接口"标记（151 个 FastAPI 入口中去掉异常处理、middleware、启动事件）；clauve `git status --porcelain` 为空；截图在 /tmp/ci-web-shots/marks-*.png。改动 packages/core/src/{extract,store,report,review,model}、packages/server/src/http、packages/web/src/{marks,graph,browse,report}，删除 packages/web/src/browse/OverflowList.tsx
+
 ## 9. 待确认问题
 
 无。已确认（2026-11-11）：

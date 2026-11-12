@@ -2,6 +2,7 @@ import { api } from '../api/client';
 import { groupBy } from '@codeinsight/core/util/collections';
 import { entryLabel, location } from '../format';
 import { useNav } from '../app/nav';
+import { SymbolMarks } from '../marks/SymbolMarks';
 import { useApi } from './useApi';
 
 /** 入口列表，按 kind 和 framework 分组 */
@@ -24,6 +25,7 @@ export function EntryList({ snapshotId }: { snapshotId: number | undefined }) {
                 <button type="button" className="link" data-testid="entry-item" onClick={() => nav.openGraph({ snapshotId: data.snapshotId, id: e.symbol.id, name: e.symbol.qualifiedName }, 'browse')}>
                   {entryLabel(e)}
                 </button>{' '}
+                <SymbolMarks symbol={{ ...e.symbol, entry: { kind: e.kind, framework: e.framework, detail: e.detail } }} />
                 <span className="muted">{e.symbol.qualifiedName}</span> <span className="loc">{location(e.symbol.path, e.symbol.startLine)}</span>
               </li>
             ))}

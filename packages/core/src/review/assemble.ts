@@ -53,6 +53,7 @@ export function symbolChange(d: SymbolDiff, facts: SymbolFacts): SymbolChange {
     ...(!onBase && d.base && before !== s.displaySignature ? { displaySignatureBefore: before } : {}),
     ...(d.change === 'moved' ? { movedFrom: d.base!.symbolKey } : {}),
     ...(entry ? { entry } : {}),
+    ...(s.modelKind ? { modelKind: s.modelKind } : {}),
     callers: facts.callers[side].get(s.id) ?? EMPTY_CALLERS,
     impact: facts.impact[side].get(s.id) ?? { depth: facts.impactDepth, prod: 0, test: 0 },
   };

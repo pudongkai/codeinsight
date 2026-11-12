@@ -53,9 +53,17 @@ test('neighbor graph shows the callers, expands one more level and opens the sou
   for (const name of ['g', 'k', 'use', 'Service.helper.<locals>.inner', 'pkg.service']) {
     await expect(callers.and(page.locator(`[data-qname="${name}"]`))).toHaveCount(1);
   }
+  // 显示测试代码后共 6 个调用方，每页 5 个
   await page.getByTestId('toggle-tests').check();
-  await expect(callers).toHaveCount(6);
+  const pager = page.getByTestId('pager-caller');
+  await expect(pager).toHaveAttribute('data-total', '6');
+  await expect(pager.getByTestId('pager-text')).toHaveText('第 1 / 2 页，共 6 个');
+  await expect(callers).toHaveCount(5);
+  await pager.getByTestId('pager-next').click();
+  await expect(callers).toHaveCount(1);
+  await expect(callers.first()).toHaveAttribute('data-qname', 'test_f');
   await page.getByTestId('toggle-tests').uncheck();
+  await expect(callers).toHaveCount(5);
 
   const before = await graph.getByTestId('graph-node').count();
   await graph.locator('[data-testid=graph-node][data-name=g]').getByTestId('expand-node').click();
@@ -94,4 +102,52 @@ test('with a JS bridge, clicking a function calls openFile instead of showing th
   await page.getByTestId('symbol-location').click();
   expect(await page.evaluate(() => (window as unknown as { __calls: unknown }).__calls)).toEqual([['pkg/repo.py', 4]]);
   await expect(page.getByTestId('source-panel')).toHaveCount(0);
+});
+
+/** React Flow 视口的平移和缩放，从 .react-flow__viewport 的 transform 读出 */
+async function viewport(page: Page) {
+  return page.locator('[data-testid=neighbor-graph] .react-flow__viewport').evaluate((el) => {
+    const m = new DOMMatrixReadOnly(getComputedStyle(el).transform);
+    return { x: m.e, y: m.f, zoom: m.a };
+  });
+}
+
+test('trackpad gestures: two-finger scroll pans, pinch (ctrl + wheel) and ⌘/Ctrl + scroll zoom', async ({ page }) => {
+  await openApp(page);
+  const graph = await openNeighborGraphOfF(page);
+  const box = (await graph.boundingBox())!;
+  // 图的上沿中间：不在左下角的缩放按钮上
+  await page.mouse.move(box.x + box.width / 2, box.y + 12);
+  await page.waitForTimeout(300);
+
+  const v0 = await viewport(page);
+  await page.mouse.wheel(40, 60);
+  await expect.poll(async () => (await viewport(page)).y).not.toBe(v0.y);
+  const v1 = await viewport(page);
+  expect(v1.zoom).toBeCloseTo(v0.zoom, 5);
+  expect(v1.x).toBeLessThan(v0.x);
+  expect(v1.y).toBeLessThan(v0.y);
+
+  // 捏合：Chrome 里是带 ctrlKey 的 wheel 事件，不伴随按键事件
+  await graph.locator('.react-flow__pane').dispatchEvent('wheel', { deltaY: -40, ctrlKey: true, clientX: box.x + 200, clientY: box.y + 200 });
+  await expect.poll(async () => (await viewport(page)).zoom).toBeGreaterThan(v1.zoom);
+  const v2 = await viewport(page);
+
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, 120);
+  await page.keyboard.up('Control');
+  await expect.poll(async () => (await viewport(page)).zoom).toBeLessThan(v2.zoom);
+
+  // 单击设为中心不受影响
+  await graph.locator('[data-testid=graph-node][data-name=g]').click();
+  await expect(page.getByTestId('symbol-detail').locator('h3')).toHaveText('g');
+});
+
+test('marks HTTP endpoints in the entry list, but not middleware', async ({ page }) => {
+  await openApp(page);
+  const list = page.getByTestId('entry-list');
+  const item = (name: string) => list.locator('li').filter({ hasText: new RegExp(`\\b${name}\\b`) });
+  await expect(item('get_item').getByTestId('symbol-mark')).toHaveText(['接口']);
+  await expect(item('get_item').getByTestId('symbol-mark')).toHaveAttribute('title', /GET \/items\/\{item_id\}/);
+  await expect(item('add_header').getByTestId('symbol-mark')).toHaveCount(0);
 });

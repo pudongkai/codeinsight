@@ -1,4 +1,4 @@
-import type { EntryKind, SymbolRow } from '../model/types.js';
+import type { EntryKind, ModelKind, SymbolRow } from '../model/types.js';
 
 /** 提取层的符号：入库字段之外，带名字标识符的位置，供 SCIP 定义对应到符号 */
 export interface ExtractedSymbol extends Omit<SymbolRow, 'snapshotId'> {
@@ -27,6 +27,25 @@ export interface ImportBinding {
   name?: string;
 }
 
+/** 一个类的基类和装饰器（点分名字列表），全部文件提取完后据此判断是不是数据模型类 */
+export interface ClassHint {
+  symbolId: string;
+  bases: string[][];
+  decorators: string[][];
+}
+
+/**
+ * 模块顶层赋值得到、能当模型基类用的变量：
+ * `Base = declarative_base()` 为 declarative（子类是 SQLAlchemy 模型），`db = SQLAlchemy()` 为 flask_db（`db.Model` 的子类是模型）
+ */
+export type BaseVarKind = 'declarative' | 'flask_db';
+
+/** 模型识别的结果：kind 为类别；base 为 true 时类本身只是模型基类（如继承 DeclarativeBase 的 Base），不算模型，它的子类才算 */
+export interface ModelMatch {
+  kind: ModelKind;
+  base: boolean;
+}
+
 export interface ExtractedFile {
   path: string;
   /** 按出现顺序，第一个是 module 符号 */
@@ -36,4 +55,7 @@ export interface ExtractedFile {
   importRows: [number, number][];
   djangoRoutes: DjangoRoute[];
   imports: Map<string, ImportBinding>;
+  /** 模型识别用；从库里还原的文件没有 */
+  classes?: ClassHint[];
+  baseVars?: Map<string, BaseVarKind>;
 }

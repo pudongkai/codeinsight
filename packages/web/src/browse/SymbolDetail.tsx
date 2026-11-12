@@ -1,6 +1,7 @@
 import { api } from '../api/client';
 import { entryLabel, location } from '../format';
 import { useNav } from '../app/nav';
+import { SymbolMarks } from '../marks/SymbolMarks';
 import { useApi } from './useApi';
 
 /** 中心函数的详情：位置（点击打开源码）、签名、docstring、入口、调用方和被调用方数量 */
@@ -14,6 +15,7 @@ export function SymbolDetail({ snapshotId, id }: { snapshotId: number; id: strin
   return (
     <section className="panel" data-testid="symbol-detail">
       <h3>{s.qualifiedName}</h3>
+      <SymbolMarks symbol={s} />
       <button type="button" className="link" data-testid="symbol-location" onClick={open}>
         {location(s.path, s.startLine)}–{s.endLine}
       </button>

@@ -1,5 +1,5 @@
 import { log } from '@codeinsight/core';
-import type { SnapshotRow, SymbolRow } from '@codeinsight/core';
+import type { SnapshotRow, Store, SymbolRow } from '@codeinsight/core';
 import type { AppContext, RequestContext } from './context.js';
 import { HttpError } from './respond.js';
 
@@ -57,11 +57,35 @@ export interface SymbolInfo {
   startLine: number;
   endLine: number;
   isTest: boolean;
+  /** 数据模型类的类别（pydantic、sqlalchemy、django、dataclass 等），不是模型时不存在 */
+  modelKind?: string;
+  /** 入口信息（有多个时优先 HTTP 入口），不是入口时不存在；界面据此标出 HTTP 接口 */
+  entry?: { kind: string; framework: string; detail: Record<string, unknown> };
 }
 
-export function symbolInfo(s: SymbolRow): SymbolInfo {
+type EntryInfo = NonNullable<SymbolInfo['entry']>;
+
+export function symbolInfo(s: SymbolRow, entry?: EntryInfo): SymbolInfo {
   return {
     id: s.id, key: s.symbolKey, kind: s.kind, name: s.name, qualifiedName: s.qualifiedName, displaySignature: s.displaySignature,
     path: s.path, startLine: s.startLine, endLine: s.endLine, isTest: s.isTest,
+    ...(s.modelKind ? { modelKind: s.modelKind } : {}),
+    ...(entry ? { entry } : {}),
   };
+}
+
+/** 一组符号的入口：每个符号取一个，HTTP 入口优先 */
+export function entryMap(store: Store, snapshotId: number, ids: string[]): Map<string, EntryInfo> {
+  const out = new Map<string, EntryInfo>();
+  for (const e of store.getEntriesForSymbols(snapshotId, ids)) {
+    if (out.has(e.symbolId) && (out.get(e.symbolId)!.kind === 'http' || e.kind !== 'http')) continue;
+    out.set(e.symbolId, { kind: e.kind, framework: e.framework, detail: e.detail });
+  }
+  return out;
+}
+
+/** 批量转换符号，带上各自的入口信息 */
+export function symbolInfos(store: Store, snapshotId: number, rows: SymbolRow[]): SymbolInfo[] {
+  const entries = entryMap(store, snapshotId, rows.map((r) => r.id));
+  return rows.map((r) => symbolInfo(r, entries.get(r.id)));
 }

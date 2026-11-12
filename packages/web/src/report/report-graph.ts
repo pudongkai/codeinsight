@@ -1,6 +1,7 @@
 import type { ReviewReport, SymbolChange, SymbolRef } from '@codeinsight/core/report/types';
 import type { GraphEdgeSpec, GraphNodeSpec, NodeTone } from '../graph/types';
 import { location } from '../format';
+import { symbolMarks } from '../marks/marks';
 import type { SymbolTarget } from './actions';
 
 /** 结构图里最多画这么多个改动函数（按正式代码调用方数从多到少） */
@@ -13,6 +14,8 @@ export interface ReportGraph {
   targets: Map<string, { change?: SymbolChange; target: SymbolTarget }>;
   /** 没画出来的改动函数个数 */
   omitted: number;
+  /** 因"显示模型"关闭而没画的模型类个数 */
+  hiddenModels: number;
 }
 
 const TONES: Record<SymbolChange['change'], NodeTone> = {
@@ -42,27 +45,40 @@ function selectChanges(report: ReviewReport): { shown: SymbolChange[]; omitted: 
 }
 
 /**
- * 报告里的结构图：改动函数，加上它们的正式代码调用方（topProd）和调用边变化的另一端。
+ * 报告里的结构图：改动函数，加上它们的正式代码调用方（topProd，每个改动最多 5 个）和调用边变化的另一端。
  * 新增边绿色、删除边红色虚线，其余调用关系灰色。只用报告数据，离线 HTML 报告也能画。
+ * showModels 为 false 时不画模型类（改动的和相邻的都不画），连到它们的边也不画。
  */
-export function buildReportGraph(report: ReviewReport): ReportGraph {
-  const { shown, omitted } = selectChanges(report);
+export function buildReportGraph(report: ReviewReport, opts: { showModels?: boolean } = {}): ReportGraph {
+  const showModels = opts.showModels ?? true;
+  const hidden = new Set<string>();
+  const { shown: selected, omitted } = selectChanges(report);
+  const shown = selected.filter((c) => {
+    if (showModels || !c.modelKind) return true;
+    hidden.add(c.key);
+    return false;
+  });
   const nodes = new Map<string, GraphNodeSpec>();
   const edges = new Map<string, GraphEdgeSpec>();
   const targets: ReportGraph['targets'] = new Map();
   for (const c of shown) {
     const id = nodeId(c.key);
-    nodes.set(id, { id, label: c.name, sublabel: location(c.path, c.startLine), tone: TONES[c.change], title: c.qualifiedName, attrs: { change: c.change } });
+    nodes.set(id, { id, label: c.name, sublabel: location(c.path, c.startLine), tone: TONES[c.change], title: c.qualifiedName, attrs: { change: c.change }, marks: symbolMarks(c) });
     targets.set(id, { change: c, target: changeTarget(c) });
   }
-  const addRef = (r: SymbolRef, side: 'base' | 'head') => {
+  const addRef = (r: SymbolRef, side: 'base' | 'head'): string | undefined => {
     const id = nodeId(r.key);
     if (nodes.has(id)) return id;
-    nodes.set(id, { id, label: r.name, sublabel: location(r.path, r.startLine), tone: r.isTest ? 'test' : 'neighbor', title: r.qualifiedName });
+    if (!showModels && r.modelKind) {
+      hidden.add(r.key);
+      return undefined;
+    }
+    nodes.set(id, { id, label: r.name, sublabel: location(r.path, r.startLine), tone: r.isTest ? 'test' : 'neighbor', title: r.qualifiedName, marks: symbolMarks(r) });
     targets.set(id, { target: refTarget(r, side) });
     return id;
   };
-  const addEdge = (src: string, dst: string, tone: GraphEdgeSpec['tone']) => {
+  const addEdge = (src: string | undefined, dst: string | undefined, tone: GraphEdgeSpec['tone']) => {
+    if (!src || !dst) return;
     const id = `${tone}:${src}->${dst}`;
     if (!edges.has(id)) edges.set(id, { id, source: src, target: dst, tone });
   };
@@ -72,5 +88,5 @@ export function buildReportGraph(report: ReviewReport): ReportGraph {
     if (!shownKeys.has(e.src.key) && !shownKeys.has(e.dst.key)) continue;
     addEdge(addRef(e.src, sideOf(e)), addRef(e.dst, sideOf(e)), e.change);
   }
-  return { nodes: [...nodes.values()], edges: [...edges.values()], targets, omitted };
+  return { nodes: [...nodes.values()], edges: [...edges.values()], targets, omitted, hiddenModels: hidden.size };
 }

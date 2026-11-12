@@ -13,7 +13,7 @@ function entries(ctx: RequestContext): void {
   const symbols = new Map(store.getSymbolsByIds(snap.id, [...new Set(rows.map((e) => e.symbolId))]).map((s) => [s.id, s]));
   const items = rows
     .filter((e) => symbols.has(e.symbolId))
-    .map((e) => ({ kind: e.kind, framework: e.framework, detail: e.detail, symbol: symbolInfo(symbols.get(e.symbolId)!) }))
+    .map((e) => ({ kind: e.kind, framework: e.framework, detail: e.detail, symbol: symbolInfo(symbols.get(e.symbolId)!, { kind: e.kind, framework: e.framework, detail: e.detail }) }))
     .sort((a, b) => a.kind.localeCompare(b.kind) || a.framework.localeCompare(b.framework) || a.symbol.path.localeCompare(b.symbol.path) || a.symbol.startLine - b.symbol.startLine);
   ctx.logFields.results = items.length;
   sendJson(ctx.res, 200, { snapshotId: snap.id, entries: items });

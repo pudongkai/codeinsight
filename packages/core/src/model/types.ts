@@ -44,7 +44,15 @@ export interface SymbolRow {
   docstring: string | null;
   isTest: boolean;
   isGenerated: boolean;
+  /** 数据模型类的类别（见 ModelKind），不是模型或不是类时为 null */
+  modelKind: ModelKind | null;
 }
+
+/**
+ * 数据模型类的来源：pydantic BaseModel、SQLModel、SQLAlchemy 声明式模型（含 Flask-SQLAlchemy db.Model）、
+ * Django models.Model、TypedDict、NamedTuple、dataclass、attrs。继承项目内模型类的子类沿用基类的类别
+ */
+export type ModelKind = 'pydantic' | 'sqlmodel' | 'sqlalchemy' | 'django' | 'typeddict' | 'namedtuple' | 'dataclass' | 'attrs';
 
 export type EdgeKind = 'call' | 'reference' | 'import' | 'inherit' | 'implement' | 'dispatch' | 'route_handler';
 export type Provenance = 'scip' | 'psi' | 'name_match' | 'framework';
