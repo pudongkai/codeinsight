@@ -136,6 +136,8 @@ textarea { width: 100%; box-sizing: border-box; }
 .graph-toggle { white-space: nowrap; }
 .panel-head .toolbar { margin-bottom: 0; }
 .react-flow__handle { opacity: 0; }
+/* 平移、缩放期间视口单独成层（见 FlowGraph 的 useMovingFlag） */
+.graph[data-moving] .react-flow__viewport { will-change: transform; }
 
 .src { background: #f8fafc; border-radius: 4px; padding: 6px 0; overflow-x: auto; white-space: pre; }
 .src-line { display: flex; }

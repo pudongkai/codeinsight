@@ -537,7 +537,7 @@ codeinsight mcp     [--repo .] [--data-dir DIR]              # stdio MCP
 
 - [x] 阶段9：Web UI 交互与符号标记（负责人 2026-11-12 提出，本节内容覆盖 4.2–4.4 中对应描述）
   - 内容：
-    - 触控板手势：双指捏合缩放，双指滑动不移动图（交给页面滚动），按住 ⌘ / Ctrl 滚动也缩放；鼠标拖拽平移。
+    - 触控板手势：双指捏合缩放，双指滑动不移动图（交给页面滚动），按住 ⌘ / Ctrl 滚动也缩放；鼠标拖拽平移。图区不画点阵背景，平移缩放期间视口单独成合成层（`will-change: transform`，结束后撤掉），减少 IDE 内嵌浏览器离屏渲染下每帧的重绘。
     - 符号标记：图节点、入口列表、搜索结果、符号详情、审查改动清单和影响面里标出"接口"（kind=http 的入口，不含 FastAPI middleware，节点提示里显示方法和路径）、"模型"、"方法"（kind=method）。
     - 模型识别（Python，提取层）：类的基类按"同文件类 → import（跟随 `__init__.py` 再导出，最多 5 层）→ 外部已知基类"查找，项目内的类递归判断；已知基类为 pydantic `BaseModel` / `RootModel` / `GenericModel`、`SQLModel`、Django `*.models.Model`、`db.Model` 或 `SQLAlchemy()` 实例的 `.Model`、`declarative_base()` / `registry().generate_base()` 生成的基类的子类、`TypedDict`、`NamedTuple`；装饰器 `dataclass`（含 pydantic 版）、attrs、`@as_declarative`；直接继承 `DeclarativeBase` 或带 `@as_declarative` 的类只是基类，不算模型；星号导入等找不到来源的名字，快照里恰好一个同名类时用它。不识别函数式 `NamedTuple(...)` / `namedtuple()`、`BaseSettings`、Django `AbstractUser` 等、`@mapper_registry.mapped`、动态或条件导入。
     - 存储：symbols 新增可空列 `model_kind`（pydantic / sqlmodel / sqlalchemy / django / typeddict / namedtuple / dataclass / attrs），`SCHEMA_VERSION` 升到 3；模型不是入口，entries 表不变。
