@@ -1,6 +1,6 @@
-import { Background, Controls, MarkerType, ReactFlow, useReactFlow, useStore, type Edge } from '@xyflow/react';
+import { Controls, MarkerType, ReactFlow, useReactFlow, useStore, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { SymbolNode, type SymbolFlowNode } from './SymbolNode';
 import type { EdgeTone, GraphEdgeSpec, GraphNodeSpec } from './types';
 import { useLayout } from './useLayout';
@@ -56,6 +56,17 @@ const TRACKPAD_GESTURES = {
   panOnDrag: true,
 };
 
+/**
+ * 平移、缩放期间把视口放进单独的合成层，每帧只移动已画好的层，不重画节点和边；
+ * 结束后撤掉，让文字按新的缩放比例重新清晰绘制。直接改 DOM 属性，不触发 React 重渲染。
+ */
+function useMovingFlag() {
+  const ref = useRef<HTMLDivElement>(null);
+  const start = useCallback(() => ref.current?.setAttribute('data-moving', ''), []);
+  const end = useCallback(() => ref.current?.removeAttribute('data-moving'), []);
+  return { ref, start, end };
+}
+
 /** 容器尺寸变化（如打开源码面板）后重新适配视野 */
 function FitOnResize() {
   const { fitView } = useReactFlow();
@@ -67,10 +78,14 @@ function FitOnResize() {
   return null;
 }
 
-/** React Flow + ELK 渲染的调用图（报告结构图和浏览邻居图共用） */
+/**
+ * React Flow + ELK 渲染的调用图（报告结构图和浏览邻居图共用）。
+ * 不画点阵背景：点阵跟着平移缩放每帧整块重画，在 IDE 内嵌的离屏渲染浏览器里拖动会明显变慢。
+ */
 export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubleClick, testId }: Props) {
   const { positions, version, error } = useLayout(nodes, edges);
   const handlers = useClickHandlers(onNodeClick, onNodeDoubleClick);
+  const moving = useMovingFlag();
   const flowNodes = useMemo<SymbolFlowNode[]>(
     () => nodes.map((n) => ({ id: n.id, type: 'symbol', position: positions?.get(n.id) ?? { x: 0, y: 0 }, data: { spec: n }, draggable: false })),
     [nodes, positions],
@@ -83,7 +98,7 @@ export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubl
     [edges],
   );
   return (
-    <div className="graph" style={{ height }} data-testid={testId} data-node-count={nodes.length}>
+    <div ref={moving.ref} className="graph" style={{ height }} data-testid={testId} data-node-count={nodes.length}>
       {error && <div className="error">{error}</div>}
       {positions && (
         <ReactFlow
@@ -99,9 +114,10 @@ export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubl
           onNodeClick={(_, n) => handlers.click(n.id)}
           onNodeDoubleClick={(_, n) => handlers.double(n.id)}
           zoomOnDoubleClick={false}
+          onMoveStart={moving.start}
+          onMoveEnd={moving.end}
           proOptions={{ hideAttribution: true }}
         >
-          <Background gap={20} color="#e2e8f0" />
           <Controls showInteractive={false} />
           <FitOnResize />
         </ReactFlow>

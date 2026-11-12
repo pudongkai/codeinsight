@@ -141,6 +141,30 @@ test('trackpad gestures: two-finger scroll leaves the graph alone, pinch (ctrl +
   await expect(page.getByTestId('symbol-detail').locator('h3')).toHaveText('g');
 });
 
+test('mouse drag pans the graph; the viewport is a separate layer only while moving', async ({ page }) => {
+  await openApp(page);
+  const graph = await openNeighborGraphOfF(page);
+  const box = (await graph.boundingBox())!;
+  const layer = () => graph.locator('.react-flow__viewport').evaluate((el) => getComputedStyle(el).willChange);
+  await page.waitForTimeout(300);
+  const v0 = await viewport(page);
+  expect(await layer()).toBe('auto');
+
+  await page.mouse.move(box.x + box.width / 2, box.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + 52, { steps: 5 });
+  expect(await layer()).toBe('transform');
+  await page.mouse.up();
+  const v1 = await viewport(page);
+  expect(v1.x - v0.x).toBeCloseTo(60, 0);
+  expect(v1.y - v0.y).toBeCloseTo(40, 0);
+  await expect.poll(layer).toBe('auto');
+
+  await graph.locator('.react-flow__pane').dispatchEvent('wheel', { deltaY: -40, ctrlKey: true, clientX: box.x + 200, clientY: box.y + 200 });
+  await expect.poll(async () => (await viewport(page)).zoom).toBeGreaterThan(v1.zoom);
+  await expect.poll(layer).toBe('auto');
+});
+
 test('marks HTTP endpoints in the entry list, but not middleware', async ({ page }) => {
   await openApp(page);
   const list = page.getByTestId('entry-list');
