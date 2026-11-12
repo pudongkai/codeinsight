@@ -1,4 +1,6 @@
-export type NodeTone = 'center' | 'added' | 'removed' | 'modified' | 'moved' | 'neighbor' | 'test' | 'overflow';
+import type { Mark } from '../marks/marks';
+
+export type NodeTone = 'center' | 'added' | 'removed' | 'modified' | 'moved' | 'neighbor' | 'test';
 export type EdgeTone = 'normal' | 'added' | 'removed';
 
 /** 图上的一个节点（结构图和邻居图共用） */
@@ -13,7 +15,19 @@ export interface GraphNodeSpec {
   column?: number;
   /** 渲染为节点元素上的 `data-*` 属性 */
   attrs?: Record<string, string>;
+  /** 类型标记（接口 / 模型 / 方法），显示在名字右边；接口的方法和路径放进节点的悬停提示 */
+  marks?: Mark[];
   onExpand?: () => void;
+  /** 展开后下一层超过一页时，节点里显示的翻页按钮 */
+  pager?: NodePager;
+}
+
+export interface NodePager {
+  /** 从 0 开始 */
+  page: number;
+  pages: number;
+  total: number;
+  onPage(page: number): void;
 }
 
 export interface GraphEdgeSpec {

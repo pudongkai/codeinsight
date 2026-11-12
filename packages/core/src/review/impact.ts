@@ -32,8 +32,14 @@ export function loadGraphSide(store: Store, snap: SnapshotRow | undefined): Grap
   };
 }
 
-export function symbolRef(s: SymbolRow): SymbolRef {
-  return { key: s.symbolKey, id: s.id, kind: s.kind, name: s.name, qualifiedName: s.qualifiedName, path: s.path, startLine: s.startLine, isTest: s.isTest };
+/** entries 给出时带上该符号的入口信息（图上要标出 HTTP 接口的地方用） */
+export function symbolRef(s: SymbolRow, entries?: Map<string, EntryInfo>): SymbolRef {
+  const entry = entries?.get(s.id);
+  return {
+    key: s.symbolKey, id: s.id, kind: s.kind, name: s.name, qualifiedName: s.qualifiedName, path: s.path, startLine: s.startLine, isTest: s.isTest,
+    ...(s.modelKind ? { modelKind: s.modelKind } : {}),
+    ...(entry ? { entry } : {}),
+  };
 }
 
 export const EMPTY_CALLERS: CallerSummary = { prod: 0, test: 0, topProd: [] };
@@ -55,7 +61,7 @@ export function callerSummaries(side: GraphSide, ids: string[]): Map<string, Cal
       .map((c) => ({ c, n: sites.get(`${origin}\0${c.id}`) ?? 0 }))
       .sort((a, b) => b.n - a.n || a.c.symbolKey.localeCompare(b.c.symbolKey))
       .slice(0, TOP_PROD_CALLERS)
-      .map(({ c }) => symbolRef(c));
+      .map(({ c }) => symbolRef(c, side.entries));
     out.set(origin, { prod: prod.length, test: callers.length - prod.length, topProd: top });
   }
   return out;
@@ -110,10 +116,10 @@ export function edgeChanges(diffs: SymbolDiff[], base: GraphSide, head: GraphSid
     const before = d.base ? (baseOut.get(d.base.id) ?? new Map<string, OutEdge>()) : new Map<string, OutEdge>();
     const after = d.head ? (headOut.get(d.head.id) ?? new Map<string, OutEdge>()) : new Map<string, OutEdge>();
     for (const [k, e] of after) {
-      if (!before.has(k)) changes.push({ src: symbolRef(d.head!), dst: symbolRef(e.dst), kind: e.kind, change: 'added' });
+      if (!before.has(k)) changes.push({ src: symbolRef(d.head!, head.entries), dst: symbolRef(e.dst, head.entries), kind: e.kind, change: 'added' });
     }
     for (const [k, e] of before) {
-      if (!after.has(k)) changes.push({ src: symbolRef(d.base!), dst: symbolRef(e.dst), kind: e.kind, change: 'removed' });
+      if (!after.has(k)) changes.push({ src: symbolRef(d.base!, base.entries), dst: symbolRef(e.dst, base.entries), kind: e.kind, change: 'removed' });
     }
   }
   return changes;

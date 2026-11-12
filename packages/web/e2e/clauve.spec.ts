@@ -65,20 +65,40 @@ async function insertAuditLogGraph(page: Page): Promise<Locator> {
   return graph;
 }
 
+/** 邻居图上方的上游翻页控件；调用方每页 5 个 */
+async function callerPages(page: Page, level1: Locator): Promise<{ total: number; names: (string | null)[] }> {
+  const pager = page.getByTestId('pager-caller');
+  const total = Number(await pager.getAttribute('data-total'));
+  const pages = Number(await pager.getAttribute('data-pages'));
+  const names: (string | null)[] = [];
+  for (let p = 1; p <= pages; p++) {
+    await expect(pager).toHaveAttribute('data-page', String(p));
+    names.push(...(await level1.evaluateAll((els) => els.map((e) => e.getAttribute('data-qname')))));
+    if (p < pages) await pager.getByTestId('pager-next').click();
+  }
+  for (let p = pages; p > 1; p--) await pager.getByTestId('pager-prev').click();
+  return { total, names };
+}
+
 test('insert_audit_log (lease) has 7 callers on the left, and one caller expands one more level', async ({ page }) => {
   await openApp(page);
   const graph = await insertAuditLogGraph(page);
   const callers = graph.locator('[data-testid=graph-node][data-side=caller][data-level="1"]');
   await expect(callers.first()).toBeVisible();
-  summary.insertAuditLogCallers = await callers.count();
-  summary.insertAuditLogCallerNames = await callers.evaluateAll((els) => els.map((e) => e.getAttribute('data-qname')));
+  await expect(page.getByTestId('pager-caller').getByTestId('pager-text')).toHaveText('第 1 / 2 页，共 7 个');
+  const { total, names } = await callerPages(page, callers);
+  summary.insertAuditLogCallers = total;
+  summary.insertAuditLogCallerNames = names;
   await shot(page, '02-insert_audit_log-neighbors.png');
   expect(summary.insertAuditLogCallers).toBe(7);
+  expect(new Set(names).size).toBe(7);
 
   const nodes = graph.getByTestId('graph-node');
+  const pager = page.getByTestId('pager-caller');
   for (let i = 0; i < 7; i++) {
+    if (i === 5) await pager.getByTestId('pager-next').click();
     const before = await nodes.count();
-    const caller = callers.nth(i);
+    const caller = callers.nth(i % 5);
     const name = await caller.getAttribute('data-qname');
     await caller.getByTestId('expand-node').click();
     await expect(caller.getByTestId('expand-node')).toHaveCount(0);
@@ -125,4 +145,25 @@ test('reviewing fc4c752 shows all report panels', async ({ page }) => {
   summary.adminApiAdded = await adminAdded.count();
   await shot(page, '06-review-fc4c752.png');
   expect(summary.adminApiAdded).toBe(16);
+});
+
+test('marks HTTP endpoints, models and methods (screenshots for review)', async ({ page }) => {
+  await openApp(page);
+  const entries = page.getByTestId('entry-list');
+  const apiMarks = entries.locator('[data-testid=symbol-mark][data-mark=api]');
+  await expect(apiMarks.first()).toBeVisible();
+  summary.entryApiMarks = await apiMarks.count();
+  await shot(page, 'marks-entries.png');
+
+  await page.getByTestId('search-input').fill('LoginRequest');
+  const result = page.getByTestId('search-result').filter({ hasText: /^LoginRequest$/ }).first();
+  await expect(result.locator('xpath=..').getByTestId('symbol-mark')).toHaveText(['模型']);
+  await result.click();
+  const graph = page.getByTestId('neighbor-graph');
+  const center = graph.locator('[data-side=center][data-name=LoginRequest]');
+  await expect(center.getByTestId('symbol-mark')).toHaveText(['模型']);
+  await expect(graph.locator('[data-testid=graph-node][data-side=caller]').first()).toBeVisible();
+  summary.loginRequestCallerMarks = await graph.locator('[data-testid=graph-node][data-side=caller]').evaluateAll((els) =>
+    els.map((e) => `${e.getAttribute('data-qname')}: ${[...e.querySelectorAll('[data-testid=symbol-mark]')].map((m) => m.textContent).join(',')}`));
+  await shot(page, 'marks-neighbors.png');
 });

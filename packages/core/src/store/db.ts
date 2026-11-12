@@ -7,6 +7,7 @@ import type {
   EdgeRow,
   EntryRow,
   FileRow,
+  ModelKind,
   ReviewRow,
   ReviewStatus,
   SnapshotKind,
@@ -142,6 +143,7 @@ export function toSymbol(r: Row, withTokens = true): SymbolRow {
     docstring: (r.docstring as string | null) ?? null,
     isTest: r.is_test === 1,
     isGenerated: r.is_generated === 1,
+    modelKind: (r.model_kind as ModelKind | null) ?? null,
   };
 }
 
@@ -272,14 +274,14 @@ export class Store {
   insertSymbols(rows: SymbolRow[]): void {
     const st = this.db.prepare(
       `INSERT INTO symbols(snapshot_id, id, symbol_key, kind, name, qualified_name, signature, display_signature,
-        parent_id, path, start_line, end_line, body_hash, norm_tokens, docstring, is_test, is_generated)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        parent_id, path, start_line, end_line, body_hash, norm_tokens, docstring, is_test, is_generated, model_kind)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     );
     for (const s of rows) {
       st.run(
         s.snapshotId, s.id, s.symbolKey, s.kind, s.name, s.qualifiedName, s.signature, s.displaySignature,
         s.parentId, s.path, s.startLine, s.endLine, s.bodyHash, encodeTokens(s.normTokens), s.docstring,
-        s.isTest ? 1 : 0, s.isGenerated ? 1 : 0,
+        s.isTest ? 1 : 0, s.isGenerated ? 1 : 0, s.modelKind,
       );
     }
   }
@@ -375,6 +377,14 @@ export class Store {
 
   getEntriesForSymbol(snapshotId: number, symbolId: string): EntryRow[] {
     return (this.db.prepare('SELECT * FROM entries WHERE snapshot_id = ? AND symbol_id = ?').all(snapshotId, symbolId) as Row[]).map(toEntry);
+  }
+
+  /** 一组符号的入口，id 列表作为一个 JSON 参数传入 */
+  getEntriesForSymbols(snapshotId: number, ids: string[]): EntryRow[] {
+    if (ids.length === 0) return [];
+    return (this.db
+      .prepare('SELECT * FROM entries WHERE snapshot_id = ? AND symbol_id IN (SELECT value FROM json_each(?))')
+      .all(snapshotId, JSON.stringify(ids)) as Row[]).map(toEntry);
   }
 
   getEntries(snapshotId: number): EntryRow[] {

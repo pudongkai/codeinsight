@@ -21,7 +21,7 @@ export function fileFrameworks(root: Node): Set<string> {
 }
 
 /** `a.b.c` 这样的属性链转成名字列表；不是纯名字链时返回 undefined */
-function dottedParts(node: Node | null): string[] | undefined {
+export function dottedParts(node: Node | null): string[] | undefined {
   if (!node) return undefined;
   if (node.type === 'identifier') return [node.text];
   if (node.type !== 'attribute') return undefined;
@@ -121,9 +121,9 @@ function djangoViewTarget(view: Node | undefined): string[] | undefined {
   return fn && fn.length >= 2 && fn[fn.length - 1] === 'as_view' ? fn.slice(0, -1) : undefined;
 }
 
-// ---- Django 路由的跨文件查找 ----
+// ---- 跨文件查找（Django 路由、模型类的基类）----
 
-interface SymbolIndex {
+export interface SymbolIndex {
   /** 模块点分路径 → 文件路径 */
   modules: Map<string, string>;
   /** 文件路径 → (qualified_name → 符号) */
@@ -132,7 +132,7 @@ interface SymbolIndex {
   byName: Map<string, ExtractedSymbol[]>;
 }
 
-function buildIndex(files: ExtractedFile[]): SymbolIndex {
+export function buildIndex(files: ExtractedFile[]): SymbolIndex {
   const idx: SymbolIndex = { modules: new Map(), byFile: new Map(), byName: new Map() };
   for (const f of files) {
     const qmap = new Map<string, ExtractedSymbol>();
@@ -149,7 +149,7 @@ function buildIndex(files: ExtractedFile[]): SymbolIndex {
 }
 
 /** 模块名可能不含源码根目录前缀（如 src/ 布局），精确匹配不到时按唯一的后缀匹配 */
-function findModuleFile(idx: SymbolIndex, module: string): string | undefined {
+export function findModuleFile(idx: SymbolIndex, module: string): string | undefined {
   const exact = idx.modules.get(module);
   if (exact) return exact;
   const hits = [...idx.modules.entries()].filter(([qn]) => qn.endsWith(`.${module}`));

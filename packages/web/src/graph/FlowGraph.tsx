@@ -43,6 +43,18 @@ function useClickHandlers(onClick?: (id: string) => void, onDouble?: (id: string
 
 const FIT_OPTIONS = { padding: 0.15, maxZoom: 1.2 };
 
+/**
+ * 按触控板习惯操作：双指滑动平移，双指捏合缩放（Chrome / JCEF 里捏合是带 ctrlKey 的 wheel 事件）；
+ * 按住 ⌘ / Ctrl 再滚动也缩放，给鼠标滚轮用户和收不到捏合事件的环境用。鼠标拖拽仍是平移。
+ */
+const TRACKPAD_GESTURES = {
+  panOnScroll: true,
+  zoomOnScroll: false,
+  zoomOnPinch: true,
+  zoomActivationKeyCode: ['Meta', 'Control'],
+  panOnDrag: true,
+};
+
 /** 容器尺寸变化（如打开源码面板）后重新适配视野 */
 function FitOnResize() {
   const { fitView } = useReactFlow();
@@ -81,6 +93,7 @@ export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubl
           fitView
           fitViewOptions={FIT_OPTIONS}
           minZoom={0.1}
+          {...TRACKPAD_GESTURES}
           nodesConnectable={false}
           onNodeClick={(_, n) => handlers.click(n.id)}
           onNodeDoubleClick={(_, n) => handlers.double(n.id)}

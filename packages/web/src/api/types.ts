@@ -12,6 +12,10 @@ export interface SymbolInfo {
   startLine: number;
   endLine: number;
   isTest: boolean;
+  /** 数据模型类的类别（pydantic、sqlalchemy 等），不是模型时不存在 */
+  modelKind?: string;
+  /** 入口信息（有多个时优先 HTTP 入口），不是入口时不存在 */
+  entry?: { kind: string; framework: string; detail: Record<string, unknown> };
 }
 
 export interface IndexJobView {

@@ -3,6 +3,7 @@ import type { SymbolTarget } from './actions';
 import { CallerCounts, ChangeBadge, EntryTag } from './ChangeBadge';
 import { changeTarget, refTarget, sideOf } from './report-graph';
 import { SymbolLink } from './SymbolLink';
+import { SymbolMarks } from '../marks/SymbolMarks';
 
 interface Props {
   change?: SymbolChange;
@@ -29,7 +30,7 @@ export function ImpactPanel({ change: c, onOpen, onGraph }: Props) {
     <section className="panel impact" data-testid="impact-panel">
       <h3>影响面</h3>
       <div className="impact-title">
-        <ChangeBadge change={c.change} /> <SymbolLink target={target} onOpen={onOpen} label={c.qualifiedName} />
+        <ChangeBadge change={c.change} /> <SymbolLink target={target} onOpen={onOpen} label={c.qualifiedName} /> <SymbolMarks symbol={c} />
         {onGraph && <button type="button" className="small" onClick={() => onGraph(target)}>邻居图</button>}
       </div>
       <Signature c={c} />

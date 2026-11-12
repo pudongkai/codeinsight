@@ -2,7 +2,7 @@ import { traverse } from '@codeinsight/core';
 import type { SnapshotRow, SymbolRow, TraverseDirection } from '@codeinsight/core';
 import type { Route, RequestContext } from '../context.js';
 import { HttpError, intParam, sendJson } from '../respond.js';
-import { currentSnapshot, requireSnapshot, requireSymbol, symbolInfo } from '../snapshot.js';
+import { currentSnapshot, entryMap, requireSnapshot, requireSymbol, symbolInfo, symbolInfos } from '../snapshot.js';
 
 const MAX_TREE_DEPTH = 5;
 const MAX_SEARCH_LIMIT = 200;
@@ -16,7 +16,7 @@ function search(ctx: RequestContext): void {
   const snap = currentSnapshot(ctx);
   const rows = ctx.app.ws.store.searchSymbols(snap.id, text, { kind: q.get('kind') || undefined, limit });
   ctx.logFields.results = rows.length;
-  sendJson(ctx.res, 200, { snapshotId: snap.id, results: rows.map(symbolInfo) });
+  sendJson(ctx.res, 200, { snapshotId: snap.id, results: symbolInfos(ctx.app.ws.store, snap.id, rows) });
 }
 
 function target(ctx: RequestContext): { snap: SnapshotRow; sym: SymbolRow } {
@@ -37,11 +37,15 @@ function detail(ctx: RequestContext): void {
   const { snap, sym } = target(ctx);
   const store = ctx.app.ws.store;
   const parent = sym.parentId ? store.getSymbol(snap.id, sym.parentId) : undefined;
+  const entries = store.getEntriesForSymbol(snap.id, sym.id).map((e) => ({ kind: e.kind, framework: e.framework, detail: e.detail }));
   sendJson(ctx.res, 200, {
     snapshotId: snap.id,
     resolverStatus: snap.resolverStatus,
-    symbol: { ...symbolInfo(sym), docstring: sym.docstring, parent: parent ? symbolInfo(parent) : null },
-    entries: store.getEntriesForSymbol(snap.id, sym.id).map((e) => ({ kind: e.kind, framework: e.framework, detail: e.detail })),
+    symbol: {
+      ...symbolInfo(sym, entries.find((e) => e.kind === 'http') ?? entries[0]), docstring: sym.docstring,
+      parent: parent ? symbolInfo(parent, entryMap(store, snap.id, [parent.id]).get(parent.id)) : null,
+    },
+    entries,
     callers: neighborCounts(ctx, snap, sym, 'callers'),
     callees: neighborCounts(ctx, snap, sym, 'callees'),
   });
@@ -58,12 +62,14 @@ function tree(direction: TraverseDirection) {
     const depth = intParam(q.get('depth'), 'depth', { min: 1, max: MAX_TREE_DEPTH, fallback: 1 })!;
     const includeTests = q.get('tests') !== 'false' && q.get('tests') !== '0';
     const r = traverse(ctx.app.ws.store, snap.id, [sym.id], { direction, depth, includeTests });
+    const entries = entryMap(ctx.app.ws.store, snap.id, [...r.symbols.keys()]);
+    const info = (s: SymbolRow) => symbolInfo(s, entries.get(s.id));
     const nodes = [...r.reached.get(sym.id)!]
-      .map(([id, d]) => ({ ...symbolInfo(r.symbols.get(id)!), depth: d }))
+      .map(([id, d]) => ({ ...info(r.symbols.get(id)!), depth: d }))
       .sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path) || a.startLine - b.startLine);
     const edges = r.edges.map((e) => ({ srcId: e.srcId, dstId: e.dstId, kind: e.kind, path: e.path, line: e.line, col: e.col }));
     ctx.logFields.nodes = nodes.length;
-    sendJson(ctx.res, 200, { snapshotId: snap.id, resolverStatus: snap.resolverStatus, direction, depth, root: symbolInfo(sym), nodes, edges });
+    sendJson(ctx.res, 200, { snapshotId: snap.id, resolverStatus: snap.resolverStatus, direction, depth, root: info(sym), nodes, edges });
   };
 }
 

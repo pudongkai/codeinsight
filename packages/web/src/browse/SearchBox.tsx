@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { useNav } from '../app/nav';
 import { location } from '../format';
+import { SymbolMarks } from '../marks/SymbolMarks';
 import { useApi } from './useApi';
 
 const DEBOUNCE_MS = 250;
@@ -31,7 +32,8 @@ export function SearchBox({ ready }: { ready: boolean }) {
             <li key={s.id}>
               <button type="button" className="link" data-testid="search-result" data-path={s.path} onClick={() => nav.openGraph({ snapshotId: data.snapshotId, id: s.id, name: s.qualifiedName }, 'browse')}>
                 {s.qualifiedName}
-              </button>
+              </button>{' '}
+              <SymbolMarks symbol={s} />
               {s.isTest && <span className="tag">测试</span>} <span className="loc">{location(s.path, s.startLine)}</span>
             </li>
           ))}

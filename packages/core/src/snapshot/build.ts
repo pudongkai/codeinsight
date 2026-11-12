@@ -187,7 +187,7 @@ async function buildLocked(opts: BuildSnapshotOptions, t: Target): Promise<Build
   saveExtraction(store, snap.id, read, extracted);
   const extractMs = Date.now() - started;
   const symbols = extracted.files.reduce((n, f) => n + f.symbols.length, 0);
-  log.info('extract_done', { files: read.rows.length, python: extracted.files.length, symbols, entries: extracted.entries.length, ms: extractMs });
+  log.info('extract_done', { files: read.rows.length, python: extracted.files.length, symbols, entries: extracted.entries.length, models: extracted.models, ms: extractMs });
   await runResolver(opts, snap, prepared.dir, extracted.files);
   log.info('snapshot_build_done', { contentKey: t.contentKey, extractMs, totalMs: Date.now() - started });
   return { snapshot: store.getSnapshot(snap.id)!, cached: false, resolveRetried: false };

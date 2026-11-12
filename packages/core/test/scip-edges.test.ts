@@ -7,7 +7,7 @@ function sym(over: Partial<ExtractedSymbol>): ExtractedSymbol {
   return {
     id: 'm', symbolKey: 'a.py#module#a#', kind: 'module', name: 'a', qualifiedName: 'a', signature: '', displaySignature: '',
     parentId: null, path: 'a.py', startLine: 1, endLine: 4, bodyHash: '', normTokens: [], docstring: null,
-    isTest: false, isGenerated: false, nameLine: 0, nameCol: 0, ...over,
+    isTest: false, isGenerated: false, modelKind: null, nameLine: 0, nameCol: 0, ...over,
   };
 }
 

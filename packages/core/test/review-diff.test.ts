@@ -10,7 +10,7 @@ function sym(p: string, qualifiedName: string, bodyHash: string, extra: Partial<
   return {
     snapshotId: 1, id: symbolIdFromKey(key), symbolKey: key, kind, name: qualifiedName.split('.').pop()!, qualifiedName,
     signature: '', displaySignature: '()', parentId: null, path: p, startLine: 1, endLine: 2, bodyHash,
-    normTokens: [], docstring: null, isTest: false, isGenerated: false, ...extra,
+    normTokens: [], docstring: null, isTest: false, isGenerated: false, modelKind: null, ...extra,
   };
 }
 

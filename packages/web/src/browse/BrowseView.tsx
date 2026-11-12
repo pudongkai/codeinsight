@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNav } from '../app/nav';
+import { ShowModelsToggle, useShowModels } from '../graph/show-models';
 import { Breadcrumbs, type Crumb } from './Breadcrumbs';
 import { EntryList } from './EntryList';
 import { NeighborGraph } from './NeighborGraph';
@@ -18,6 +19,7 @@ interface Props {
 function CenterView({ center }: { center: Crumb }) {
   const nav = useNav();
   const [showTests, setShowTests] = useState(false);
+  const [showModels, setShowModels] = useShowModels();
   const { state, error, loading, expand } = useNeighborGraph(center.snapshotId, center.id, nav.snapshotGone);
   const toCenter = (n: NNode) => nav.openGraph({ snapshotId: center.snapshotId, id: n.info.id, name: n.info.qualifiedName });
   const open = (n: NNode) => nav.openSymbol({ snapshotId: center.snapshotId, id: n.info.id, name: n.info.qualifiedName, path: n.info.path, line: n.info.startLine });
@@ -27,11 +29,12 @@ function CenterView({ center }: { center: Crumb }) {
         <label>
           <input type="checkbox" data-testid="toggle-tests" checked={showTests} onChange={(e) => setShowTests(e.target.checked)} /> 显示测试代码
         </label>
-        <span className="muted">单击节点设为中心，双击查看源码，“展开”再加载一层</span>
+        <ShowModelsToggle value={showModels} onChange={setShowModels} />
+        <span className="muted">单击节点设为中心，双击查看源码，“展开”再加载一层；双指滑动平移，双指捏合或按住 ⌘ / Ctrl 滚动缩放</span>
       </div>
       {error && <div className="error">{error}</div>}
       {loading === 'center' && <p className="muted">加载调用关系…</p>}
-      {state && <NeighborGraph state={state} showTests={showTests} loadingId={loading} onExpand={(id) => void expand(id)} onCenter={toCenter} onOpen={open} />}
+      {state && <NeighborGraph state={state} showTests={showTests} showModels={showModels} loadingId={loading} onExpand={(id) => void expand(id)} onCenter={toCenter} onOpen={open} />}
       <SymbolDetail snapshotId={center.snapshotId} id={center.id} />
     </div>
   );

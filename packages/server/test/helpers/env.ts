@@ -37,6 +37,11 @@ const EXTRA_FILES = {
   'tests/test_finder.py': 'from pkg.finder import find\n\n\ndef find_helper():\n    return find(2)\n\n\ndef test_find():\n    assert find(3) == 3\n',
   // 与 pkg/service.py 的 register 同名、签名形状相同：同名重复候选
   'pkg/extra.py': 'def register(cb=None):\n    return cb\n',
+  // 模型类（含跨文件继承）、方法和调用它们的 HTTP 接口：检查 API 里的 modelKind、entry 字段
+  'pkg/schemas.py': 'from pydantic import BaseModel\n\n\nclass Item(BaseModel):\n    name: str\n',
+  'pkg/views_api.py':
+    'from fastapi import APIRouter\nfrom pkg.schemas import Item\n\nrouter = APIRouter()\n\n\nclass ItemOut(Item):\n    id: int\n\n    def label(self):\n        return self.name\n\n\n' +
+    '@router.get("/labels/{item_id}")\ndef read_label(item_id: int):\n    return ItemOut(name="x", id=item_id).label()\n',
 };
 
 /**

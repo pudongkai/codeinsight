@@ -1,5 +1,5 @@
 /** 表结构或已入库数据的计算方式（如 body_hash）变化时加 1；版本不一致时直接删库重建，数据都可以从代码重新算出来 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 CREATE TABLE meta (
@@ -48,6 +48,7 @@ CREATE TABLE symbols (
   docstring TEXT,
   is_test INTEGER NOT NULL,
   is_generated INTEGER NOT NULL,
+  model_kind TEXT,
   PRIMARY KEY (snapshot_id, id)
 );
 CREATE INDEX symbols_name ON symbols(snapshot_id, name);

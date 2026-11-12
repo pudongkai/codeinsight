@@ -5,7 +5,10 @@ import type { EdgeRow } from '@codeinsight/core';
 import { startHttpServer, type RunningHttpServer, type ServerWorkspace } from '../src/index.js';
 import { fixtureRepo, openWorkspace, request, tempDir, waitFor } from './helpers/env.js';
 
-interface SymbolInfo { id: string; key: string; name: string; qualifiedName: string; path: string; isTest: boolean; depth?: number }
+interface SymbolInfo {
+  id: string; key: string; kind: string; name: string; qualifiedName: string; path: string; isTest: boolean; depth?: number;
+  modelKind?: string; entry?: { kind: string; framework: string; detail: Record<string, unknown> };
+}
 interface Status { index: { job: { id: number; status: string; snapshotId?: number } | null }; snapshot: { id: number } | null; reviews: { id: number }[] }
 interface Tree { nodes: (SymbolInfo & { depth: number })[]; edges: { srcId: string; dstId: string; kind: string; line: number }[] }
 
@@ -122,6 +125,28 @@ describe('symbol search and graph', () => {
     expect(new Set(all.body.entries.map((e) => e.framework))).toEqual(new Set(['fastapi', 'flask', 'django', 'celery', 'click']));
     const flask = await api<{ entries: { symbol: SymbolInfo }[] }>('/api/entries?kind=http&framework=flask');
     expect(flask.body.entries.map((e) => e.symbol.name)).toEqual(['hello', 'plain']);
+  });
+
+  it('marks data models and HTTP endpoints on search results, trees, details and entries', async () => {
+    const snapId = (await indexDone()).snapshot!.id;
+    const item = await searchOne('Item');
+    expect(item.modelKind).toBe('pydantic');
+    const out = await searchOne('ItemOut');
+    expect(out.modelKind).toBe('pydantic');
+    expect(out.entry).toBeUndefined();
+    const label = await searchOne('label');
+    expect(label).toMatchObject({ kind: 'method' });
+    expect(label.modelKind).toBeUndefined();
+    const callers = (await api<Tree>(`/api/symbols/${snapId}/${label.id}/callers`)).body;
+    const handler = callers.nodes.find((n) => n.name === 'read_label') as SymbolInfo | undefined;
+    expect(handler?.entry).toMatchObject({ kind: 'http', framework: 'fastapi', detail: { method: 'GET', path: '/labels/{item_id}' } });
+    const callees = (await api<Tree & { root: SymbolInfo }>(`/api/symbols/${snapId}/${handler!.id}/callees`)).body;
+    expect(callees.root.entry?.kind).toBe('http');
+    expect(callees.nodes.find((n) => n.name === 'ItemOut')).toMatchObject({ modelKind: 'pydantic' });
+    const detail = (await api<{ symbol: SymbolInfo & { parent: SymbolInfo | null } }>(`/api/symbols/${snapId}/${label.id}`)).body;
+    expect(detail.symbol.parent).toMatchObject({ name: 'ItemOut', modelKind: 'pydantic' });
+    const entries = (await api<{ entries: { symbol: SymbolInfo }[] }>('/api/entries?framework=fastapi')).body.entries;
+    expect(entries.find((e) => e.symbol.name === 'read_label')?.symbol.entry?.detail).toMatchObject({ method: 'GET' });
   });
 
   it('returns similar candidates for one function', async () => {
