@@ -11,7 +11,7 @@ import { symbolMarks } from '../src/marks/marks';
 import { ChangeList } from '../src/report/ChangeList';
 import { change, info } from './fixtures';
 
-const nav: Nav = { openSymbol: vi.fn(), showSource: vi.fn(), openGraph: vi.fn(), snapshotGone: vi.fn(), indexNotReady: vi.fn() };
+const nav: Nav = { openSymbol: vi.fn(), showSource: vi.fn(), openSourceAt: vi.fn(), openGraph: vi.fn(), snapshotGone: vi.fn(), indexNotReady: vi.fn() };
 const http = { kind: 'http', framework: 'fastapi', detail: { method: 'GET', path: '/users/{id}' } };
 
 function marksIn(el: Element): string[] {

@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AskRuns } from '../jobs/ask-runs.js';
 import type { IndexJobs } from '../jobs/index-jobs.js';
+import type { OverviewJobs } from '../jobs/overview-jobs.js';
 import type { ReviewJobs } from '../jobs/review-jobs.js';
 import type { ServerWorkspace } from '../workspace.js';
 
@@ -8,6 +10,8 @@ export interface AppContext {
   ws: ServerWorkspace;
   indexJobs: IndexJobs;
   reviewJobs: ReviewJobs;
+  overviewJobs: OverviewJobs;
+  askRuns: AskRuns;
   /** 静态文件目录（Web UI 构建产物）；不存在时首页显示占位页 */
   staticDir?: string;
   /** 快照 id → 上次更新 last_used_at 的时间，按快照节流写库 */
@@ -27,7 +31,7 @@ export interface RequestContext {
 export type Handler = (ctx: RequestContext) => Promise<void> | void;
 
 export interface Route {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'DELETE';
   /** 如 `/api/symbols/:snapshot/:id/callers` */
   pattern: string;
   handler: Handler;

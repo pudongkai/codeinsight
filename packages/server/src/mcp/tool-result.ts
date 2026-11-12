@@ -8,9 +8,7 @@ export function textResult(text: string, isError = false): CallToolResult {
 
 /** 统一记录工具调用和耗时并登记为进行中；异常转成 isError 的文本结果，不让 MCP 客户端只看到协议错误 */
 export function runTool(ctx: McpContext, tool: string, fields: Record<string, unknown>, fn: () => Promise<CallToolResult>): Promise<CallToolResult> {
-  const p = execute(tool, fields, fn).finally(() => ctx.pending.delete(p));
-  ctx.pending.add(p);
-  return p;
+  return ctx.pending.track(execute(tool, fields, fn));
 }
 
 async function execute(tool: string, fields: Record<string, unknown>, fn: () => Promise<CallToolResult>): Promise<CallToolResult> {

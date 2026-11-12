@@ -1,6 +1,7 @@
 import { log } from '@codeinsight/core';
 import type { SnapshotRow } from '@codeinsight/core';
 import type { IndexJobs } from '../jobs/index-jobs.js';
+import type { PendingSet } from '../jobs/pending.js';
 import type { ServerWorkspace } from '../workspace.js';
 
 /** 没有可复用快照时同步建索引的默认等待时间 */
@@ -11,7 +12,7 @@ export interface McpContext {
   indexJobs: IndexJobs;
   indexTimeoutMs: number;
   /** 正在执行的工具调用，关闭服务前等它们结束 */
-  pending: Set<Promise<unknown>>;
+  pending: PendingSet;
 }
 
 export class IndexTimeoutError extends Error {}

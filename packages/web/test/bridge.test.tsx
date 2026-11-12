@@ -4,7 +4,7 @@ import { NavContext, type Nav } from '../src/app/nav';
 import { registerPage } from '../src/bridge';
 import { HOST_REVIEW_TIMEOUT_MS, HOST_TIMEOUT_NOTICE, ReviewPage } from '../src/review/ReviewPage';
 
-const nav: Nav = { openSymbol: vi.fn(), showSource: vi.fn(), openGraph: vi.fn(), snapshotGone: vi.fn(), indexNotReady: vi.fn() };
+const nav: Nav = { openSymbol: vi.fn(), showSource: vi.fn(), openSourceAt: vi.fn(), openGraph: vi.fn(), snapshotGone: vi.fn(), indexNotReady: vi.fn() };
 
 function renderReviewPage(onHostReview: () => void) {
   return render(

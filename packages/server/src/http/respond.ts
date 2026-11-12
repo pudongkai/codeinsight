@@ -54,3 +54,33 @@ export function intParam(value: string | null, name: string, opts: { min: number
   }
   return n;
 }
+
+/** 请求体里可选的非空字符串字段 */
+export function optString(body: Record<string, unknown>, key: string): string | undefined {
+  const v = body[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'string' || v.trim() === '') throw new HttpError(400, 'invalid_param', `${key} must be a non-empty string`);
+  return v;
+}
+
+/** 请求体里可选的布尔字段 */
+export function optBool(body: Record<string, unknown>, key: string): boolean | undefined {
+  const v = body[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'boolean') throw new HttpError(400, 'invalid_param', `${key} must be a boolean`);
+  return v;
+}
+
+/** 可选的布尔查询参数：`1` / `true` 为真，`0` / `false` / 空为假，其他值返回 400 */
+export function boolParam(value: string | null, name: string): boolean {
+  if (value === null || value === '' || value === '0' || value === 'false') return false;
+  if (value === '1' || value === 'true') return true;
+  throw new HttpError(400, 'invalid_param', `${name} must be true or false`);
+}
+
+/** 路径里的正整数 id，不合法时返回 400 */
+export function idParam(raw: string | undefined, name: string): number {
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'invalid_param', `${name} must be a positive integer`);
+  return id;
+}

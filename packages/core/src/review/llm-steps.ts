@@ -1,5 +1,5 @@
 import { runIntentCheck, docFirstLine, type IntentItem } from '../intent/index.js';
-import { createLlmClient, type LlmClient } from '../llm/index.js';
+import { llmClientFromConfig, notifyLlmOnce } from '../llm/setup.js';
 import { log } from '../log.js';
 import type { SnapshotRow } from '../model/types.js';
 import type { DuplicateFinding, FileChange, IntentFinding, ReviewReport, SymbolRef, Warning } from '../report/types.js';
@@ -19,32 +19,6 @@ export function findReviewDuplicates(opts: ReviewOptions, head: SnapshotRow | un
   }
   const excludeIds = new Set(diffs.flatMap((d) => (d.head ? [d.head.id] : [])));
   return similarInSnapshot(opts.store, head.id, { queryIds, excludeIds, minScore: opts.config.similarMinScore }).findings;
-}
-
-/** 每个进程对同一个 provider + 模型只提示一次 */
-const noticed = new Set<string>();
-
-function notifyOnce(opts: ReviewOptions, client: LlmClient): void {
-  const id = `${client.provider}\0${client.model}`;
-  if (noticed.has(id)) return;
-  noticed.add(id);
-  const message = `sending a structural summary of the change (no function bodies) to ${client.provider} (${client.model})`;
-  if (opts.onLlmNotice) opts.onLlmNotice(message);
-  else log.info('llm_notice', { provider: client.provider, model: client.model });
-}
-
-type ClientResult = { client: LlmClient } | { warning: Warning };
-
-function llmClient(opts: ReviewOptions): ClientResult | undefined {
-  if (opts.llmClient) return { client: opts.llmClient };
-  const problem = opts.config.llmProblem;
-  if (problem) return { warning: { code: 'llm_not_configured', level: 'warning', message: `intent check skipped: invalid LLM configuration: ${problem}` } };
-  if (!opts.config.llm) return undefined;
-  try {
-    return { client: createLlmClient(opts.config.llm) };
-  } catch (err) {
-    return { warning: { code: 'llm_not_configured', level: 'info', message: `intent check skipped: ${(err as Error).message}` } };
-  }
 }
 
 function intentItems(diffs: SymbolDiff[], moduleDepth: number): { items: IntentItem[]; refs: Map<string, SymbolRef> } {
@@ -71,7 +45,7 @@ export async function checkIntent(opts: ReviewOptions, intent: ReviewReport['int
     log.info('intent_skipped', { reason: 'no_llm' });
     return info('llm_disabled', 'intent check skipped: --no-llm');
   }
-  const c = llmClient(opts);
+  const c = llmClientFromConfig(opts.config, { client: opts.llmClient, skipped: 'intent check skipped' });
   if (!c) {
     log.info('intent_skipped', { reason: 'llm_not_configured' });
     return info('llm_not_configured', 'intent check skipped: no LLM configured (set llm in codeinsight.config.json or CODEINSIGHT_LLM_PROVIDER)');
@@ -88,7 +62,7 @@ export async function checkIntent(opts: ReviewOptions, intent: ReviewReport['int
   const addedFiles = files.filter((f) => f.status === 'added').map((f) => f.path);
   const r = await runIntentCheck({
     intentText: intent.text, items, addedFiles, refs, client: c.client, cacheDir: opts.layout.llmCacheDir,
-    onBeforeSend: () => notifyOnce(opts, c.client),
+    onBeforeSend: () => notifyLlmOnce(c.client, `sending a structural summary of the change (no function bodies) to ${c.client.provider} (${c.client.model})`, opts.onLlmNotice),
   });
   return { ...(r.findings ? { intentCheck: r.findings } : {}), warnings: r.warnings };
 }

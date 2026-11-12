@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -8,6 +8,7 @@ import type { ReviewOptions, ReviewReport } from '@codeinsight/core';
 import { openBrowser } from '../open-browser.js';
 import { DEFAULT_REPORT_TEMPLATE } from '../web-assets.js';
 import { readReportTemplate, renderHtmlReport } from './html-report.js';
+import { writeTextOutput } from './output.js';
 import { openWorkspace } from './workspace.js';
 
 export const REVIEW_USAGE = `Usage: codeinsight review [--repo .] [--base REF] [--head REF | --working]
@@ -82,12 +83,8 @@ function renderReport(report: ReviewReport, format: Format, template: string | u
 /** 写到 --out、--open 时的临时文件或 stdout；--open 时用浏览器打开写出的文件 */
 async function writeOutput(text: string, args: ReviewArgs, deps: ReviewDeps): Promise<void> {
   const out = args.out ?? (args.open ? path.join(tmpdir(), `codeinsight-review-${Date.now()}.html`) : undefined);
-  if (out === undefined) {
-    process.stdout.write(text);
-    return;
-  }
-  const file = path.resolve(out);
-  await writeFile(file, text);
+  const file = await writeTextOutput(text, out);
+  if (file === undefined) return;
   log.info('review_report_written', { format: args.format, path: file, bytes: Buffer.byteLength(text) });
   if (!args.open) return;
   const url = pathToFileURL(file).href;

@@ -18,6 +18,22 @@
     "./util/collections": {
       "types": "./dist/util/collections.d.ts",
       "default": "./dist/util/collections.js"
+    },
+    "./overview/types": {
+      "types": "./dist/overview/types.d.ts",
+      "default": "./dist/overview/types.js"
+    },
+    "./model/entry": {
+      "types": "./dist/model/entry.d.ts",
+      "default": "./dist/model/entry.js"
+    },
+    "./ask/events": {
+      "types": "./dist/ask/events.d.ts",
+      "default": "./dist/ask/events.js"
+    },
+    "./ask/links": {
+      "types": "./dist/ask/links.d.ts",
+      "default": "./dist/ask/links.js"
     }
   },
   "scripts": {

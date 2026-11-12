@@ -3,14 +3,14 @@ import { ApiError, api, errorMessage } from '../api/client';
 import { initNeighbors, mergeTree, type NeighborState } from './neighbor-model';
 import { useApi } from './useApi';
 
-async function loadCenter(snapshotId: number, centerId: string): Promise<NeighborState> {
-  const [callers, callees] = await Promise.all([api.callers(snapshotId, centerId, 1), api.callees(snapshotId, centerId, 1)]);
+async function loadCenter(snapshotId: number, centerId: string, calleeDepth: number): Promise<NeighborState> {
+  const [callers, callees] = await Promise.all([api.callers(snapshotId, centerId, 1), api.callees(snapshotId, centerId, calleeDepth)]);
   return initNeighbors(snapshotId, callers, callees);
 }
 
-/** 加载中心函数的邻居图，节点可以逐层展开；快照已清理时调用 onGone */
-export function useNeighborGraph(snapshotId: number, centerId: string, onGone: () => void) {
-  const center = useApi(() => loadCenter(snapshotId, centerId), [snapshotId, centerId], onGone);
+/** 加载中心函数的邻居图（被调用方可预先展开多层），节点可以逐层展开；快照已清理时调用 onGone */
+export function useNeighborGraph(snapshotId: number, centerId: string, onGone: () => void, expandCallees = 1) {
+  const center = useApi(() => loadCenter(snapshotId, centerId, Math.max(1, expandCallees)), [snapshotId, centerId, expandCallees], onGone);
   // 展开后的图；只在它属于当前中心时使用，否则用刚加载的中心图
   const [expanded, setExpanded] = useState<NeighborState>();
   const [expandError, setExpandError] = useState<string>();

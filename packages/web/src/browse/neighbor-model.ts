@@ -60,11 +60,19 @@ export function mergeTree(state: NeighborState, tree: TreeResponse, side: Neighb
   return { ...state, nodes, edges };
 }
 
-/** 以 center 为中心的初始图：各 1 层调用方和被调用方 */
+/**
+ * 以 center 为中心的初始图：1 层调用方，callees.depth 层被调用方。
+ * 被调用方查了多层时，比最深一层浅的节点都已加载过下一层，标为已展开。
+ */
 export function initNeighbors(snapshotId: number, callers: TreeResponse, callees: TreeResponse): NeighborState {
   const center: NNode = { info: callers.root, side: 'center', level: 0, expanded: true, parent: null };
   const empty: NeighborState = { snapshotId, centerId: callers.root.id, nodes: { [callers.root.id]: center }, edges: {} };
-  return mergeTree(mergeTree(empty, callers, 'caller'), callees, 'callee');
+  const state = mergeTree(mergeTree(empty, callers, 'caller'), callees, 'callee');
+  const nodes = { ...state.nodes };
+  for (const [id, n] of Object.entries(nodes)) {
+    if (n.side === 'callee' && n.level < callees.depth) nodes[id] = { ...n, expanded: true };
+  }
+  return { ...state, nodes };
 }
 
 export interface ViewOptions {

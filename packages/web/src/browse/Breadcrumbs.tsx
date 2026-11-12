@@ -2,6 +2,8 @@ export interface Crumb {
   snapshotId: number;
   id: string;
   name: string;
+  /** 打开时预先展开的被调用方层数 */
+  expandCallees?: number;
 }
 
 /** 浏览路径：首页（入口列表）→ 之前的中心函数 → 当前中心 */

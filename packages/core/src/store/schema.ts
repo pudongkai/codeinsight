@@ -88,3 +88,48 @@ CREATE TABLE reviews (
   created_at INTEGER NOT NULL
 );
 `;
+
+/**
+ * 不随 SCHEMA_VERSION 删库重建的表：每次打开库时缺哪张就建哪张（`IF NOT EXISTS`，并发重复执行无害），
+ * 已有的快照和审查记录保留，旧版本打开带这些表的库时版本号一致，也不会删库。
+ * 以后要加列时同样先检查列是否存在再 `ALTER TABLE ADD COLUMN`。
+ */
+export const EXTRA_TABLES = ['overviews', 'chat_sessions', 'chat_messages'] as const;
+
+export const EXTRA_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS overviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ref TEXT NOT NULL,
+  snapshot_kind TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  content_key TEXT NOT NULL,
+  params TEXT NOT NULL,
+  has_llm INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  progress TEXT,
+  result TEXT,
+  error TEXT,
+  pid INTEGER,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS overviews_kind_status ON overviews(snapshot_kind, status, finished_at);
+
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_sessions_updated ON chat_sessions(updated_at);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  meta TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages(session_id, id);
+`;

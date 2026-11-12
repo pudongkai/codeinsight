@@ -1,20 +1,6 @@
 import type { ReviewParams } from '../../jobs/review-jobs.js';
 import type { Route, RequestContext } from '../context.js';
-import { HttpError, readJsonBody, sendJson } from '../respond.js';
-
-function optString(body: Record<string, unknown>, key: string): string | undefined {
-  const v = body[key];
-  if (v === undefined || v === null) return undefined;
-  if (typeof v !== 'string' || v.trim() === '') throw new HttpError(400, 'invalid_param', `${key} must be a non-empty string`);
-  return v;
-}
-
-function optBool(body: Record<string, unknown>, key: string): boolean | undefined {
-  const v = body[key];
-  if (v === undefined || v === null) return undefined;
-  if (typeof v !== 'boolean') throw new HttpError(400, 'invalid_param', `${key} must be a boolean`);
-  return v;
-}
+import { HttpError, idParam, optBool, optString, readJsonBody, sendJson } from '../respond.js';
 
 /** 入参同 CLI review：base、head、working、intent（意图文本）、noLlm */
 function parseReviewParams(body: Record<string, unknown>): ReviewParams {
@@ -34,8 +20,7 @@ async function createReview(ctx: RequestContext): Promise<void> {
 }
 
 function getReview(ctx: RequestContext): void {
-  const id = Number(ctx.params.id);
-  if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'invalid_param', 'review id must be a positive integer');
+  const id = idParam(ctx.params.id, 'review id');
   ctx.logFields.reviewId = id;
   const r = ctx.app.reviewJobs.get(id);
   if (!r) throw new HttpError(404, 'review_not_found');

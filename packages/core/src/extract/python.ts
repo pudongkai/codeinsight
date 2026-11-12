@@ -266,20 +266,67 @@ function bindName(out: Map<string, ImportBinding>, nameNode: Node, toBinding: (n
   }
 }
 
+/** 一条 import 语句：`import a.b, c as d`（from 为 undefined）或 `from <from> import <names>` */
+interface ImportStatement {
+  from?: Node;
+  names: Node[];
+}
+
+/** import 语句遍历，collectImports 和 collectImportModules 共用；`from __future__` 不在其中 */
+function importStatements(root: Node): ImportStatement[] {
+  const out: ImportStatement[] = [];
+  for (const stmt of root.descendantsOfType(['import_statement', 'import_from_statement'])) {
+    const names = stmt.childrenForFieldName('name');
+    if (stmt.type === 'import_statement') {
+      out.push({ names });
+      continue;
+    }
+    const from = stmt.childForFieldName('module_name');
+    if (from) out.push({ from, names });
+  }
+  return out;
+}
+
 /** 收集 import 别名，用于 Django 路由和模型类的基类跨文件查找 */
 function collectImports(filePath: string, root: Node): Map<string, ImportBinding> {
   const out = new Map<string, ImportBinding>();
-  for (const stmt of root.descendantsOfType(['import_statement', 'import_from_statement'])) {
-    if (stmt.type === 'import_statement') {
-      for (const n of stmt.childrenForFieldName('name')) {
-        bindName(out, n, (name) => ({ module: n.type === 'aliased_import' ? name : name.split('.')[0]! }));
-      }
+  for (const { from, names } of importStatements(root)) {
+    if (!from) {
+      for (const n of names) bindName(out, n, (name) => ({ module: n.type === 'aliased_import' ? name : name.split('.')[0]! }));
       continue;
     }
-    const modNode = stmt.childForFieldName('module_name');
-    if (!modNode) continue;
-    const module = resolveRelative(filePath, modNode);
-    for (const n of stmt.childrenForFieldName('name')) bindName(out, n, (name) => ({ module, name }));
+    const module = resolveRelative(filePath, from);
+    for (const n of names) bindName(out, n, (name) => ({ module, name }));
+  }
+  return out;
+}
+
+/** 一条导入的模块：完整点分名，相对导入保留原文（如 `.models`）且不解析成项目内模块名 */
+export interface ImportedModule {
+  module: string;
+  relative: boolean;
+  /** `from a.b import c` 时的候选子模块 `a.b.c`（c 可能是子模块，如 `from google.cloud import storage`） */
+  candidates: string[];
+}
+
+function importedName(n: Node): string | undefined {
+  return n.type === 'aliased_import' ? n.childForFieldName('name')?.text : n.type === 'dotted_name' ? n.text : undefined;
+}
+
+/**
+ * 收集 import 的模块名，用于判断外部依赖：`import a.b.c` 记 `a.b.c`；
+ * `from a.b import c` 记 `a.b`，候选 `a.b.c`；相对导入记 `relative: true`。
+ */
+export function collectImportModules(root: Node): ImportedModule[] {
+  const out: ImportedModule[] = [];
+  for (const { from, names } of importStatements(root)) {
+    const imported = names.map(importedName).filter((n): n is string => n !== undefined);
+    if (!from) {
+      for (const module of imported) out.push({ module, relative: false, candidates: [] });
+      continue;
+    }
+    const relative = from.type === 'relative_import';
+    out.push({ module: from.text, relative, candidates: relative ? [] : imported.map((n) => `${from.text}.${n}`) });
   }
   return out;
 }

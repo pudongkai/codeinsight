@@ -59,6 +59,18 @@ describe('http auth', () => {
     expect((await request(server.port, `/api/status?token=${server.token}`)).status).toBe(401);
   });
 
+  it('requires the token on the overview and chat routes', async () => {
+    const routes: [string, string][] = [
+      ['GET', '/api/overview'], ['GET', '/api/overview?id=1'], ['GET', '/api/overview/estimate'], ['POST', '/api/overview'],
+      ['GET', '/api/overview/jobs/1'], ['GET', '/api/chat/sessions'], ['POST', '/api/chat/sessions'], ['GET', '/api/chat/sessions/1'],
+      ['DELETE', '/api/chat/sessions/1'], ['POST', '/api/chat/sessions/1/messages'],
+    ];
+    for (const [method, p] of routes) {
+      expect((await request(server.port, p, { method, body: method === 'GET' || method === 'DELETE' ? undefined : { question: 'q' } })).status, `${method} ${p}`).toBe(401);
+      expect((await request(server.port, p, { method, headers: { ...bearer(server.token), Origin: 'http://evil.example' } })).status, `${method} ${p}`).toBe(403);
+    }
+  });
+
   it('accepts the bearer token', async () => {
     const res = await request(server.port, '/api/status', { headers: bearer(server.token) });
     expect(res.status).toBe(200);

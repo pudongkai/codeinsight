@@ -1,7 +1,9 @@
 import { GitError, ReviewArgsError } from '@codeinsight/core';
+import { runAskCommand } from './commands/ask.js';
 import { runIndex } from './commands/index.js';
 import { runReviewCommand } from './commands/review.js';
 import { runMcpCommand } from './commands/mcp.js';
+import { runOverviewCommand } from './commands/overview.js';
 import { runServeCommand } from './commands/serve.js';
 import { runSimilarCommand } from './commands/similar.js';
 
@@ -11,6 +13,8 @@ Commands:
   index     Build the index for the working tree or a commit
   review    Review changes between two versions
   similar   Find duplicate implementations
+  overview  Generate a system overview (modules, dependencies, features, AI descriptions)
+  ask       Ask a question about the code (needs an LLM)
   serve     Start the local web UI / HTTP API
   mcp       Start the MCP server over stdio
 `;
@@ -19,6 +23,8 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   index: runIndex,
   review: runReviewCommand,
   similar: runSimilarCommand,
+  overview: runOverviewCommand,
+  ask: runAskCommand,
   serve: runServeCommand,
   mcp: runMcpCommand,
 };

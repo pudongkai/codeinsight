@@ -1,0 +1,2 @@
+DEBUG = False
+PAGE_SIZE = 20

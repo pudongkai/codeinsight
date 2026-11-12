@@ -61,9 +61,22 @@ export function fixtureRepo(): string {
   return repo;
 }
 
-/** 测试用的 workspace：不读本机环境变量（不会拿到 LLM 配置和 API key） */
-export async function openWorkspace(repo: string, dataDir: string, resolver?: Resolver): Promise<ServerWorkspace> {
-  const config = await loadConfig(repo, { dataDir, env: {} });
+export const SHOP_FIXTURE = path.resolve(import.meta.dirname, '..', '..', '..', 'core', 'test', 'fixtures', 'py-shop');
+
+/** py-shop 仓库（小阈值，划分出多个模块），一个提交 */
+export function shopRepo(): string {
+  const repo = tempDir('ci-server-shop-');
+  cpSync(SHOP_FIXTURE, repo, { recursive: true });
+  writeFileSync(path.join(repo, 'codeinsight.config.json'), JSON.stringify({ overview: { moduleMinSize: 3, moduleMaxSize: 15, leafSplitSize: 8 } }));
+  git(repo, 'init', '-q', '-b', 'main');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'init');
+  return repo;
+}
+
+/** 测试用的 workspace：不读本机环境变量（不会拿到 LLM 配置和 API key），只用 env 里显式给出的（如假 LLM 的地址） */
+export async function openWorkspace(repo: string, dataDir: string, resolver?: Resolver, env: Record<string, string> = {}): Promise<ServerWorkspace> {
+  const config = await loadConfig(repo, { dataDir, env });
   const layout = await initDataDir(config.dataDir);
   return { repo, config, layout, store: new Store(layout.dbPath), resolver };
 }
@@ -103,4 +116,66 @@ export async function waitFor<T>(fn: () => Promise<T | undefined>, timeoutMs = 9
     if (Date.now() > deadline) throw new Error('timed out');
     await new Promise((r) => setTimeout(r, 100));
   }
+}
+
+export type Api = <T = Record<string, unknown>>(rawPath: string, opts?: { method?: string; body?: unknown }) => Promise<{ status: number; body: T }>;
+
+/** 带 Bearer token 调接口，响应按 JSON 解析 */
+export function apiFor(server: { port: number; token: string }): Api {
+  return async <T>(rawPath: string, opts: { method?: string; body?: unknown } = {}) => {
+    const res = await request(server.port, rawPath, { ...opts, headers: { Authorization: `Bearer ${server.token}` } });
+    return { status: res.status, body: res.body ? res.json<T>() : ({} as T) };
+  };
+}
+
+/** 等最近的建索引任务完成，返回当前快照 id */
+export async function indexReady(api: Api): Promise<number> {
+  return waitFor(async () => {
+    const s = (await api<{ index: { job: { status: string } | null }; snapshot: { id: number } | null }>('/api/status')).body;
+    if (s.index.job?.status === 'failed') throw new Error('index job failed');
+    return s.index.job?.status === 'done' ? s.snapshot?.id : undefined;
+  });
+}
+
+export interface StreamResponse {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  /** 已收到的完整行（NDJSON 时每行一个事件） */
+  lines: string[];
+  /** 响应结束或连接断开时 resolve */
+  ended: Promise<void>;
+  /** 客户端断开连接 */
+  destroy(): void;
+}
+
+/** 发 POST 请求，收到响应头时返回，正文按行陆续收进 lines */
+export function postStream(server: { port: number; token: string }, rawPath: string, body: unknown): Promise<StreamResponse> {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = httpRequest(
+      { host: '127.0.0.1', port: server.port, path: rawPath, method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${server.token}` } },
+      (res) => {
+        const lines: string[] = [];
+        let buf = '';
+        const ended = new Promise<void>((done) => {
+          res.on('end', done);
+          res.on('close', done);
+          res.on('error', () => done());
+        });
+        res.on('data', (c: Buffer) => {
+          buf += c.toString('utf8');
+          const parts = buf.split('\n');
+          buf = parts.pop()!;
+          lines.push(...parts.filter((l) => l !== ''));
+        });
+        res.on('end', () => {
+          if (buf !== '') lines.push(buf);
+        });
+        resolve({ status: res.statusCode ?? 0, headers: res.headers, lines, ended, destroy: () => req.destroy() });
+      },
+    );
+    // 主动断开后的错误在 resolve 之后，reject 不再生效
+    req.on('error', reject);
+    req.end(data);
+  });
 }

@@ -12,7 +12,7 @@ const CHANGE_LABEL: Record<SymbolChange['change'], string> = {
 };
 
 /** 表格单元格里的 `|` 和换行会打乱表格 */
-function cell(text: string): string {
+export function markdownCell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
 }
 
@@ -46,13 +46,13 @@ function warningLines(warnings: Warning[]): string[] {
 }
 
 function symbolRow(s: SymbolChange): string {
-  const change = s.change === 'moved' && s.movedFrom ? `moved from \`${cell(s.movedFrom)}\`` : CHANGE_LABEL[s.change];
-  const sig = s.displaySignatureBefore !== undefined ? `\`${cell(s.displaySignatureBefore)}\` → \`${cell(s.displaySignature)}\`` : s.displaySignature ? `\`${cell(s.displaySignature)}\`` : '';
+  const change = s.change === 'moved' && s.movedFrom ? `moved from \`${markdownCell(s.movedFrom)}\`` : CHANGE_LABEL[s.change];
+  const sig = s.displaySignatureBefore !== undefined ? `\`${markdownCell(s.displaySignatureBefore)}\` → \`${markdownCell(s.displaySignature)}\`` : s.displaySignature ? `\`${markdownCell(s.displaySignature)}\`` : '';
   const entry = s.entry ? `${s.entry.framework} ${s.entry.kind}` : '';
   const top = s.callers.topProd.map((c) => c.qualifiedName).join(', ');
-  const callers = `${s.callers.prod} / ${s.callers.test}${top ? ` (${cell(top)})` : ''}`;
+  const callers = `${s.callers.prod} / ${s.callers.test}${top ? ` (${markdownCell(top)})` : ''}`;
   const impact = `${s.impact.prod} / ${s.impact.test}`;
-  return `| ${change} | \`${cell(s.qualifiedName)}\` | ${s.kind} | \`${s.path}:${s.startLine}\` | ${sig} | ${entry} | ${callers} | ${impact} |`;
+  return `| ${change} | \`${markdownCell(s.qualifiedName)}\` | ${s.kind} | \`${s.path}:${s.startLine}\` | ${sig} | ${entry} | ${callers} | ${impact} |`;
 }
 
 function moduleLines(modules: ModuleChange[], impactDepth: number): string[] {
@@ -85,8 +85,8 @@ export function duplicatesToMarkdown(findings: DuplicateFinding[], title = '## P
   const lines = [title, '', '| Symbol | Similar to | Score | Reasons |', '| --- | --- | --- | --- |'];
   for (const f of findings) {
     for (const [i, c] of f.candidates.entries()) {
-      const symbol = i === 0 ? `\`${cell(f.symbol.qualifiedName)}\` (\`${f.symbol.path}:${f.symbol.startLine}\`)` : '';
-      lines.push(`| ${symbol} | \`${cell(c.symbol.qualifiedName)}\` (\`${c.symbol.path}:${c.symbol.startLine}\`) | ${c.score.toFixed(2)} | ${cell(c.reasons.join('; '))} |`);
+      const symbol = i === 0 ? `\`${markdownCell(f.symbol.qualifiedName)}\` (\`${f.symbol.path}:${f.symbol.startLine}\`)` : '';
+      lines.push(`| ${symbol} | \`${markdownCell(c.symbol.qualifiedName)}\` (\`${c.symbol.path}:${c.symbol.startLine}\`) | ${c.score.toFixed(2)} | ${markdownCell(c.reasons.join('; '))} |`);
     }
   }
   lines.push('');

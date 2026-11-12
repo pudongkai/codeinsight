@@ -1,7 +1,7 @@
 import { Controls, MarkerType, ReactFlow, useReactFlow, useStore, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { SymbolNode, type SymbolFlowNode } from './SymbolNode';
+import { dataAttrs, SymbolNode, type SymbolFlowNode } from './SymbolNode';
 import type { EdgeTone, GraphEdgeSpec, GraphNodeSpec } from './types';
 import { useLayout } from './useLayout';
 
@@ -11,7 +11,18 @@ const EDGE_STYLES: Record<EdgeTone, React.CSSProperties> = {
   normal: { stroke: '#94a3b8', strokeWidth: 1.2 },
   added: { stroke: '#16a34a', strokeWidth: 2 },
   removed: { stroke: '#dc2626', strokeWidth: 2, strokeDasharray: '6 4' },
+  cycle: { stroke: '#dc2626', strokeWidth: 2 },
+  layer: { stroke: '#ea580c', strokeWidth: 2 },
 };
+
+function flowEdge(e: GraphEdgeSpec): Edge {
+  const base = EDGE_STYLES[e.tone];
+  return {
+    id: e.id, source: e.source, target: e.target, style: e.width ? { ...base, strokeWidth: e.width } : base,
+    markerEnd: { type: MarkerType.ArrowClosed, color: base.stroke as string },
+    domAttributes: { 'data-testid': 'graph-edge', 'data-tone': e.tone, ...dataAttrs(e.attrs) } as Edge['domAttributes'],
+  };
+}
 
 /** 单击与双击区分开：单击延迟执行，期间发生双击则取消 */
 const CLICK_DELAY_MS = 250;
@@ -22,6 +33,7 @@ interface Props {
   height?: number;
   onNodeClick?: (id: string) => void;
   onNodeDoubleClick?: (id: string) => void;
+  onEdgeClick?: (id: string) => void;
   testId?: string;
 }
 
@@ -82,7 +94,7 @@ function FitOnResize() {
  * React Flow + ELK 渲染的调用图（报告结构图和浏览邻居图共用）。
  * 不画点阵背景：点阵跟着平移缩放每帧整块重画，在 IDE 内嵌的离屏渲染浏览器里拖动会明显变慢。
  */
-export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubleClick, testId }: Props) {
+export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubleClick, onEdgeClick, testId }: Props) {
   const { positions, version, error } = useLayout(nodes, edges);
   const handlers = useClickHandlers(onNodeClick, onNodeDoubleClick);
   const moving = useMovingFlag();
@@ -90,13 +102,7 @@ export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubl
     () => nodes.map((n) => ({ id: n.id, type: 'symbol', position: positions?.get(n.id) ?? { x: 0, y: 0 }, data: { spec: n }, draggable: false })),
     [nodes, positions],
   );
-  const flowEdges = useMemo<Edge[]>(
-    () => edges.map((e) => ({
-      id: e.id, source: e.source, target: e.target, style: EDGE_STYLES[e.tone],
-      markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_STYLES[e.tone].stroke as string },
-    })),
-    [edges],
-  );
+  const flowEdges = useMemo<Edge[]>(() => edges.map(flowEdge), [edges]);
   return (
     <div ref={moving.ref} className="graph" style={{ height }} data-testid={testId} data-node-count={nodes.length}>
       {error && <div className="error">{error}</div>}
@@ -113,6 +119,7 @@ export function FlowGraph({ nodes, edges, height = 460, onNodeClick, onNodeDoubl
           nodesConnectable={false}
           onNodeClick={(_, n) => handlers.click(n.id)}
           onNodeDoubleClick={(_, n) => handlers.double(n.id)}
+          onEdgeClick={onEdgeClick ? (_, e) => onEdgeClick(e.id) : undefined}
           zoomOnDoubleClick={false}
           onMoveStart={moving.start}
           onMoveEnd={moving.end}

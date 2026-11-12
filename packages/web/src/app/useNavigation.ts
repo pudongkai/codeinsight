@@ -1,14 +1,21 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { openInHost } from '../bridge';
 import type { Crumb } from '../browse/Breadcrumbs';
 import type { SourceTarget } from '../source/useSource';
 import type { Nav, SymbolLocator } from './nav';
 
-export type Tab = 'browse' | 'review';
+export type Tab = 'overview' | 'browse' | 'chat' | 'review';
 
-/** 页面导航状态：当前标签、邻居图的浏览路径、源码面板，以及快照失效时的回退 */
-export function useNavigation(refreshStatus: () => void) {
-  const [tab, setTab] = useState<Tab>('browse');
+/**
+ * 页面导航状态：当前标签、邻居图的浏览路径、源码面板，以及快照失效时的回退。
+ * 还没切换过标签时显示 defaultTab（由调用方按是否已有概览决定），没有时为浏览。
+ */
+export function useNavigation(refreshStatus: () => void, defaultTab?: Tab) {
+  const [chosenTab, setTab] = useState<Tab>();
+  // 默认标签只按第一次拿到的状态决定，之后生成了概览也不会把页面切走
+  const firstDefault = useRef<Tab>(undefined);
+  firstDefault.current ??= defaultTab;
+  const tab = chosenTab ?? firstDefault.current ?? 'browse';
   const [trail, setTrail] = useState<Crumb[]>([]);
   const [origin, setOrigin] = useState<'browse' | 'review'>('browse');
   const [source, setSource] = useState<SourceTarget>();
@@ -21,12 +28,18 @@ export function useNavigation(refreshStatus: () => void) {
     openSymbol: (s) => {
       if (!openInHost({ path: s.path, line: s.line, removed: s.removed })) showSource(s);
     },
-    openGraph: (s, from) => {
+    openSourceAt: (s) => {
+      if (!openInHost({ path: s.path, line: s.start })) setSource({ snapshotId: s.snapshotId, path: s.path, start: s.start, end: s.end });
+    },
+    openGraph: (s, from, opts) => {
       if (from) setOrigin(from);
       setBanner(undefined);
+      const crumb: Crumb = { snapshotId: s.snapshotId, id: s.id, name: s.name, ...(opts?.expandCallees ? { expandCallees: opts.expandCallees } : {}) };
       setTrail((t) => {
         const kept = t.filter((c) => c.snapshotId === s.snapshotId);
-        return kept.at(-1)?.id === s.id ? kept : [...kept, { snapshotId: s.snapshotId, id: s.id, name: s.name }];
+        // 同一个中心再打开时，带了展开层数就换成新的（重新加载），否则保持原样
+        if (kept.at(-1)?.id === s.id) return opts?.expandCallees ? [...kept.slice(0, -1), crumb] : kept;
+        return [...kept, crumb];
       });
       setTab('browse');
     },

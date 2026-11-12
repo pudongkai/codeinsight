@@ -1,3 +1,4 @@
+import { isStringArray, parseJsonReply } from '../llm/ask-json.js';
 import type { IntentFinding } from '../report/types.js';
 
 /** prompt 或输出格式变化时加一，旧缓存随之失效 */
@@ -22,9 +23,7 @@ export function userPrompt(intentText: string, summary: string): string {
   return `# Task description\n\n${intentText.trim()}\n\n# Structural summary of the change\n\n${summary}\n`;
 }
 
-export function retryPrompt(reason: string): string {
-  return `Your previous reply was rejected: ${reason}. Reply again with JSON only, in the shape given in the instructions.`;
-}
+export { jsonRetryPrompt as retryPrompt } from '../llm/ask-json.js';
 
 /** 模型返回的一组，key 和模块尚未与改动清单核对 */
 export interface RawGroup {
@@ -38,16 +37,6 @@ export type ParseResult = { ok: true; groups: RawGroup[] } | { ok: false; reason
 
 const VERDICTS = new Set(['mentioned', 'unmentioned', 'unclear']);
 
-/** 去掉模型可能加上的 ```json 代码块包裹 */
-function stripFence(text: string): string {
-  const m = /^\s*```(?:json)?\s*\n([\s\S]*?)\n\s*```\s*$/.exec(text);
-  return m ? m[1]! : text.trim();
-}
-
-function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((x) => typeof x === 'string');
-}
-
 function parseGroup(g: unknown, i: number): RawGroup | string {
   if (typeof g !== 'object' || g === null) return `groups[${i}] is not an object`;
   const o = g as Record<string, unknown>;
@@ -60,13 +49,9 @@ function parseGroup(g: unknown, i: number): RawGroup | string {
 
 /** 按约定的 JSON 结构校验模型输出，任何一处不合格都整体判为不合格 */
 export function parseIntentResponse(text: string): ParseResult {
-  let json: unknown;
-  try {
-    json = JSON.parse(stripFence(text));
-  } catch {
-    return { ok: false, reason: 'reply is not valid JSON' };
-  }
-  const groups = (json as { groups?: unknown } | null)?.groups;
+  const parsed = parseJsonReply(text);
+  if (!parsed.ok) return parsed;
+  const groups = (parsed.value as { groups?: unknown } | null)?.groups;
   if (!Array.isArray(groups)) return { ok: false, reason: 'missing "groups" array' };
   const out: RawGroup[] = [];
   for (let i = 0; i < groups.length; i++) {

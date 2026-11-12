@@ -56,9 +56,9 @@ describe('MCP over stdio', () => {
     await client?.close();
   });
 
-  it('lists the three review tools', async () => {
+  it('lists the review tools and get_overview', async () => {
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['find_similar', 'get_impact', 'review_changes']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['find_similar', 'get_impact', 'get_overview', 'review_changes']);
   });
 
   it('get_impact builds the index first, then lists callers by level', async () => {

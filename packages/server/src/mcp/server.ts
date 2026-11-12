@@ -3,9 +3,11 @@ import { killActiveScipProcesses, log } from '@codeinsight/core';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { IndexJobs } from '../jobs/index-jobs.js';
+import { PendingSet } from '../jobs/pending.js';
 import type { ServerWorkspace } from '../workspace.js';
 import { DEFAULT_INDEX_TIMEOUT_MS, type McpContext } from './context.js';
 import { registerImpactTool } from './impact-tool.js';
+import { registerOverviewTool } from './overview-tool.js';
 import { registerReviewTool } from './review-tool.js';
 import { registerSimilarTool } from './similar-tool.js';
 
@@ -20,14 +22,15 @@ export interface McpOptions {
 function buildServer(opts: McpOptions): { server: McpServer; ctx: McpContext } {
   const server = new McpServer({ name: 'codeinsight', version: SERVER_VERSION });
   const ws = opts.workspace;
-  const ctx: McpContext = { ws, indexJobs: new IndexJobs(ws), indexTimeoutMs: opts.indexTimeoutMs ?? DEFAULT_INDEX_TIMEOUT_MS, pending: new Set() };
+  const ctx: McpContext = { ws, indexJobs: new IndexJobs(ws), indexTimeoutMs: opts.indexTimeoutMs ?? DEFAULT_INDEX_TIMEOUT_MS, pending: new PendingSet() };
   registerReviewTool(server, ctx);
   registerImpactTool(server, ctx);
   registerSimilarTool(server, ctx);
+  registerOverviewTool(server, ctx);
   return { server, ctx };
 }
 
-/** MCP 服务：只提供审查相关的三个工具 review_changes、get_impact、find_similar */
+/** MCP 服务：审查相关的 review_changes、get_impact、find_similar，以及系统概览 get_overview */
 export function createMcpServer(opts: McpOptions): McpServer {
   return buildServer(opts).server;
 }
@@ -52,7 +55,7 @@ export async function runMcpStdio(opts: McpOptions): Promise<void> {
 /** 结束 scip-python 并等进行中的工作结束；工具调用可能在这期间又启动 scip-python，所以反复结束直到全部完成 */
 async function stopWork(ctx: McpContext): Promise<number> {
   let finished = false;
-  const settled = Promise.allSettled([ctx.indexJobs.drain(), ...ctx.pending]).then(() => {
+  const settled = Promise.allSettled([ctx.indexJobs.drain(), ctx.pending.drain()]).then(() => {
     finished = true;
   });
   let killed = 0;

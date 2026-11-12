@@ -20,7 +20,7 @@ function CenterView({ center }: { center: Crumb }) {
   const nav = useNav();
   const [showTests, setShowTests] = useState(false);
   const [showModels, setShowModels] = useShowModels();
-  const { state, error, loading, expand } = useNeighborGraph(center.snapshotId, center.id, nav.snapshotGone);
+  const { state, error, loading, expand } = useNeighborGraph(center.snapshotId, center.id, nav.snapshotGone, center.expandCallees);
   const toCenter = (n: NNode) => nav.openGraph({ snapshotId: center.snapshotId, id: n.info.id, name: n.info.qualifiedName });
   const open = (n: NNode) => nav.openSymbol({ snapshotId: center.snapshotId, id: n.info.id, name: n.info.qualifiedName, path: n.info.path, line: n.info.startLine });
   return (
@@ -47,7 +47,7 @@ export function BrowseView({ currentSnapshotId, trail, onHome, onPickCrumb }: Pr
     <div className="browse" data-testid="browse-view">
       <SearchBox ready={currentSnapshotId !== undefined} />
       <Breadcrumbs trail={trail} onHome={onHome} onPick={onPickCrumb} />
-      {center ? <CenterView key={`${center.snapshotId}:${center.id}`} center={center} /> : <EntryList snapshotId={currentSnapshotId} />}
+      {center ? <CenterView key={`${center.snapshotId}:${center.id}:${center.expandCallees ?? 1}`} center={center} /> : <EntryList snapshotId={currentSnapshotId} />}
     </div>
   );
 }

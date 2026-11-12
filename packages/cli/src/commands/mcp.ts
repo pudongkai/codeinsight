@@ -4,7 +4,7 @@ import { openWorkspace } from './workspace.js';
 
 export const MCP_USAGE = `Usage: codeinsight mcp [--repo .] [--data-dir DIR]
 
-Run the MCP server over stdio. Tools: review_changes, get_impact, find_similar.
+Run the MCP server over stdio. Tools: review_changes, get_impact, find_similar, get_overview.
 `;
 
 /** codeinsight mcp：stdio MCP 服务，客户端断开后退出 */

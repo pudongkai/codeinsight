@@ -4,7 +4,7 @@ import type { GraphNodeSpec, NodePager } from './types';
 
 export type SymbolFlowNode = Node<{ spec: GraphNodeSpec }, 'symbol'>;
 
-function dataAttrs(attrs: Record<string, string> | undefined): Record<string, string> {
+export function dataAttrs(attrs: Record<string, string> | undefined): Record<string, string> {
   return Object.fromEntries(Object.entries(attrs ?? {}).map(([k, v]) => [`data-${k}`, v]));
 }
 
@@ -42,6 +42,7 @@ export function SymbolNode({ data }: NodeProps<SymbolFlowNode>) {
         <span className="gnode-label">{spec.label}</span>
         <span className="gnode-tags">
           {spec.marks?.map((m) => <MarkTag key={m.kind} mark={m} />)}
+          {spec.tags?.map((t) => <span key={t.label} className="tag gnode-tag" title={t.title}>{t.label}</span>)}
           {spec.badge && <span className="badge">{spec.badge}</span>}
         </span>
       </div>

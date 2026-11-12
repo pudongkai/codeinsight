@@ -16,8 +16,11 @@ import type {
   SymbolRow,
 } from '../model/types.js';
 import { log } from '../log.js';
+import { ChatTable } from './chats.js';
+import { OverviewTable } from './overviews.js';
 import { isProcessAlive } from './process.js';
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { EXTRA_SCHEMA_SQL, EXTRA_TABLES, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { immediateTransaction } from './transaction.js';
 
 type Row = Record<string, SQLInputValue>;
 
@@ -58,7 +61,22 @@ function openAndReadVersion(dbPath: string): { db: DatabaseSync; version: number
 }
 
 /**
- * 打开数据库；schema 版本不一致（或库是空的）时删库重建。
+ * 补上缺少的不随版本重建的表。先只读 sqlite_master，表都在时直接返回，平时打开库不加写锁；
+ * 有缺的才开写事务建表（并发进程可能已经建好，IF NOT EXISTS 保证重复执行无害）。
+ */
+function ensureExtraTables(db: DatabaseSync): void {
+  const rows = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (SELECT value FROM json_each(?))")
+    .all(JSON.stringify(EXTRA_TABLES)) as Row[];
+  const present = new Set(rows.map((r) => String(r.name)));
+  const missing = EXTRA_TABLES.filter((t) => !present.has(t));
+  if (missing.length === 0) return;
+  immediateTransaction(db, () => db.exec(EXTRA_SCHEMA_SQL));
+  log.info('index_db_tables_added', { tables: missing.join(',') });
+}
+
+/**
+ * 打开数据库；schema 版本不一致（或库是空的）时删库重建（连同额外表），版本一致时补上缺少的额外表。
  * 返回值的 rebuilt 表示本次是否新建了库。
  */
 export function openDatabase(dbPath: string): { db: DatabaseSync; rebuilt: boolean } {
@@ -66,25 +84,24 @@ export function openDatabase(dbPath: string): { db: DatabaseSync; rebuilt: boole
   const opened = openAndReadVersion(dbPath);
   let db = opened.db;
   const version = opened.version;
-  if (version === SCHEMA_VERSION) return { db, rebuilt: false };
+  if (version === SCHEMA_VERSION) {
+    ensureExtraTables(db);
+    return { db, rebuilt: false };
+  }
   if (version !== undefined) {
     log.info('index_db_rebuild', { dbPath, reason: 'schema_version_mismatch', found: version, expected: SCHEMA_VERSION });
     db.close();
     removeDbFiles(dbPath);
     db = openRaw(dbPath);
   }
-  db.exec('BEGIN IMMEDIATE');
-  try {
+  immediateTransaction(db, () => {
     // 并发进程可能已经建好了
     if (readSchemaVersion(db) !== SCHEMA_VERSION) {
       db.exec(SCHEMA_SQL);
       db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
     }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
+    db.exec(EXTRA_SCHEMA_SQL);
+  });
   return { db, rebuilt: true };
 }
 
@@ -186,11 +203,17 @@ function toReview(r: Row): ReviewRow {
 export class Store {
   readonly db: DatabaseSync;
   readonly rebuilt: boolean;
+  /** 概览任务和结果 */
+  readonly overviews: OverviewTable;
+  /** 问答会话和消息 */
+  readonly chats: ChatTable;
 
   constructor(readonly dbPath: string) {
     const { db, rebuilt } = openDatabase(dbPath);
     this.db = db;
     this.rebuilt = rebuilt;
+    this.overviews = new OverviewTable(db, dbPath);
+    this.chats = new ChatTable(db);
   }
 
   close(): void {
@@ -198,15 +221,7 @@ export class Store {
   }
 
   transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const result = fn();
-      this.db.exec('COMMIT');
-      return result;
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
+    return immediateTransaction(this.db, fn);
   }
 
   // ---- snapshots ----
@@ -347,6 +362,15 @@ export class Store {
       .prepare('SELECT * FROM symbols WHERE snapshot_id = ? AND id IN (SELECT value FROM json_each(?))')
       .all(snapshotId, JSON.stringify(ids)) as Row[];
     return rows.map((r) => toSymbol(r, opts.withTokens ?? false));
+  }
+
+  /** 一组文件里的符号（不含 norm_tokens），按路径和起始行排序；路径列表作为一个 JSON 参数传入 */
+  getSymbolsByPaths(snapshotId: number, paths: string[]): SymbolRow[] {
+    if (paths.length === 0) return [];
+    const rows = this.db
+      .prepare('SELECT * FROM symbols WHERE snapshot_id = ? AND path IN (SELECT value FROM json_each(?)) ORDER BY path, start_line')
+      .all(snapshotId, JSON.stringify(paths)) as Row[];
+    return rows.map((r) => toSymbol(r, false));
   }
 
   /**

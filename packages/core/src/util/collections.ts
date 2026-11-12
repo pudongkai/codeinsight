@@ -5,6 +5,13 @@ export function pushTo<K, V>(m: Map<K, V[]>, key: K, value: V): void {
   else m.set(key, [value]);
 }
 
+/** 往 `Map<K, Set<V>>` 里按 key 加一项，key 不存在时新建集合 */
+export function addToSet<K, V>(m: Map<K, Set<V>>, key: K, value: V): void {
+  const set = m.get(key);
+  if (set) set.add(value);
+  else m.set(key, new Set([value]));
+}
+
 /** 按 keyOf 分组，组内和组间都保持输入顺序 */
 export function groupBy<K, V>(items: Iterable<V>, keyOf: (v: V) => K): Map<K, V[]> {
   const out = new Map<K, V[]>();

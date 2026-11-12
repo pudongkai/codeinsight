@@ -1,4 +1,6 @@
 /** HTTP API 的响应形状（与 packages/server/src/http/routes 一致） */
+import type { ChatMessageInfo, ChatSessionInfo } from '@codeinsight/core/ask/events';
+import type { OverviewReport } from '@codeinsight/core/overview/types';
 import type { ReviewReport } from '@codeinsight/core/report/types';
 
 export interface SymbolInfo {
@@ -33,6 +35,8 @@ export interface SnapshotView {
   id: number;
   kind: 'commit' | 'working';
   commitSha: string;
+  /** 快照内容的 key：问答消息、概览记录的 contentKey 与它不同时提示“基于较早的代码” */
+  contentKey: string;
   createdAt: number;
   resolverStatus: string;
   resolverError: string | null;
@@ -61,9 +65,15 @@ export interface StatusResponse {
   repo: string;
   node: string;
   llmConfigured: boolean;
+  /** 当前的 LLM 配置，未配置时为 null */
+  llm: { provider: string; model: string } | null;
+  /** 是否发送源码片段（仓库配置或环境变量关闭时为 false） */
+  sendSource: boolean;
   index: { job: IndexJobView | null; lastDoneAt: number | null };
   snapshot: SnapshotView | null;
   reviews: ReviewSummary[];
+  /** 当前概览的摘要，没有概览时为 null */
+  overview: { id: number; createdAt: number; stale: boolean } | null;
 }
 
 export interface ReviewResponse {
@@ -125,4 +135,53 @@ export interface SourceResponse {
   end: number;
   totalLines: number;
   content: string;
+}
+
+/** GET /api/overview */
+export interface OverviewResponse {
+  id: number;
+  overview: OverviewReport;
+  /** 概览的 content_key 与当前快照不同 */
+  stale: boolean;
+  /** 当前快照未就绪时为 null */
+  currentContentKey: string | null;
+  /** 比当前概览更新、但不含 AI 说明的记录 */
+  newerStructureId?: number;
+}
+
+export interface OverviewParams {
+  noLlm?: boolean;
+  noSource?: boolean;
+}
+
+/** GET /api/overview/estimate（与 core 的 OverviewEstimate 一致） */
+export interface OverviewEstimate {
+  modules: number;
+  llmCalls: number;
+  cachedCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  provider: string | null;
+  model: string | null;
+  sendSource: boolean;
+  needsConfirm: boolean;
+}
+
+export type OverviewStep = 'partition' | 'modules' | 'features' | 'system';
+
+/** GET /api/overview/jobs/:id */
+export interface OverviewJob {
+  id: number;
+  status: 'running' | 'done' | 'failed';
+  progress: { step: OverviewStep; done?: number; total?: number } | null;
+  createdAt: number;
+  finishedAt: number | null;
+  error?: string;
+}
+
+/** GET /api/chat/sessions/:id */
+export interface ChatSessionDetail extends ChatSessionInfo {
+  /** 这个会话是否有问题正在回答（可能来自另一个页面） */
+  answering: boolean;
+  messages: ChatMessageInfo[];
 }

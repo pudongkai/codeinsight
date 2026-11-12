@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline';
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..');
 export const CLI_MAIN = path.join(ROOT, 'packages', 'cli', 'dist', 'main.js');
 const FIXTURE = path.join(ROOT, 'packages', 'core', 'test', 'fixtures', 'py-basic');
+const SHOP_FIXTURE = path.join(ROOT, 'packages', 'core', 'test', 'fixtures', 'py-shop');
 
 export function tempDir(prefix: string): string {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -37,14 +38,31 @@ const CHANGED_REPO_PY =
  * 工作区里 f 的调用方：g、k、use、Service.helper 里的 inner、pkg.service 模块顶层代码，以及测试 test_f。
  */
 export function fixtureRepo(): string {
+  const repo = committedCopy(FIXTURE);
+  writeFileSync(path.join(repo, 'pkg', 'repo.py'), CHANGED_REPO_PY);
+  return repo;
+}
+
+/** 把 fixtures 目录复制到临时目录，extra 里的文件一并写入，作为第一个提交 */
+function committedCopy(fixture: string, extra: Record<string, string> = {}): string {
   if (!existsSync(CLI_MAIN)) throw new Error(`${CLI_MAIN} is missing; run pnpm -r build first`);
   const repo = tempDir('ci-e2e-repo-');
-  cpSync(FIXTURE, repo, { recursive: true });
+  cpSync(fixture, repo, { recursive: true });
+  for (const [rel, text] of Object.entries(extra)) writeFileSync(path.join(repo, rel), text);
   git(repo, 'init', '-q', '-b', 'main');
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'init');
-  writeFileSync(path.join(repo, 'pkg', 'repo.py'), CHANGED_REPO_PY);
   return repo;
+}
+
+/**
+ * py-shop 仓库（概览用）：阈值调小（同 server 测试的 shopRepo），模块划分为
+ * `*`、`app/*`、`app/big#a`、`app/big#c`、`app/common`、`app/leaf`、`app/orders`、`app/payments`、`app/users`。
+ */
+export function shopRepo(): string {
+  return committedCopy(SHOP_FIXTURE, {
+    'codeinsight.config.json': JSON.stringify({ overview: { moduleMinSize: 3, moduleMaxSize: 15, leafSplitSize: 8 } }),
+  });
 }
 
 export interface Serve {
@@ -71,9 +89,12 @@ function readLines(proc: ChildProcess, count: number): Promise<string[]> {
   });
 }
 
-/** 以 `codeinsight serve --open` 启动（打开浏览器的动作由 serve-open.mjs 替换），读 stdout 拿到地址 */
-export async function startServe(repo: string, dataDir: string): Promise<Serve> {
-  const proc = spawn(process.execPath, [SERVE_OPEN, '--repo', repo, '--data-dir', dataDir], { env: cleanEnv(), stdio: ['ignore', 'pipe', 'inherit'] });
+/**
+ * 以 `codeinsight serve --open` 启动（打开浏览器的动作由 serve-open.mjs 替换），读 stdout 拿到地址。
+ * 子进程环境为 cleanEnv() 加上 env（如假 LLM 的 fakeLlmEnv(url)）。
+ */
+export async function startServe(repo: string, dataDir: string, env: Record<string, string> = {}): Promise<Serve> {
+  const proc = spawn(process.execPath, [SERVE_OPEN, '--repo', repo, '--data-dir', dataDir], { env: { ...cleanEnv(), ...env }, stdio: ['ignore', 'pipe', 'inherit'] });
   const [first, second] = await readLines(proc, 2);
   const info = JSON.parse(first!) as { url: string; port: number };
   const { opened } = JSON.parse(second!) as { opened: string };

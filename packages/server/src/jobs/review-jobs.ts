@@ -1,6 +1,7 @@
 import { log, runReview } from '@codeinsight/core';
 import type { ReviewOptions, ReviewRow } from '@codeinsight/core';
 import type { ServerWorkspace } from '../workspace.js';
+import { PendingSet } from './pending.js';
 
 /** POST /api/reviews 的入参（同 CLI review，去掉输出相关的选项） */
 export interface ReviewParams {
@@ -16,7 +17,7 @@ export interface ReviewParams {
  * 启动时把执行进程已退出的 running 任务改为 failed。
  */
 export class ReviewJobs {
-  private readonly pending = new Set<Promise<void>>();
+  private readonly pending = new PendingSet();
 
   constructor(private readonly ws: ServerWorkspace) {
     const n = ws.store.failInterruptedReviews();
@@ -26,8 +27,7 @@ export class ReviewJobs {
   start(params: ReviewParams): number {
     const id = this.ws.store.createReview({ ...params });
     log.info('review_job_start', { reviewId: id, base: params.base, head: params.head, working: params.working, intentChars: params.intent?.length, noLlm: params.noLlm });
-    const p = this.run(id, params).finally(() => this.pending.delete(p));
-    this.pending.add(p);
+    void this.pending.track(this.run(id, params));
     return id;
   }
 
@@ -36,8 +36,8 @@ export class ReviewJobs {
   }
 
   /** 等正在跑的任务结束（关闭服务前用，避免关库后任务再写库） */
-  async drain(): Promise<void> {
-    await Promise.all([...this.pending]);
+  drain(): Promise<void> {
+    return this.pending.drain();
   }
 
   private async run(id: number, params: ReviewParams): Promise<void> {

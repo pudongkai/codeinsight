@@ -1,7 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { completeWithLog, LlmTruncatedError, type LlmClient, type LlmMessage } from '../llm/index.js';
+import { askJson, type AskJsonResult } from '../llm/ask-json.js';
+import { llmCacheKey, readLlmCache, writeLlmCache } from '../llm/cache.js';
+import type { LlmClient } from '../llm/index.js';
 import { log } from '../log.js';
 import type { IntentFinding, SymbolRef, Warning } from '../report/types.js';
 import { parseIntentResponse, PROMPT_VERSION, retryPrompt, SYSTEM_PROMPT, userPrompt, type RawGroup } from './prompt.js';
@@ -64,66 +63,38 @@ interface CacheEntry {
 
 /** 缓存 key = hash(provider + 请求地址 + 模型名 + prompt 版本 + 意图文本 + 结构摘要)；同名模型在不同服务上的结果不混用 */
 export function intentCacheKey(client: Pick<LlmClient, 'provider' | 'model' | 'baseUrl'>, intentText: string, summary: string): string {
-  const parts = [client.provider, client.baseUrl ?? '', client.model, String(PROMPT_VERSION), intentText, summary];
-  return createHash('sha256').update(parts.join('\u0000')).digest('hex');
+  return llmCacheKey([client.provider, client.baseUrl ?? '', client.model, String(PROMPT_VERSION), intentText, summary]);
 }
 
-async function readCache(file: string): Promise<RawGroup[] | undefined> {
-  try {
-    const entry = JSON.parse(await readFile(file, 'utf8')) as CacheEntry;
-    return Array.isArray(entry.groups) ? entry.groups : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * 先写临时文件再改名，并发的读方不会读到写了一半的缓存；临时文件名带随机部分，同一进程里并发写同一个 key 也不冲突。
- * 缓存只是加速，写失败（目录只读、磁盘满）只记日志，不影响本次结果。
- */
-async function writeCache(file: string, entry: CacheEntry): Promise<void> {
-  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(tmp, JSON.stringify(entry));
-    await rename(tmp, file);
-  } catch (err) {
-    log.warn('llm_cache_write_failed', { file: path.basename(file), error: (err as Error).message.split('\n')[0] });
-    await rm(tmp, { force: true }).catch(() => undefined);
-  }
+function cachedGroups(entry: unknown): RawGroup[] | undefined {
+  const groups = (entry as Partial<CacheEntry> | null)?.groups;
+  return Array.isArray(groups) ? groups : undefined;
 }
 
 type AskResult = { ok: true; groups: RawGroup[] } | { ok: false; warning: Warning };
 
-function requestFailure(client: LlmClient, err: unknown): AskResult {
-  if (err instanceof LlmTruncatedError) {
-    const message = `intent check skipped: the model reply was cut off at ${err.maxTokens} output tokens; split the change into smaller reviews, or raise ${MAX_OUTPUT_TOKENS_ENV} if the model allows longer replies`;
-    return { ok: false, warning: { code: 'llm_truncated', level: 'warning', message } };
+function failureWarning(client: LlmClient, r: Exclude<AskJsonResult<RawGroup[]>, { ok: true }>): Warning {
+  if (r.failure === 'invalid') {
+    return { code: 'llm_invalid_response', level: 'warning', message: `intent check skipped: the model reply was invalid twice (${r.reason})` };
   }
-  return { ok: false, warning: { code: 'llm_failed', level: 'warning', message: `intent check skipped: ${client.provider} request failed: ${(err as Error).message.split('\n')[0]}` } };
+  if (r.failure === 'truncated') {
+    const message = `intent check skipped: the model reply was cut off at ${r.error.maxTokens} output tokens; split the change into smaller reviews, or raise ${MAX_OUTPUT_TOKENS_ENV} if the model allows longer replies`;
+    return { code: 'llm_truncated', level: 'warning', message };
+  }
+  return { code: 'llm_failed', level: 'warning', message: `intent check skipped: ${client.provider} request failed: ${r.error.message.split('\n')[0]}` };
 }
 
-/** 发送请求并校验输出；不合格时把原因告诉模型重试 1 次，仍不合格就放弃。请求失败和回复被截断都不重试 */
+/** 发送请求并校验输出；不合格时把原因告诉模型重试 1 次，仍不合格就放弃。请求失败（含 429）和回复被截断都不重试 */
 async function askModel(client: LlmClient, prompt: string, keys: Set<string>): Promise<AskResult> {
-  const messages: LlmMessage[] = [{ role: 'user', content: prompt }];
-  const maxTokens = responseTokenLimit(keys);
-  const items = keys.size;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    let reply: string;
-    try {
-      reply = await completeWithLog(client, { system: SYSTEM_PROMPT, messages, maxTokens }, { items, attempt });
-    } catch (err) {
-      return requestFailure(client, err);
-    }
-    const parsed = parseIntentResponse(reply);
-    if (parsed.ok) return parsed;
-    log.warn('intent_response_invalid', { model: client.model, attempt, reason: parsed.reason });
-    if (attempt === 2) {
-      return { ok: false, warning: { code: 'llm_invalid_response', level: 'warning', message: `intent check skipped: the model reply was invalid twice (${parsed.reason})` } };
-    }
-    messages.push({ role: 'assistant', content: reply }, { role: 'user', content: retryPrompt(parsed.reason) });
-  }
-  throw new Error('unreachable');
+  const r = await askJson({
+    client, system: SYSTEM_PROMPT, prompt, maxTokens: responseTokenLimit(keys), items: keys.size,
+    parse: (reply) => {
+      const p = parseIntentResponse(reply);
+      return p.ok ? { ok: true, value: p.groups } : p;
+    },
+    retryPrompt, invalidEvent: 'intent_response_invalid',
+  });
+  return r.ok ? { ok: true, groups: r.value } : { ok: false, warning: failureWarning(client, r) };
 }
 
 /** 模型漏掉的符号归到这一组，不悄悄丢掉 */
@@ -172,17 +143,13 @@ async function cachedOrAsk(input: IntentCheckInput, summaryText: string, keys: S
   const { client } = input;
   const items = keys.size;
   const key = intentCacheKey(client, input.intentText, summaryText);
-  const file = path.join(input.cacheDir, `${key}.json`);
-  const hit = await readCache(file);
-  if (hit) {
-    log.info('llm_cache_hit', { provider: client.provider, model: client.model, items, key: key.slice(0, 16) });
-    return { ok: true, groups: hit, cached: true };
-  }
-  log.info('llm_cache_miss', { provider: client.provider, model: client.model, items, key: key.slice(0, 16) });
+  const hit = await readLlmCache(input.cacheDir, key, cachedGroups, { provider: client.provider, model: client.model, items });
+  if (hit) return { ok: true, groups: hit, cached: true };
   input.onBeforeSend?.();
   const asked = await askModel(client, userPrompt(input.intentText, summaryText), keys);
   if (!asked.ok) return asked;
-  await writeCache(file, { model: client.model, promptVersion: PROMPT_VERSION, createdAt: Date.now(), groups: asked.groups });
+  const entry: CacheEntry = { model: client.model, promptVersion: PROMPT_VERSION, createdAt: Date.now(), groups: asked.groups };
+  await writeLlmCache(input.cacheDir, key, entry);
   return { ok: true, groups: asked.groups, cached: false };
 }
 

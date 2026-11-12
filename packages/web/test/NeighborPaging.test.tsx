@@ -22,7 +22,7 @@ vi.mock('../src/graph/FlowGraph', () => ({
   ),
 }));
 
-const nav: Nav = { openSymbol: vi.fn(), showSource: vi.fn(), openGraph: vi.fn(), snapshotGone: vi.fn(), indexNotReady: vi.fn() };
+const nav: Nav = { openSymbol: vi.fn(), showSource: vi.fn(), openSourceAt: vi.fn(), openGraph: vi.fn(), snapshotGone: vi.fn(), indexNotReady: vi.fn() };
 const pad = (i: number) => String(i).padStart(2, '0');
 const callersOf: Record<string, SymbolInfo[]> = {
   center: Array.from({ length: 12 }, (_, i) => info(`c${pad(i + 1)}`)),

@@ -1,15 +1,19 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { log } from '@codeinsight/core';
+import { AskRuns } from '../jobs/ask-runs.js';
 import { IndexJobs } from '../jobs/index-jobs.js';
+import { OverviewJobs } from '../jobs/overview-jobs.js';
 import { ReviewJobs } from '../jobs/review-jobs.js';
 import type { ServerWorkspace } from '../workspace.js';
 import { authenticate, hostAllowed, newToken, sessionCookie, tokenMatches } from './auth.js';
 import type { AppContext, RequestContext, Route } from './context.js';
 import { HttpError, sendError, sendJson } from './respond.js';
 import { matchRoute } from './router.js';
+import { chatRoutes } from './routes/chat.js';
 import { entryRoutes } from './routes/entries.js';
 import { indexRoutes } from './routes/index-jobs.js';
+import { overviewRoutes } from './routes/overview.js';
 import { reviewRoutes } from './routes/reviews.js';
 import { similarRoutes } from './routes/similar.js';
 import { sourceRoutes } from './routes/source.js';
@@ -17,7 +21,7 @@ import { serveStatic } from './routes/static.js';
 import { statusRoutes } from './routes/status.js';
 import { symbolRoutes } from './routes/symbols.js';
 
-const ROUTES: Route[] = [...statusRoutes, ...reviewRoutes, ...indexRoutes, ...sourceRoutes, ...symbolRoutes, ...entryRoutes, ...similarRoutes];
+const ROUTES: Route[] = [...statusRoutes, ...reviewRoutes, ...indexRoutes, ...sourceRoutes, ...symbolRoutes, ...entryRoutes, ...similarRoutes, ...overviewRoutes, ...chatRoutes];
 
 /** 只监听本机回环地址 */
 export const LISTEN_HOST = '127.0.0.1';
@@ -43,7 +47,8 @@ export interface RunningHttpServer {
   url: string;
   indexJobs: IndexJobs;
   reviewJobs: ReviewJobs;
-  /** 停止监听；drain 为 true 时还等正在跑的审查和建索引任务结束 */
+  overviewJobs: OverviewJobs;
+  /** 停止监听；drain 为 true 时还等正在跑的审查、建索引、概览任务结束，并中止进行中的问答、等它们保存回答 */
   close(opts?: { drain?: boolean }): Promise<void>;
 }
 
@@ -141,7 +146,10 @@ function listen(server: Server, port: number): Promise<number> {
 export async function startHttpServer(opts: HttpServerOptions): Promise<RunningHttpServer> {
   const ws = opts.workspace;
   const token = newToken();
-  const app: AppContext = { ws, indexJobs: new IndexJobs(ws), reviewJobs: new ReviewJobs(ws), staticDir: opts.staticDir, touched: new Map() };
+  const app: AppContext = {
+    ws, indexJobs: new IndexJobs(ws), reviewJobs: new ReviewJobs(ws), overviewJobs: new OverviewJobs(ws), askRuns: new AskRuns(),
+    staticDir: opts.staticDir, touched: new Map(),
+  };
   let port = 0;
   const server = createServer((req, res) => void handle(app, token, port, req, res));
   port = await listen(server, opts.port ?? 0);
@@ -150,12 +158,12 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
   const keepAlive = setInterval(() => app.indexJobs.touchCurrent(), opts.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
   keepAlive.unref();
   return {
-    port, token, url: `http://${LISTEN_HOST}:${port}/?token=${token}`, indexJobs: app.indexJobs, reviewJobs: app.reviewJobs,
+    port, token, url: `http://${LISTEN_HOST}:${port}/?token=${token}`, indexJobs: app.indexJobs, reviewJobs: app.reviewJobs, overviewJobs: app.overviewJobs,
     close: async ({ drain = true } = {}) => {
       clearInterval(keepAlive);
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      if (drain) await Promise.all([app.reviewJobs.drain(), app.indexJobs.drain()]);
+      if (drain) await Promise.all([app.reviewJobs.drain(), app.indexJobs.drain(), app.overviewJobs.drain(), app.askRuns.drain()]);
       log.info('http_closed', { port });
     },
   };

@@ -7,7 +7,8 @@ import type { ExtractedEntry, ExtractedFile } from './types.js';
 
 export * from './types.js';
 export { bodySimilarity, normalizeTokens, shingles, SHINGLE_SIZE } from './normalize.js';
-export { extractPythonFile, moduleDottedName, restoreExtractedFile, sha1 } from './python.js';
+export { collectImportModules, extractPythonFile, moduleDottedName, restoreExtractedFile, sha1 } from './python.js';
+export type { ImportedModule } from './python.js';
 export { getPythonParser } from './parser.js';
 export { resolveModels } from './models.js';
 

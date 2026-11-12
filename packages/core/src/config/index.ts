@@ -1,6 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../log.js';
+import { DEFAULT_LAYER_NAMES, LAYERS, type LayerNames } from '../overview/boundary.js';
+import { EXTERNAL_CATEGORIES } from '../overview/external-table.js';
+import { DEFAULT_PARTITION_THRESHOLDS, type PartitionThresholds } from '../overview/partition-state.js';
+import { DEFAULT_SNIPPET_LIMITS, type SnippetLimits } from '../overview/snippets.js';
+import type { ExternalCategory } from '../overview/types.js';
 import type { Warning } from '../report/types.js';
 
 export type LlmProvider = 'anthropic' | 'openai-compatible';
@@ -22,11 +27,64 @@ export interface CodeInsightConfig {
   scipTimeoutMs: number;
   impactDepth: number;
   similarMinScore: number;
+  /** 概览的划分、分层、外部库分类（仓库配置直接生效），以及费用和发送相关的上限（仓库配置只能调严） */
+  overview: OverviewConfig;
+  /** 问答的轮数和工具结果上限（仓库配置只能调低） */
+  ask: AskConfig;
   llm?: LlmConfig;
   /** LLM 配置有误（provider 不支持、缺 model）时的原因；此时 llm 为 undefined，意图检查转成 llm_not_configured */
   llmProblem?: string;
   /** 读取配置时发现的问题，review 时写进报告的 warnings */
   warnings?: Warning[];
+}
+
+export interface OverviewConfig extends PartitionThresholds {
+  /** 各层对应的文件名或目录名；仓库配置里给出的层整层替换默认值 */
+  layers: LayerNames;
+  /** 追加或覆盖内置分类表：点分模块名 → 类别 */
+  externalCategories: Record<string, ExternalCategory>;
+  /** 生成的名称和说明用的语言 */
+  language: string;
+  /** 是否把源码发给 LLM（同时管概览的源码片段和问答读源码）；仓库配置、环境变量任一处关闭即不发 */
+  sendSource: boolean;
+  /** 源码片段上限 */
+  snippets: SnippetLimits;
+  /** 同时进行的 LLM 请求数 */
+  concurrency: number;
+  /** 估算输入 token 超过它时要二次确认；0 表示总是确认 */
+  confirmTokens: number;
+}
+
+export interface AskConfig {
+  /** 一个问题最多几轮工具调用 */
+  maxRounds: number;
+  /** 一个问题里工具结果累计字符上限 */
+  maxToolChars: number;
+}
+
+export const DEFAULT_OVERVIEW_LANGUAGE = 'zh';
+export const DEFAULT_OVERVIEW_CONCURRENCY = 4;
+export const DEFAULT_CONFIRM_TOKENS = 200_000;
+export const DEFAULT_ASK_CONFIG: AskConfig = { maxRounds: 12, maxToolChars: 120_000 };
+
+/** 放宽费用和发送相关上限只能用这些环境变量 */
+export const LIMIT_ENV = {
+  sendSource: 'CODEINSIGHT_SEND_SOURCE',
+  snippets: 'CODEINSIGHT_OVERVIEW_SNIPPETS',
+  concurrency: 'CODEINSIGHT_OVERVIEW_CONCURRENCY',
+  confirmTokens: 'CODEINSIGHT_OVERVIEW_CONFIRM_TOKENS',
+  maxRounds: 'CODEINSIGHT_ASK_MAX_ROUNDS',
+  maxToolChars: 'CODEINSIGHT_ASK_MAX_TOOL_CHARS',
+} as const;
+
+interface FileOverviewConfig extends Partial<PartitionThresholds> {
+  layers?: Partial<Record<string, unknown>>;
+  externalCategories?: Record<string, unknown>;
+  language?: unknown;
+  sendSource?: unknown;
+  snippets?: Partial<Record<keyof SnippetLimits, unknown>>;
+  concurrency?: unknown;
+  confirmTokens?: unknown;
 }
 
 interface FileConfig {
@@ -37,6 +95,8 @@ interface FileConfig {
   scipTimeoutMs?: number;
   impactDepth?: number;
   similar?: { minScore?: number };
+  overview?: FileOverviewConfig;
+  ask?: Partial<Record<keyof AskConfig, unknown>>;
   llm?: Partial<LlmConfig> & { apiKeyEnv?: string };
 }
 
@@ -78,6 +138,178 @@ async function readFileConfig(repo: string): Promise<FileConfig> {
   }
 }
 
+const isIntAtLeast = (v: unknown, min: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= min;
+
+/** 划分阈值只接受正整数，其他值记日志后用默认值 */
+function partitionThresholds(file: FileConfig): PartitionThresholds {
+  const out = { ...DEFAULT_PARTITION_THRESHOLDS };
+  for (const key of Object.keys(out) as (keyof PartitionThresholds)[]) {
+    const v = file.overview?.[key];
+    if (v === undefined) continue;
+    if (isIntAtLeast(v, 1)) out[key] = v;
+    else log.warn('config_value_ignored', { key: `overview.${key}`, reason: 'expected a positive integer' });
+  }
+  return out;
+}
+
+function isStringList(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string' && x !== '');
+}
+
+/** 给出的层整层替换默认名单；不认识的层名或格式不对的值记日志后忽略 */
+function layerNames(file: FileConfig): LayerNames {
+  const out: LayerNames = { ...DEFAULT_LAYER_NAMES };
+  for (const [layer, names] of Object.entries(file.overview?.layers ?? {})) {
+    if ((LAYERS as readonly string[]).includes(layer) && isStringList(names)) out[layer as keyof LayerNames] = names;
+    else log.warn('config_value_ignored', { key: `overview.layers.${layer}`, reason: 'expected one of entry/service/data/common with a list of names' });
+  }
+  return out;
+}
+
+/** 只接受点分模块名 → 内置类别，其他记日志后忽略 */
+function externalCategories(file: FileConfig): Record<string, ExternalCategory> {
+  const out: Record<string, ExternalCategory> = {};
+  for (const [mod, category] of Object.entries(file.overview?.externalCategories ?? {})) {
+    if (/^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$/.test(mod) && (EXTERNAL_CATEGORIES as readonly unknown[]).includes(category)) out[mod] = category as ExternalCategory;
+    else log.warn('config_value_ignored', { key: `overview.externalCategories.${mod}`, reason: 'expected a dotted module name mapped to a known category' });
+  }
+  return out;
+}
+
+/** 语言写进提示词，只接受 `zh`、`en-US` 这样的语言标记 */
+function overviewLanguage(file: FileConfig): string {
+  const v = file.overview?.language;
+  if (v === undefined) return DEFAULT_OVERVIEW_LANGUAGE;
+  if (typeof v === 'string' && /^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})?$/.test(v)) return v;
+  log.warn('config_value_ignored', { key: 'overview.language', reason: 'expected a language tag such as zh or en' });
+  return DEFAULT_OVERVIEW_LANGUAGE;
+}
+
+function overviewConfig(file: FileConfig, limits: CostLimits): OverviewConfig {
+  return {
+    ...partitionThresholds(file), layers: layerNames(file), externalCategories: externalCategories(file), language: overviewLanguage(file),
+    sendSource: limits.sendSource, snippets: limits.snippets, concurrency: limits.concurrency, confirmTokens: limits.confirmTokens,
+  };
+}
+
+/** 环境变量里的整数列表（逗号分隔，个数为 count，都不小于 min）；没设时 undefined，格式不对时记日志后按没设处理 */
+function envInts(env: NodeJS.ProcessEnv, name: string, count: number, min: number): number[] | undefined {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const parts = raw.split(',').map((x) => Number(x.trim()));
+  if (parts.length === count && parts.every((v) => isIntAtLeast(v, min))) return parts;
+  log.warn('config_env_ignored', { name, value: raw, reason: `expected ${count} comma-separated integer(s) >= ${min}` });
+  return undefined;
+}
+
+/** 环境变量能关闭源码发送，不能打开仓库配置关掉的 */
+function envTurnsOff(env: NodeJS.ProcessEnv, name: string): boolean {
+  return /^(0|false|no|off)$/i.test(env[name]?.trim() ?? '');
+}
+
+interface IgnoredLimit {
+  key: string;
+  env: string;
+}
+
+interface LimitSpec {
+  /** 仓库配置里的键，用于日志和 warning */
+  key: string;
+  env: string;
+  def: number;
+  /** 环境变量给出的值，设了时代替默认值作为上限 */
+  envValue?: number;
+  repo: unknown;
+  /** 允许的最小值（confirmTokens 为 0 表示总是确认） */
+  min: number;
+}
+
+/**
+ * 仓库配置只能比上限（环境变量的值，没设时为默认值）更严格：比上限宽时用上限。仓库配置随被分析的代码一起来，不能让它放大费用。
+ * 只有没设环境变量、仓库配置想超过默认值时才记下，由调用方汇总成 `config_limit_ignored` 提示改用环境变量；
+ * 用户已经用环境变量定了上限时只记日志。
+ */
+export function stricterLimit(spec: LimitSpec, ignored: IgnoredLimit[]): number {
+  const ceiling = spec.envValue ?? spec.def;
+  if (spec.repo === undefined) return ceiling;
+  if (!isIntAtLeast(spec.repo, spec.min)) {
+    log.warn('config_value_ignored', { key: spec.key, reason: `expected an integer >= ${spec.min}` });
+    return ceiling;
+  }
+  if (spec.repo <= ceiling) return spec.repo;
+  if (spec.envValue === undefined) ignored.push({ key: spec.key, env: spec.env });
+  else log.info('config_limit_capped', { key: spec.key, env: spec.env, repo: spec.repo, effective: ceiling });
+  return ceiling;
+}
+
+interface CostLimits {
+  sendSource: boolean;
+  snippets: SnippetLimits;
+  concurrency: number;
+  confirmTokens: number;
+  ask: AskConfig;
+  ignored: IgnoredLimit[];
+  warnings: Warning[];
+}
+
+function snippetLimits(file: FileConfig, env: NodeJS.ProcessEnv, ignored: IgnoredLimit[]): SnippetLimits {
+  const fromEnv = envInts(env, LIMIT_ENV.snippets, 3, 1);
+  const keys: (keyof SnippetLimits)[] = ['perModule', 'maxLines', 'maxCharsPerModule'];
+  const out = { ...DEFAULT_SNIPPET_LIMITS };
+  keys.forEach((k, i) => {
+    out[k] = stricterLimit({ key: `overview.snippets.${k}`, env: LIMIT_ENV.snippets, def: DEFAULT_SNIPPET_LIMITS[k], envValue: fromEnv?.[i], repo: file.overview?.snippets?.[k], min: 1 }, ignored);
+  });
+  return out;
+}
+
+/** 单个数值上限：环境变量（没设时默认值）定上限，仓库配置只能调低 */
+function singleLimit(env: NodeJS.ProcessEnv, spec: Omit<LimitSpec, 'envValue'>, ignored: IgnoredLimit[]): number {
+  return stricterLimit({ ...spec, envValue: envInts(env, spec.env, 1, spec.min)?.[0] }, ignored);
+}
+
+/** 仓库配置的 sendSource：不是布尔值时按关闭处理（写错了宁可不发源码），并给出 warning */
+function repoSendSource(file: FileConfig, warnings: Warning[]): boolean {
+  const v = file.overview?.sendSource;
+  if (v === undefined || typeof v === 'boolean') return v !== false;
+  log.warn('config_value_ignored', { key: 'overview.sendSource', reason: 'expected a boolean; source sending turned off' });
+  warnings.push({
+    code: 'config_value_invalid', level: 'warning',
+    message: `overview.sendSource in ${CONFIG_FILE} is not true or false; source code will not be sent to the LLM`,
+  });
+  return false;
+}
+
+/** 费用和发送相关的配置：仓库配置只能调严，放宽只能用环境变量（或命令行参数） */
+function costLimits(file: FileConfig, env: NodeJS.ProcessEnv): CostLimits {
+  const ignored: IgnoredLimit[] = [];
+  const warnings: Warning[] = [];
+  const L = LIMIT_ENV;
+  const ov = file.overview;
+  return {
+    sendSource: repoSendSource(file, warnings) && !envTurnsOff(env, L.sendSource),
+    snippets: snippetLimits(file, env, ignored),
+    concurrency: singleLimit(env, { key: 'overview.concurrency', env: L.concurrency, def: DEFAULT_OVERVIEW_CONCURRENCY, repo: ov?.concurrency, min: 1 }, ignored),
+    confirmTokens: singleLimit(env, { key: 'overview.confirmTokens', env: L.confirmTokens, def: DEFAULT_CONFIRM_TOKENS, repo: ov?.confirmTokens, min: 0 }, ignored),
+    ask: {
+      maxRounds: singleLimit(env, { key: 'ask.maxRounds', env: L.maxRounds, def: DEFAULT_ASK_CONFIG.maxRounds, repo: file.ask?.maxRounds, min: 1 }, ignored),
+      maxToolChars: singleLimit(env, { key: 'ask.maxToolChars', env: L.maxToolChars, def: DEFAULT_ASK_CONFIG.maxToolChars, repo: file.ask?.maxToolChars, min: 1 }, ignored),
+    },
+    ignored,
+    warnings,
+  };
+}
+
+/** 被忽略的上限汇总成一条 warning，写明应改用的环境变量 */
+function ignoredLimitWarnings(ignored: IgnoredLimit[]): Warning[] {
+  if (ignored.length === 0) return [];
+  log.warn('config_limit_ignored', { keys: ignored.map((i) => i.key).join(',') });
+  const envs = [...new Set(ignored.map((i) => i.env))].join(', ');
+  return [{
+    code: 'config_limit_ignored', level: 'warning',
+    message: `ignored ${ignored.map((i) => i.key).join(', ')} in ${CONFIG_FILE}: the repository config can only lower these limits; to raise them set ${envs}`,
+  }];
+}
+
 type LlmResolution = { llm?: LlmConfig; problem?: string };
 
 /**
@@ -109,7 +341,8 @@ export async function loadConfig(repo: string, opts: LoadConfigOptions = {}): Pr
   const dataDirRaw = opts.dataDir ?? env.CODEINSIGHT_DATA_DIR ?? file.dataDir ?? DEFAULT_DATA_DIR;
   const llm = resolveLlm(file, env);
   if (llm.problem) log.warn('config_llm_invalid', { reason: llm.problem });
-  const warnings = ignoredLlmKeys(file);
+  const limits = costLimits(file, env);
+  const warnings = [...ignoredLlmKeys(file), ...ignoredLimitWarnings(limits.ignored), ...limits.warnings];
   return {
     repo,
     dataDir: path.resolve(repo, dataDirRaw),
@@ -119,10 +352,17 @@ export async function loadConfig(repo: string, opts: LoadConfigOptions = {}): Pr
     scipTimeoutMs: Number(env.CODEINSIGHT_SCIP_TIMEOUT_MS ?? file.scipTimeoutMs ?? 300_000),
     impactDepth: file.impactDepth ?? 2,
     similarMinScore: file.similar?.minScore ?? 0.6,
+    overview: overviewConfig(file, limits),
+    ask: limits.ask,
     ...(llm.llm ? { llm: llm.llm } : {}),
     ...(llm.problem ? { llmProblem: llm.problem } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
+}
+
+/** 本次是否发送源码（概览和问答共用）：配置（仓库配置、环境变量）和命令行的 --no-source 任一处关闭即不发 */
+export function effectiveSendSource(config: Pick<CodeInsightConfig, 'overview'>, noSource: boolean | undefined): boolean {
+  return config.overview.sendSource && !noSource;
 }
 
 /** 数据目录在仓库内时返回相对路径（用于从文件清单中排除），否则返回 undefined */

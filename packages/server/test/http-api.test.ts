@@ -1,4 +1,4 @@
-import { rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EdgeRow } from '@codeinsight/core';
@@ -166,6 +166,17 @@ describe('source', () => {
     expect(body.content).toBe('def f(x):\n    """Join a path."""\n    return os.path.join("a", str(x))');
   });
 
+  it('returns the end of the file when start is beyond it, and 400 when end is before start', async () => {
+    const snapId = (await indexDone()).snapshot!.id;
+    const whole = await api<{ totalLines: number }>(`/api/source?snapshot=${snapId}&path=pkg/repo.py`);
+    const total = whole.body.totalLines;
+    const tail = await api<{ start: number; end: number; content: string }>(`/api/source?snapshot=${snapId}&path=pkg/repo.py&start=${total + 300}&end=${total + 700}`);
+    expect(tail.status).toBe(200);
+    expect(tail.body).toMatchObject({ start: 1, end: total });
+    const bad = await api<{ error: string }>(`/api/source?snapshot=${snapId}&path=pkg/repo.py&start=5&end=3`);
+    expect(bad.status).toBe(400);
+  });
+
   it('rejects paths outside the repository', async () => {
     const snapId = (await indexDone()).snapshot!.id;
     const bad = [
@@ -191,6 +202,30 @@ describe('source', () => {
     const res = await request(server.port, `/api/source?snapshot=${snapId}&path=pkg/leak.py`, { headers: { Authorization: `Bearer ${server.token}` } });
     expect([403, 404]).toContain(res.status);
     expect(res.body).not.toContain('top-secret');
+  });
+});
+
+describe('source of a working snapshot', () => {
+  it('returns the indexed copy of Python files and 409 file_changed for other files changed after indexing', async () => {
+    const snapId = (await indexDone()).snapshot!.id;
+    const repoPy = path.join(repo, 'pkg', 'repo.py');
+    const readme = path.join(repo, 'README.md');
+    const original = { repoPy: readFileSync(repoPy, 'utf8'), readme: readFileSync(readme, 'utf8') };
+    expect((await api<{ content: string }>(`/api/source?snapshot=${snapId}&path=README.md`)).body.content).toBe(original.readme.replace(/\r?\n/g, '\n'));
+    try {
+      writeFileSync(repoPy, '# shifted\n' + original.repoPy);
+      writeFileSync(readme, 'changed after indexing\n');
+      const code = await api<{ content: string }>(`/api/source?snapshot=${snapId}&path=pkg/repo.py&start=4&end=6`);
+      expect(code.status).toBe(200);
+      expect(code.body.content).toBe('def f(x):\n    """Join a path."""\n    return os.path.join("a", str(x))');
+      const changed = await api<{ error: string; content?: string }>(`/api/source?snapshot=${snapId}&path=README.md`);
+      expect(changed.status).toBe(409);
+      expect(changed.body.error).toBe('file_changed');
+      expect(changed.body.content).toBeUndefined();
+    } finally {
+      writeFileSync(repoPy, original.repoPy);
+      writeFileSync(readme, original.readme);
+    }
   });
 });
 

@@ -1,31 +1,19 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { startServe, type Serve } from './helpers/cli';
+import { CLAUVE_DATA_DIR, CLAUVE_REPO, CLAUVE_SOURCE, openClauve, prepareClauveRepo } from './helpers/clauve';
 
 /**
- * 方案阶段 6 的 clauve 手工检查的自动版本，只在设置 CODEINSIGHT_CLAUVE（指向 clauve 仓库）时运行。
- * 在 /tmp 下 clone 一份并切到 80cf8e1，serve 只在这份副本上运行，不碰原仓库。截图保存到 /tmp/ci-web-shots/。
+ * 方案阶段 6 的 clauve 手工检查的自动版本，只在设置 CODEINSIGHT_CLAUVE（指向 clauve 仓库）时运行。截图保存到 /tmp/ci-web-shots/。
  */
-const SOURCE = process.env.CODEINSIGHT_CLAUVE?.replace(/^~(?=$|\/)/, homedir());
-const REPO = '/tmp/clauve-80cf8e1';
-const DATA_DIR = '/tmp/ci-web';
 const SHOTS = '/tmp/ci-web-shots';
-const COMMIT = '80cf8e1';
 
-test.skip(!SOURCE, 'CODEINSIGHT_CLAUVE is not set');
+test.skip(!CLAUVE_SOURCE, 'CODEINSIGHT_CLAUVE is not set');
 test.describe.configure({ mode: 'serial', timeout: 20 * 60_000 });
 
 const summary: Record<string, unknown> = {};
 let serve: Serve;
-
-function prepareRepo(): void {
-  if (!existsSync(REPO)) execFileSync('git', ['clone', '-q', SOURCE!, REPO]);
-  const head = execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  if (!head.startsWith(COMMIT)) execFileSync('git', ['-C', REPO, 'checkout', '-q', COMMIT]);
-}
 
 async function shot(page: Page, name: string): Promise<void> {
   await page.waitForTimeout(500);
@@ -34,8 +22,8 @@ async function shot(page: Page, name: string): Promise<void> {
 
 test.beforeAll(async () => {
   mkdirSync(SHOTS, { recursive: true });
-  prepareRepo();
-  serve = await startServe(REPO, DATA_DIR);
+  prepareClauveRepo();
+  serve = await startServe(CLAUVE_REPO, CLAUVE_DATA_DIR);
 });
 
 test.afterAll(async () => {
@@ -43,9 +31,10 @@ test.afterAll(async () => {
   writeFileSync(path.join(SHOTS, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
 });
 
+/** 数据目录里已有概览时页面默认打开概览，这里的用例都从浏览标签开始 */
 async function openApp(page: Page): Promise<void> {
-  await page.goto(serve.opened);
-  await expect(page.getByTestId('index-time')).toBeVisible({ timeout: 15 * 60_000 });
+  await openClauve(page, serve);
+  await page.getByTestId('tab-browse').click();
 }
 
 test('entry list shows FastAPI endpoints', async ({ page }) => {
