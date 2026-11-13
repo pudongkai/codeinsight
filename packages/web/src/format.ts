@@ -15,8 +15,21 @@ export function formatTime(ms: number | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+/** 不带年份和秒的时间，如 `11-13 10:02`，用在顶栏、卡片这类空间小的地方 */
+export function formatShortTime(ms: number | null | undefined): string {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export function shortSha(sha: string): string {
   return sha.slice(0, 8);
+}
+
+/** 分析结果所基于的代码，如 `基于 abc12345（含未提交改动）` */
+export function basedOn(commitSha: string, dirty: boolean): string {
+  return `基于 ${shortSha(commitSha)}${dirty ? '（含未提交改动）' : ''}`;
 }
 
 /** 入口的简短描述，如 `HTTP POST /orders/{id}`、`celery task` */

@@ -1,4 +1,4 @@
-import type { Route, RequestContext } from '../context.js';
+import { repoOf, type Route, type RequestContext } from '../context.js';
 import { sendJson } from '../respond.js';
 import { currentSnapshot, symbolInfo } from '../snapshot.js';
 
@@ -8,7 +8,7 @@ function entries(ctx: RequestContext): void {
   const kind = q.get('kind') || undefined;
   const framework = q.get('framework') || undefined;
   const snap = currentSnapshot(ctx);
-  const store = ctx.app.ws.store;
+  const store = repoOf(ctx).ws.store;
   const rows = store.getEntries(snap.id).filter((e) => (!kind || e.kind === kind) && (!framework || e.framework === framework));
   const symbols = new Map(store.getSymbolsByIds(snap.id, [...new Set(rows.map((e) => e.symbolId))]).map((s) => [s.id, s]));
   const items = rows

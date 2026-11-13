@@ -55,9 +55,11 @@ export class ToolsUnsupportedError extends LlmError {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+/** 没有配置 baseUrl 时 anthropic 的请求地址 */
+export const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const ANTHROPIC_VERSION = '2023-06-01';
-const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+/** 没有配置 baseUrl 时 openai-compatible 的请求地址 */
+export const OPENAI_BASE_URL = 'https://api.openai.com/v1';
 /** 错误类型字段只保留这么多字符，且只留标识符字符 */
 const ERROR_TYPE_CHARS = 64;
 

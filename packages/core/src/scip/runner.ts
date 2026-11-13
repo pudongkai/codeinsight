@@ -16,6 +16,8 @@ export interface ScipRunOptions {
   timeoutMs: number;
   /** scip-python 入口脚本，默认用依赖里的版本；测试时可换成别的脚本 */
   bin?: string;
+  /** 中止时结束子进程并删除临时输出，以 ScipRunError 结束 */
+  signal?: AbortSignal;
 }
 
 export class ScipRunError extends Error {}
@@ -33,6 +35,7 @@ interface ExitInfo {
   code: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
+  aborted: boolean;
   stderr: string;
 }
 
@@ -45,12 +48,13 @@ interface ActiveRun {
 /** 本进程正在运行的 scip-python 子进程，进程退出前用 killActiveScipProcesses 结束它们 */
 const active = new Map<ChildProcess, ActiveRun>();
 
-function runProcess(args: string[], cwd: string, timeoutMs: number, tmp: string): Promise<ExitInfo> {
+function runProcess(args: string[], cwd: string, timeoutMs: number, tmp: string, abort?: AbortSignal): Promise<ExitInfo> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
     active.set(child, { tmp, closed: new Promise((r) => child.once('close', () => r())) });
     let stderr = '';
     let timedOut = false;
+    let aborted = false;
     child.stderr.on('data', (d: Buffer) => {
       stderr = (stderr + d.toString('utf8')).slice(-64 * 1024);
     });
@@ -58,15 +62,23 @@ function runProcess(args: string[], cwd: string, timeoutMs: number, tmp: string)
       timedOut = true;
       child.kill('SIGKILL');
     }, timeoutMs);
-    child.on('error', (err) => {
+    const onAbort = (): void => {
+      aborted = true;
+      child.kill('SIGKILL');
+    };
+    abort?.addEventListener('abort', onAbort, { once: true });
+    const done = (): void => {
       clearTimeout(timer);
+      abort?.removeEventListener('abort', onAbort);
       active.delete(child);
+    };
+    child.on('error', (err) => {
+      done();
       reject(err);
     });
     child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      active.delete(child);
-      resolve({ code, signal, timedOut, stderr });
+      done();
+      resolve({ code, signal, timedOut, aborted, stderr });
     });
   });
 }
@@ -85,11 +97,13 @@ export async function runScipPython(opts: ScipRunOptions): Promise<void> {
     '--output', tmp,
     '--project-version', opts.projectVersion,
   ];
+  if (opts.signal?.aborted) throw new ScipRunError('scip-python cancelled');
   log.info('scip_python_start', { args: args.slice(1), timeoutMs: opts.timeoutMs });
   const started = Date.now();
   try {
-    const exit = await runProcess(args, cwd, opts.timeoutMs, tmp);
-    log.info('scip_python_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, ms: Date.now() - started });
+    const exit = await runProcess(args, cwd, opts.timeoutMs, tmp, opts.signal);
+    log.info('scip_python_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, aborted: exit.aborted, ms: Date.now() - started });
+    if (exit.aborted) throw new ScipRunError('scip-python cancelled');
     if (exit.timedOut) throw new ScipRunError(`scip-python timed out after ${opts.timeoutMs}ms\n${tail(exit.stderr)}`);
     if (exit.code !== 0) throw new ScipRunError(`scip-python exited with code ${exit.code ?? exit.signal}\n${tail(exit.stderr)}`);
     const size = (await stat(tmp).catch(() => undefined))?.size ?? 0;

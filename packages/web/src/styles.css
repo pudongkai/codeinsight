@@ -192,3 +192,30 @@ button.primary { border: 1px solid var(--accent); background: var(--accent); col
 .tool-steps summary { cursor: pointer; }
 .chat-composer textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; resize: vertical; }
 .chat-composer .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 6px; }
+
+/* 设置对话框、选择仓库 */
+.ok-inline { color: #15803d; }
+.small-note { font-size: 12px; margin-top: 2px; }
+.setup-hint { margin: 8px 0; }
+.statusbar .settings-button { margin-left: auto; }
+select { font: inherit; border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; background: #fff; }
+.settings-section { margin-top: 8px; }
+.settings-section .field { margin-bottom: 8px; }
+.field > label:first-child { display: grid; grid-template-columns: 80px 1fr; gap: 8px; align-items: center; }
+.field input:not([type='checkbox']), .field select { width: 100%; box-sizing: border-box; }
+.field-check { margin-left: 88px; font-size: 12.5px; }
+.field-note { margin-left: 88px; font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+.settings-path { margin-right: auto; font-size: 12px; overflow-wrap: anywhere; }
+.repo-page { max-width: 760px; margin: 24px auto; }
+.repo-form .row { display: flex; gap: 8px; align-items: center; }
+.repo-form .row input { flex: 1; min-width: 0; padding: 6px 10px; }
+.repo-form p { margin: 6px 0; font-size: 12.5px; }
+.recent-repos ul { padding-left: 0; }
+.recent-repo { list-style: none; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 3px 0; }
+.recent-repo .muted { font-size: 12px; }
+.recent-repo.missing code { color: #94a3b8; text-decoration: line-through; }
+.repo-switcher { position: relative; }
+.repo-button { border: 1px solid transparent; background: none; border-radius: 4px; padding: 2px 6px; cursor: pointer; color: var(--muted); }
+.repo-button:hover { border-color: var(--border); }
+.repo-menu { position: absolute; top: 100%; left: 0; z-index: 15; width: min(560px, 80vw); margin-top: 4px; box-shadow: 0 6px 20px rgba(15, 23, 42, 0.18); }
+.repo-menu .error { margin: 6px 0; }

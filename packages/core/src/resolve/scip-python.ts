@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { codeHash, DEFAULT_CODE_ROOT, moduleFilesIn } from '../extract/cache.js';
+import { sha1 } from '../extract/python.js';
 import { log } from '../log.js';
 import { decodeScipIndex, type ScipIndex } from '../scip/reader.js';
 import { runScipPython } from '../scip/runner.js';
@@ -37,11 +39,20 @@ async function readIndex(file: string, expectDocuments: boolean): Promise<ScipIn
   }
 }
 
+/** 解析相关代码（resolve/、scip/ 下的模块）和 scip-python 包版本的指纹 */
+export function scipResolverCodeHash(root = DEFAULT_CODE_ROOT): string {
+  return codeHash('resolve', root, () => [...moduleFilesIn(root, 'resolve'), ...moduleFilesIn(root, 'scip')].sort(), ['@sourcegraph/scip-python']);
+}
+
 /** 用 scip-python 解析 Python 引用；index.scip 按 content_key 缓存在数据目录 */
 export class ScipPythonResolver implements Resolver {
   readonly name = 'scip-python';
 
   constructor(private readonly opts: ScipPythonResolverOptions = {}) {}
+
+  get version(): string {
+    return sha1(`${scipResolverCodeHash()}\0${this.opts.bin ?? ''}`);
+  }
 
   async resolve(input: ResolveInput): Promise<ResolveResult> {
     const output = scipPath(input.layout, input.contentKey);
@@ -56,6 +67,7 @@ export class ScipPythonResolver implements Resolver {
         projectVersion: input.contentKey,
         timeoutMs: input.timeoutMs,
         bin: this.opts.bin,
+        signal: input.signal,
       });
     }
     const index = await readIndex(output, input.files.length > 0);

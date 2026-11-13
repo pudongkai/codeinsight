@@ -1,5 +1,5 @@
 import type { ReviewParams } from '../../jobs/review-jobs.js';
-import type { Route, RequestContext } from '../context.js';
+import { repoOf, type Route, type RequestContext } from '../context.js';
 import { HttpError, idParam, optBool, optString, readJsonBody, sendJson } from '../respond.js';
 
 /** 入参同 CLI review：base、head、working、intent（意图文本）、noLlm */
@@ -14,7 +14,7 @@ function parseReviewParams(body: Record<string, unknown>): ReviewParams {
 
 async function createReview(ctx: RequestContext): Promise<void> {
   const params = parseReviewParams(await readJsonBody(ctx.req));
-  const id = ctx.app.reviewJobs.start(params);
+  const id = repoOf(ctx).reviewJobs.start(params);
   Object.assign(ctx.logFields, { reviewId: id, base: params.base, head: params.head, working: params.working });
   sendJson(ctx.res, 202, { id });
 }
@@ -22,7 +22,7 @@ async function createReview(ctx: RequestContext): Promise<void> {
 function getReview(ctx: RequestContext): void {
   const id = idParam(ctx.params.id, 'review id');
   ctx.logFields.reviewId = id;
-  const r = ctx.app.reviewJobs.get(id);
+  const r = repoOf(ctx).reviewJobs.get(id);
   if (!r) throw new HttpError(404, 'review_not_found');
   sendJson(ctx.res, 200, {
     id: r.id, status: r.status, progress: r.progress, params: r.params, createdAt: r.createdAt,

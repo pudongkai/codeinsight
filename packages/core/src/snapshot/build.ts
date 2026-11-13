@@ -1,20 +1,21 @@
 import { existsSync } from 'node:fs';
-import { copyFile, lstat, mkdir, readFile, readlink, rm, symlink } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { isGeneratedPath, isTestPath, type ClassifyOptions } from '../classify/index.js';
 import { dataDirInRepo, type CodeInsightConfig } from '../config/index.js';
-import { extractPythonFiles, getPythonParser, restoreExtractedFile, sha1, type ExtractedFile, type ExtractResult, type SourceFile } from '../extract/index.js';
+import { getPythonParser, restoreExtractedFile, type ExtractedFile, type ExtractResult } from '../extract/index.js';
 import { exportArchive, listCommitFiles, listWorkingFiles, repoRoot, resolveRef, workingContentKey } from '../git/index.js';
 import { log } from '../log.js';
-import { detectLanguage, supportLevelOf } from '../model/language.js';
-import type { FileRow, SnapshotKind, SnapshotRow, SymbolRow } from '../model/types.js';
+import type { SnapshotKind, SnapshotRow, SymbolRow } from '../model/types.js';
 import { ScipPythonResolver } from '../resolve/scip-python.js';
 import type { Resolver } from '../resolve/types.js';
-import { acquireSnapshotLock, cleanupSnapshots, snapshotDir, type DataDirLayout } from '../store/data-dir.js';
+import { acquireSnapshotLock, cleanupSnapshots, snapshotDir, type DataDirLayout, type LockHandle } from '../store/data-dir.js';
 import type { Store } from '../store/db.js';
+import {
+  edgesCodeHash, extractWithCache, findPreviousSnapshot, readAndPlace, reuseEdges, sameResolverInput, SnapshotCancelledError, throwIfCancelled,
+  type PreviousSnapshot, type ReadResult,
+} from './incremental.js';
 
-/** 工作区快照除源码外还要复制的项目配置，scip-python 会读取它们 */
-const PROJECT_CONFIG_FILES = new Set(['pyproject.toml', 'setup.cfg', 'pyrightconfig.json']);
+export { SnapshotCancelledError, type BuildStage } from './incremental.js';
 
 export interface BuildSnapshotOptions {
   repo: string;
@@ -25,6 +26,8 @@ export interface BuildSnapshotOptions {
   ref?: string;
   /** 默认 ScipPythonResolver */
   resolver?: Resolver;
+  /** 中止后在下一个检查点以 SnapshotCancelledError 结束，正在运行的 scip-python 会被结束 */
+  signal?: AbortSignal;
 }
 
 export interface BuildSnapshotResult {
@@ -40,14 +43,6 @@ interface Target {
   kind: SnapshotKind;
   commitSha: string;
   contentKey: string;
-}
-
-interface Prepared {
-  /** 文件清单 */
-  files: string[];
-  /** 快照源码目录，scip-python 在这里运行 */
-  dir: string;
-  read(rel: string): Promise<Buffer>;
 }
 
 async function resolveTarget(opts: BuildSnapshotOptions): Promise<Target> {
@@ -75,58 +70,32 @@ function reusable(store: Store, contentKey: string): SnapshotRow | undefined {
   return store.getSnapshot(snap.id);
 }
 
-async function prepareCommit(t: Target, layout: DataDirLayout): Promise<Prepared> {
+/**
+ * 准备快照目录并读一遍文件。提交快照从 git 对象导出；工作区快照只放清单里支持语言的文件和项目配置
+ * （清单外的目录如 venv 不会被 scip-python 扫描），没变的文件硬链接到上一个快照目录。
+ */
+async function prepareFiles(opts: BuildSnapshotOptions, t: Target, prev: PreviousSnapshot | undefined): Promise<{ dir: string; read: ReadResult }> {
+  const { config, layout, signal } = opts;
+  const started = Date.now();
   const dir = snapshotDir(layout, t.contentKey);
-  await exportArchive(t.root, t.commitSha, dir);
-  return { files: await listCommitFiles(t.root, t.commitSha), dir, read: (rel) => readFile(path.join(dir, rel)) };
-}
-
-/** 符号链接按链接本身复制，不把链接目标（可能在仓库外）的内容复制进快照 */
-async function copyEntry(src: string, dest: string): Promise<void> {
-  if ((await lstat(src)).isSymbolicLink()) await symlink(await readlink(src), dest);
-  else await copyFile(src, dest);
-}
-
-/** 工作区：只把清单里支持语言的文件和项目配置复制到快照目录，清单外的目录（如 venv）不会被 scip-python 扫描 */
-async function prepareWorking(t: Target, layout: DataDirLayout, config: CodeInsightConfig): Promise<Prepared> {
-  const dir = snapshotDir(layout, t.contentKey);
-  const files = await listWorkingFiles(t.root, excludeDirs(config, t.root));
-  await rm(dir, { recursive: true, force: true });
-  for (const rel of files) {
-    if (supportLevelOf(detectLanguage(rel)) === 'none' && !PROJECT_CONFIG_FILES.has(path.posix.basename(rel))) continue;
-    const dest = path.join(dir, rel);
-    await mkdir(path.dirname(dest), { recursive: true });
-    await copyEntry(path.join(t.root, rel), dest).catch((err: Error) => log.warn('snapshot_copy_failed', { path: rel, error: err.message }));
+  const classify = { testGlobs: config.testGlobs, generatedGlobs: config.generatedGlobs };
+  let read: ReadResult;
+  if (t.kind === 'commit') {
+    await exportArchive(t.root, t.commitSha, dir);
+    read = await readAndPlace({ files: await listCommitFiles(t.root, t.commitSha), srcRoot: dir, classify, signal });
+  } else {
+    const files = await listWorkingFiles(t.root, excludeDirs(config, t.root));
+    await rm(dir, { recursive: true, force: true });
+    read = await readAndPlace({ files, srcRoot: t.root, destDir: dir, prev, classify, signal });
   }
-  log.info('snapshot_copied', { contentKey: t.contentKey, files: files.length });
-  return { files, dir, read: (rel) => readFile(path.join(t.root, rel)) };
+  log.info('snapshot_copied', {
+    contentKey: t.contentKey, files: read.rows.length, linked: read.linked, written: read.written,
+    fromSnapshot: prev?.snap.contentKey, ms: Date.now() - started,
+  });
+  return { dir, read };
 }
 
-interface ReadFiles {
-  rows: Omit<FileRow, 'snapshotId'>[];
-  sources: SourceFile[];
-}
-
-/** 读取清单里的文件：每个文件生成 files 行，支持的语言再交给提取层 */
-async function readFiles(prepared: Prepared, classify: ClassifyOptions): Promise<ReadFiles> {
-  const out: ReadFiles = { rows: [], sources: [] };
-  for (const rel of prepared.files) {
-    const data = await prepared.read(rel).catch((err: Error) => {
-      log.warn('snapshot_read_failed', { path: rel, error: err.message });
-      return undefined;
-    });
-    if (!data) continue;
-    const language = detectLanguage(rel);
-    const supportLevel = supportLevelOf(language);
-    const isTest = isTestPath(rel, classify);
-    const isGenerated = isGeneratedPath(rel, classify);
-    out.rows.push({ path: rel, language, supportLevel, contentHash: sha1(data), isTest, isGenerated });
-    if (language === 'python') out.sources.push({ path: rel, source: data.toString('utf8'), isTest, isGenerated });
-  }
-  return out;
-}
-
-function saveExtraction(store: Store, snapshotId: number, read: ReadFiles, extracted: ExtractResult): void {
+function saveExtraction(store: Store, snapshotId: number, read: ReadResult, extracted: ExtractResult): void {
   store.transaction(() => {
     store.insertFiles(read.rows.map((r) => ({ ...r, snapshotId })));
     store.insertSymbols(extracted.files.flatMap((f) => f.symbols.map(({ nameLine: _l, nameCol: _c, ...s }) => ({ ...s, snapshotId }))));
@@ -135,29 +104,45 @@ function saveExtraction(store: Store, snapshotId: number, read: ReadFiles, extra
   });
 }
 
+/** 中止时写进 resolver_error 的值 */
+const CANCELLED = 'cancelled';
+
+/** 提取已入库、解析前或解析中被中止：标记 resolver_status=failed（下次只重跑解析）后抛出 */
+function cancelResolve(store: Store, snap: SnapshotRow, stage: 'save' | 'resolve'): never {
+  store.setSnapshotStatus(snap.id, { resolverStatus: 'failed', resolverError: CANCELLED });
+  throw new SnapshotCancelledError(stage);
+}
+
+function resolverOf(opts: BuildSnapshotOptions): Resolver {
+  return opts.resolver ?? new ScipPythonResolver();
+}
+
 /** 解析失败只标记 resolver_status=failed，提取结果保留 */
 async function runResolver(
   opts: BuildSnapshotOptions, snap: SnapshotRow, dir: string, files: ExtractedFile[],
 ): Promise<void> {
-  const { store, layout, config } = opts;
+  const { store, layout, config, signal } = opts;
+  if (signal?.aborted) cancelResolve(store, snap, 'resolve');
   if (files.length === 0) {
     store.setSnapshotStatus(snap.id, { resolverStatus: 'skipped', resolverError: 'no supported source files' });
     return;
   }
-  const resolver = opts.resolver ?? new ScipPythonResolver();
+  const resolver = resolverOf(opts);
   const started = Date.now();
   try {
     const result = await resolver.resolve({
-      snapshotId: snap.id, contentKey: snap.contentKey, root: dir, layout, files, timeoutMs: config.scipTimeoutMs,
+      snapshotId: snap.id, contentKey: snap.contentKey, root: dir, layout, files, timeoutMs: config.scipTimeoutMs, signal,
     });
     store.transaction(() => {
       store.clearSnapshotData(snap.id, 'edges');
       store.insertEdges(result.edges);
       store.setSnapshotStatus(snap.id, { resolverStatus: 'ok', resolverError: result.note ?? null });
+      store.setEdgesCodeHash(snap.id, edgesCodeHash(resolver));
     });
     log.info('resolve_done', { resolver: resolver.name, edges: result.edges.length, ms: Date.now() - started });
     if (result.note) log.warn('resolve_note', { contentKey: snap.contentKey, note: result.note });
   } catch (err) {
+    if (signal?.aborted) cancelResolve(store, snap, 'resolve');
     const reason = (err as Error).message;
     store.setSnapshotStatus(snap.id, { resolverStatus: 'failed', resolverError: reason });
     log.warn('resolve_failed', { resolver: resolver.name, contentKey: snap.contentKey, error: reason });
@@ -176,19 +161,35 @@ function startSnapshot(store: Store, t: Target): SnapshotRow {
   return store.getSnapshot(existing.id)!;
 }
 
+/** 放进快照目录的文件和上一个快照完全相同时复用它的调用边，不跑 scip-python */
+async function tryReuseEdges(opts: BuildSnapshotOptions, prev: PreviousSnapshot | undefined, snap: SnapshotRow, read: ReadResult): Promise<boolean> {
+  const { store } = opts;
+  const codeHash = edgesCodeHash(resolverOf(opts));
+  if (!prev || store.getEdgesCodeHash(prev.snap.id) !== codeHash || !(await sameResolverInput(prev, read))) return false;
+  const edges = reuseEdges(store, prev.snap, snap, codeHash);
+  if (edges === undefined) return false;
+  log.info('resolve_reused', { contentKey: snap.contentKey, fromSnapshot: prev.snap.contentKey, edges });
+  return true;
+}
+
 async function buildLocked(opts: BuildSnapshotOptions, t: Target): Promise<BuildSnapshotResult> {
-  const { store, layout, config } = opts;
+  const { store, layout, signal } = opts;
   const started = Date.now();
   log.info('snapshot_build_start', { kind: t.kind, contentKey: t.contentKey });
   const snap = startSnapshot(store, t);
-  const prepared = t.kind === 'commit' ? await prepareCommit(t, layout) : await prepareWorking(t, layout, config);
-  const read = await readFiles(prepared, { testGlobs: config.testGlobs, generatedGlobs: config.generatedGlobs });
-  const extracted = await extractPythonFiles(read.sources);
+  const prev = findPreviousSnapshot(store, layout, t.kind, snap.id);
+  const { dir, read } = await prepareFiles(opts, t, prev);
+  const parseStarted = Date.now();
+  const extracted = await extractWithCache(store, read.sources, signal);
   saveExtraction(store, snap.id, read, extracted);
   const extractMs = Date.now() - started;
   const symbols = extracted.files.reduce((n, f) => n + f.symbols.length, 0);
-  log.info('extract_done', { files: read.rows.length, python: extracted.files.length, symbols, entries: extracted.entries.length, models: extracted.models, ms: extractMs });
-  await runResolver(opts, snap, prepared.dir, extracted.files);
+  log.info('extract_done', {
+    files: read.rows.length, python: extracted.files.length, symbols, entries: extracted.entries.length, models: extracted.models,
+    cacheHits: extracted.cacheHits, cacheMisses: extracted.cacheMisses, parseMs: Date.now() - parseStarted, ms: extractMs,
+  });
+  if (signal?.aborted) cancelResolve(store, snap, 'save');
+  if (!(await tryReuseEdges(opts, prev, snap, read))) await runResolver(opts, snap, dir, extracted.files);
   log.info('snapshot_build_done', { contentKey: t.contentKey, extractMs, totalMs: Date.now() - started });
   return { snapshot: store.getSnapshot(snap.id)!, cached: false, resolveRetried: false };
 }
@@ -217,13 +218,18 @@ async function retryResolve(opts: BuildSnapshotOptions, snap: SnapshotRow, dir: 
   return { snapshot: opts.store.getSnapshot(snap.id)!, cached: false, resolveRetried: true };
 }
 
+/** 解析真正失败过（不是被中止）的快照：等锁后直接复用，不立刻重试 */
+function resolveFailedNotCancelled(snap: SnapshotRow | undefined): boolean {
+  return snap?.extractStatus === 'ok' && snap.resolverStatus === 'failed' && snap.resolverError !== CANCELLED;
+}
+
 /**
  * 持锁后重新检查（其他进程可能刚构建完并释放锁）：整体复用、只重试解析，或完整构建。
- * 等待过其他进程时，它的结果即使是解析失败也直接复用，重试留给之后独立的一次构建。
+ * 等待过其他进程时，它的结果即使是解析失败也直接复用，重试留给之后独立的一次构建；它被中止留下的快照照常重试解析。
  */
 async function buildOrReuse(opts: BuildSnapshotOptions, t: Target, waited: boolean): Promise<BuildSnapshotResult> {
   const snap = opts.store.getSnapshotByKey(t.contentKey);
-  const after = reusable(opts.store, t.contentKey) ?? (waited && snap?.extractStatus === 'ok' && snap.resolverStatus === 'failed' ? snap : undefined);
+  const after = reusable(opts.store, t.contentKey) ?? (waited && resolveFailedNotCancelled(snap) ? snap : undefined);
   if (after) {
     opts.store.touchSnapshot(after.id);
     log.info('snapshot_cache_hit', { kind: t.kind, contentKey: t.contentKey, snapshotId: after.id, waited, resolverStatus: after.resolverStatus });
@@ -236,9 +242,20 @@ async function buildOrReuse(opts: BuildSnapshotOptions, t: Target, waited: boole
   return buildLocked(opts, t);
 }
 
+/** 获取快照锁；等锁期间被中止时以 SnapshotCancelledError 结束 */
+async function lockSnapshot(opts: BuildSnapshotOptions, contentKey: string): Promise<LockHandle> {
+  try {
+    return await acquireSnapshotLock(opts.layout, contentKey, { signal: opts.signal });
+  } catch (err) {
+    throwIfCancelled(opts.signal, 'lock');
+    throw err;
+  }
+}
+
 /**
  * 快照构建流水线：准备源码 → 提取 → scip-python → 转换入库。按 content_key 复用已有结果，
- * 上次解析失败的快照只重跑解析；
+ * 上次解析失败的快照只重跑解析；内容键变了时按文件复用上一个快照的文件和提取结果，
+ * 放进快照目录的文件都没变时复用调用边。
  * 构建前获取快照锁，其他进程正在构建同一个快照时等它完成后直接复用。
  */
 export async function buildSnapshot(opts: BuildSnapshotOptions): Promise<BuildSnapshotResult> {
@@ -248,12 +265,17 @@ export async function buildSnapshot(opts: BuildSnapshotOptions): Promise<BuildSn
     log.info('snapshot_cache_hit', { kind: t.kind, contentKey: t.contentKey, snapshotId: hit.id });
     return { snapshot: hit, cached: true, resolveRetried: false };
   }
-  const lock = await acquireSnapshotLock(opts.layout, t.contentKey);
   let result: BuildSnapshotResult;
   try {
-    result = await buildOrReuse(opts, t, lock.waited);
-  } finally {
-    await lock.release();
+    const lock = await lockSnapshot(opts, t.contentKey);
+    try {
+      result = await buildOrReuse(opts, t, lock.waited);
+    } finally {
+      await lock.release();
+    }
+  } catch (err) {
+    if (err instanceof SnapshotCancelledError) log.info('snapshot_build_cancelled', { contentKey: t.contentKey, stage: err.stage });
+    throw err;
   }
   await cleanupSnapshots(opts.store, opts.layout).catch((err: Error) => log.warn('snapshot_cleanup_failed', { error: err.message }));
   return result;

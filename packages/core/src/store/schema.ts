@@ -94,7 +94,7 @@ CREATE TABLE reviews (
  * 已有的快照和审查记录保留，旧版本打开带这些表的库时版本号一致，也不会删库。
  * 以后要加列时同样先检查列是否存在再 `ALTER TABLE ADD COLUMN`。
  */
-export const EXTRA_TABLES = ['overviews', 'chat_sessions', 'chat_messages'] as const;
+export const EXTRA_TABLES = ['overviews', 'chat_sessions', 'chat_messages', 'extract_cache', 'snapshot_edges_code'] as const;
 
 export const EXTRA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS overviews (
@@ -132,4 +132,19 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_messages_session ON chat_messages(session_id, id);
+
+-- 单个 Python 文件跨文件识别之前的提取结果（JSON），key 见 extract/cache.ts:extractCacheKey
+CREATE TABLE IF NOT EXISTS extract_cache (
+  key TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  data TEXT NOT NULL,
+  last_used_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS extract_cache_used ON extract_cache(last_used_at);
+
+-- 快照调用边是用哪个版本的提取和解析代码生成的，复用调用边前要求相同
+CREATE TABLE IF NOT EXISTS snapshot_edges_code (
+  snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL
+);
 `;

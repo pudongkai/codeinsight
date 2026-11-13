@@ -13,11 +13,14 @@ export function tempDir(prefix: string): string {
   return mkdtempSync(path.join(tmpdir(), prefix));
 }
 
-/** 子进程环境：去掉 LLM 相关变量，测试不会调用真实 LLM，也不读本机 API key */
+/**
+ * 子进程环境：去掉 LLM 相关变量，测试不会调用真实 LLM，也不读本机 API key；
+ * 每次调用建一个新的临时 CODEINSIGHT_HOME，不读写本机用户设置，各个 serve 的设置和最近列表互不影响
+ */
 export function cleanEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^(CODEINSIGHT_|ANTHROPIC_|OPENAI_)/.test(k)) env[k] = v;
-  return { ...env, CODEINSIGHT_LOG: 'warn' };
+  return { ...env, CODEINSIGHT_LOG: 'warn', CODEINSIGHT_HOME: tempDir('ci-e2e-home-') };
 }
 
 const GIT_ENV = {
@@ -91,10 +94,10 @@ function readLines(proc: ChildProcess, count: number): Promise<string[]> {
 
 /**
  * 以 `codeinsight serve --open` 启动（打开浏览器的动作由 serve-open.mjs 替换），读 stdout 拿到地址。
- * 子进程环境为 cleanEnv() 加上 env（如假 LLM 的 fakeLlmEnv(url)）。
+ * 子进程环境为 cleanEnv() 加上 env（如假 LLM 的 fakeLlmEnv(url)，或指定 CODEINSIGHT_HOME）；cwd 为子进程的当前目录。
  */
-export async function startServe(repo: string, dataDir: string, env: Record<string, string> = {}): Promise<Serve> {
-  const proc = spawn(process.execPath, [SERVE_OPEN, '--repo', repo, '--data-dir', dataDir], { env: { ...cleanEnv(), ...env }, stdio: ['ignore', 'pipe', 'inherit'] });
+async function spawnServe(args: string[], env: Record<string, string>, cwd?: string): Promise<Serve> {
+  const proc = spawn(process.execPath, [SERVE_OPEN, ...args], { cwd, env: { ...cleanEnv(), ...env }, stdio: ['ignore', 'pipe', 'inherit'] });
   const [first, second] = await readLines(proc, 2);
   const info = JSON.parse(first!) as { url: string; port: number };
   const { opened } = JSON.parse(second!) as { opened: string };
@@ -105,6 +108,15 @@ export async function startServe(repo: string, dataDir: string, env: Record<stri
     await exited;
   };
   return { url: info.url, port: info.port, opened, proc, stop };
+}
+
+export function startServe(repo: string, dataDir: string, env: Record<string, string> = {}): Promise<Serve> {
+  return spawnServe(['--repo', repo, '--data-dir', dataDir], env);
+}
+
+/** 不带 --repo，在 cwd 下启动；cwd 不在 git 仓库里时 serve 以“无仓库”启动 */
+export function startServeIn(cwd: string, env: Record<string, string> = {}): Promise<Serve> {
+  return spawnServe([], env, cwd);
 }
 
 /** 运行 cli 命令（同步），返回 stdout */

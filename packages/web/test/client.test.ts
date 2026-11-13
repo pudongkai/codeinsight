@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
-import { ApiError, api } from '../src/api/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, api, onRepoChanged, resetRepoGen } from '../src/api/client';
+import { makeStatus } from './fixtures';
+
+afterEach(() => resetRepoGen());
 
 function mockFetch(status: number, body: unknown) {
   return vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
@@ -36,5 +39,33 @@ describe('api client', () => {
     const f = mockFetch(200, {});
     await api.source(4, 'a b/c.py', 1, 9);
     expect(f.mock.calls[0]![0]).toBe('/api/source?snapshot=4&path=a+b%2Fc.py&start=1&end=9');
+  });
+
+  it('after reading the status, every request carries the repo generation header', async () => {
+    const f = mockFetch(200, {});
+    await api.entries();
+    expect(JSON.stringify(f.mock.calls[0]![1]?.headers ?? {})).not.toContain('X-CodeInsight-Repo');
+    f.mockResolvedValueOnce(new Response(JSON.stringify(makeStatus({ repoGen: 3 })), { status: 200 }));
+    await api.status();
+    await api.createReview({ working: true });
+    expect(f.mock.calls[2]![1]?.headers).toMatchObject({ 'X-CodeInsight-Repo': '3', 'Content-Type': 'application/json' });
+    f.mockResolvedValueOnce(new Response(JSON.stringify(makeStatus({ repo: null, repoGen: null })), { status: 200 }));
+    await api.status();
+    await api.entries();
+    expect(f.mock.calls[4]![1]?.headers).toMatchObject({ 'X-CodeInsight-Repo': 'null' });
+  });
+
+  it('409 repo_changed notifies the listeners; other errors do not', async () => {
+    const listener = vi.fn();
+    const off = onRepoChanged(listener);
+    mockFetch(409, { error: 'repo_busy', tasks: [] });
+    await api.openRepo('/x').catch(() => undefined);
+    expect(listener).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+    mockFetch(409, { error: 'repo_changed', repoGen: 4 });
+    const err = (await api.entries().catch((e: unknown) => e)) as ApiError;
+    expect(err.repoChanged).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(1);
+    off();
   });
 });

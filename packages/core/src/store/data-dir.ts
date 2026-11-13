@@ -10,6 +10,8 @@ import { isProcessAlive } from './process.js';
 export const LOCK_STALE_MS = 30 * 60 * 1000;
 export const KEEP_SNAPSHOTS = 8;
 export const RECENT_USE_MS = 10 * 60 * 1000;
+/** 提取缓存比保留下来的快照里最早用到的那个再多保留这么久 */
+export const EXTRACT_CACHE_GRACE_MS = 24 * 60 * 60 * 1000;
 
 export interface DataDirLayout {
   root: string;
@@ -298,6 +300,8 @@ export interface LockHandle {
 export interface AcquireOptions {
   pollMs?: number;
   timeoutMs?: number;
+  /** 等锁期间中止时抛出 signal.reason */
+  signal?: AbortSignal;
 }
 
 /** 获取快照构建锁；已被其他存活进程持有时等待，持有者已退出或超过 30 分钟时认为锁失效并回收 */
@@ -312,6 +316,7 @@ export async function acquireSnapshotLock(
   let waited = false;
   await mkdir(layout.locksDir, { recursive: true });
   for (;;) {
+    opts.signal?.throwIfAborted();
     const me = newLockInfo();
     if (await createExclusive(file, me)) {
       log.debug('snapshot_lock_acquired', { contentKey, waited });
@@ -326,7 +331,7 @@ export async function acquireSnapshotLock(
     if (Date.now() > deadline) throw new Error(`timed out waiting for snapshot lock ${contentKey}`);
     if (!waited) log.info('snapshot_lock_waiting', { contentKey, holderPid: seen.info?.pid });
     waited = true;
-    await sleep(pollMs);
+    await sleep(pollMs, undefined, { signal: opts.signal });
   }
 }
 
@@ -353,6 +358,16 @@ export async function cleanupSnapshots(store: Store, layout: DataDirLayout, opts
     removed.push(snap.id);
   }
   if (removed.length > 0) log.info('snapshots_cleaned', { removed: removed.length });
+  pruneExtractCache(store);
   await removeStaleScipTemps(layout);
   return removed;
+}
+
+/** 删除比保留下来的快照里最早的 last_used_at 还早一天以上的提取缓存 */
+function pruneExtractCache(store: Store): void {
+  const kept = store.listSnapshots();
+  if (kept.length === 0) return;
+  const oldest = Math.min(...kept.map((s) => s.lastUsedAt));
+  const pruned = store.extractCache.pruneBefore(oldest - EXTRACT_CACHE_GRACE_MS);
+  if (pruned > 0) log.info('extract_cache_pruned', { rows: pruned });
 }

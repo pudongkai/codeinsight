@@ -1,4 +1,5 @@
 import { log } from '@codeinsight/core';
+import { ClosedFlag } from './closed.js';
 
 /** 整个 serve 同时回答的问题数上限 */
 export const MAX_ACTIVE_QUESTIONS = 2;
@@ -16,12 +17,15 @@ interface ActiveAsk {
  */
 export class AskRuns {
   private readonly active = new Map<number, ActiveAsk>();
+  /** 上下文被替换后不再开始新回答 */
+  readonly closed = new ClosedFlag();
 
   /**
    * 检查并登记后同步调用 run（调用前没有 await，同一时刻的两个请求不会都通过检查）；
-   * 不能开始时返回拒绝原因，不调用 run。
+   * 不能开始时返回拒绝原因，不调用 run；已关闭时抛 RepoClosedError。
    */
   start(sessionId: number, run: (signal: AbortSignal) => Promise<unknown>): { ok: true; done: Promise<void> } | { ok: false; code: AskRejection } {
+    this.closed.check('ask');
     const code = this.rejection(sessionId);
     if (code) {
       log.warn('ask_rejected', { sessionId, code, active: this.active.size });
@@ -50,11 +54,16 @@ export class AskRuns {
     return true;
   }
 
-  /** 中止全部回答并等它们结束（关闭服务前用，避免关库后再写库） */
-  async drain(): Promise<void> {
+  /** 正在回答的会话 id */
+  activeSessions(): number[] {
+    return [...this.active.keys()];
+  }
+
+  /** 中止全部回答并等它们结束（关闭服务、切换仓库前用，避免关库后再写库） */
+  async drain(reason = 'server_closing'): Promise<void> {
     const all = [...this.active.entries()];
-    if (all.length > 0) log.info('ask_cancel_all', { count: all.length });
-    for (const [, a] of all) a.controller.abort('server_closing');
+    if (all.length > 0) log.info('ask_cancel_all', { count: all.length, reason });
+    for (const [, a] of all) a.controller.abort(reason);
     await Promise.all(all.map(([, a]) => a.done));
   }
 

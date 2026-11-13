@@ -1,16 +1,17 @@
 import { log } from '@codeinsight/core';
 import type { SnapshotRow, Store, SymbolRow } from '@codeinsight/core';
-import type { AppContext, RequestContext } from './context.js';
+import type { RepoContext } from '../repo-context.js';
+import { repoOf, type RequestContext } from './context.js';
 import { HttpError, idParam } from './respond.js';
 
 /** 浏览期间按这个间隔更新快照的 last_used_at，正在看的快照不会被当成久未使用而清理 */
 const TOUCH_INTERVAL_MS = 60_000;
 
-function touch(app: AppContext, snap: SnapshotRow): void {
+function touch(repo: RepoContext, snap: SnapshotRow): void {
   const now = Date.now();
-  if (now - (app.touched.get(snap.id) ?? 0) < TOUCH_INTERVAL_MS) return;
-  app.touched.set(snap.id, now);
-  app.ws.store.touchSnapshot(snap.id, now);
+  if (now - (repo.touched.get(snap.id) ?? 0) < TOUCH_INTERVAL_MS) return;
+  repo.touched.set(snap.id, now);
+  repo.ws.store.touchSnapshot(snap.id, now);
 }
 
 function gone(ctx: RequestContext, snapshotId: number): HttpError {
@@ -23,24 +24,24 @@ export function requireSnapshot(ctx: RequestContext, raw: string | null | undefi
   if (raw === null || raw === undefined || raw === '') throw new HttpError(400, 'invalid_param', 'snapshot is required');
   const id = idParam(raw, 'snapshot');
   ctx.logFields.snapshot = id;
-  const snap = ctx.app.ws.store.getSnapshot(id);
+  const snap = repoOf(ctx).ws.store.getSnapshot(id);
   if (!snap || snap.extractStatus !== 'ok') throw gone(ctx, id);
-  touch(ctx.app, snap);
+  touch(repoOf(ctx), snap);
   return snap;
 }
 
 /** 当前工作区快照（最近一次建好的索引）；还没建好或已被清理正在重建时返回 503 `index_not_ready` */
 export function currentSnapshot(ctx: RequestContext): SnapshotRow {
-  const snap = ctx.app.indexJobs.current();
+  const snap = repoOf(ctx).indexJobs.current();
   if (!snap) throw new HttpError(503, 'index_not_ready', 'the working tree index is being built');
   ctx.logFields.snapshot = snap.id;
-  touch(ctx.app, snap);
+  touch(repoOf(ctx), snap);
   return snap;
 }
 
 export function requireSymbol(ctx: RequestContext, snap: SnapshotRow, id: string): SymbolRow {
   ctx.logFields.symbol = id;
-  const sym = ctx.app.ws.store.getSymbol(snap.id, id);
+  const sym = repoOf(ctx).ws.store.getSymbol(snap.id, id);
   if (!sym) throw new HttpError(404, 'symbol_not_found');
   return sym;
 }

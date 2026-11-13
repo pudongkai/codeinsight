@@ -3,6 +3,7 @@ import { rmSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Store } from '@codeinsight/core';
 import type { OverviewEstimate, OverviewReport } from '@codeinsight/core';
 import { startHttpServer, type RunningHttpServer, type ServerWorkspace } from '../src/index.js';
 import { fakeLlmEnv, overviewReply, startFakeLlm, type FakeLlm } from '../../core/test/helpers/fake-llm-server.mjs';
@@ -11,7 +12,7 @@ import { apiFor, indexReady, openWorkspace, shopRepo, tempDir, waitFor, writeFil
 const WORKER = path.resolve(import.meta.dirname, '..', '..', 'core', 'test', 'helpers', 'overview-worker.mjs');
 
 interface Job { id: number; status: string; progress: { step: string } | null; error?: string }
-interface CurrentOverview { id: number; overview: OverviewReport; stale: boolean; currentContentKey: string | null; newerStructureId?: number }
+interface CurrentOverview { id: number; overview: OverviewReport; stale: boolean; currentContentKey: string | null; snapshotDirty: boolean; newerStructureId?: number }
 interface Status { llm: { provider: string; model: string } | null; sendSource: boolean; overview: { id: number; createdAt: number; stale: boolean } | null }
 
 const prevLevel = process.env.CODEINSIGHT_LOG;
@@ -53,10 +54,8 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const e of extra) {
     await e.server.close();
-    e.ws.store.close();
   }
   await server?.close();
-  ws?.store.close();
   await fake?.close();
   if (prevLevel === undefined) delete process.env.CODEINSIGHT_LOG;
   else process.env.CODEINSIGHT_LOG = prevLevel;
@@ -125,6 +124,7 @@ describe('overview api', () => {
     const cur = (await api<CurrentOverview>('/api/overview')).body;
     expect(cur.id).toBe(first.body.id);
     expect(cur.stale).toBe(false);
+    expect(cur.snapshotDirty).toBe(false);
     expect(cur.currentContentKey).toBe(cur.overview.snapshot.contentKey);
     expect(cur.overview.system?.title).toBe('系统简介');
     expect(cur.overview.modules.every((m) => m.name.startsWith('模块-'))).toBe(true);
@@ -196,6 +196,11 @@ describe('overview api', () => {
     expect(after.stale).toBe(true);
     expect(after.currentContentKey).not.toBe(after.overview.snapshot.contentKey);
     expect((await api<Status>('/api/status')).body.overview?.stale).toBe(true);
+    expect(after.snapshotDirty).toBe(false);
+    // 在含未提交改动的代码上生成的概览：snapshotDirty 为 true
+    const structure = (await api<{ id: number }>('/api/overview', { method: 'POST', body: { noLlm: true } })).body;
+    await jobDone(structure.id);
+    expect((await api<CurrentOverview>(`/api/overview?id=${structure.id}`)).body.snapshotDirty).toBe(true);
   });
 
   it('marks running records left by an exited process as failed when the server starts', async () => {
@@ -223,10 +228,12 @@ describe('overview api', () => {
       expect(r.status).toBe(202);
       expect(w.store.overviews.get(r.body.id)?.status).toBe('running');
       await other.close();
-      expect(w.store.overviews.get(r.body.id)?.status).toBe('done');
+      // 关闭服务时它的 Store 也被关闭，重新打开读结果
+      const store = new Store(w.layout.dbPath);
+      expect(store.overviews.get(r.body.id)?.status).toBe('done');
+      store.close();
     } finally {
       replyDelayMs = 0;
-      w.store.close();
     }
   });
 });

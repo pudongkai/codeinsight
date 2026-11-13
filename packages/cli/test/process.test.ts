@@ -5,6 +5,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { tempHomeEnv } from './setup-home.js';
 
 const MAIN = path.resolve(import.meta.dirname, '..', 'dist', 'main.js');
 const SERVE_HELPER = path.join(import.meta.dirname, 'helpers', 'serve-fake-scip.mjs');
@@ -41,8 +42,8 @@ async function until(cond: () => boolean, timeoutMs = 30_000): Promise<void> {
   }
 }
 
-/** 子进程只拿到 PATH，不会读到本机的 LLM 配置和 API key */
-const baseEnv = () => ({ PATH: process.env.PATH ?? '', CODEINSIGHT_LOG: 'info' });
+/** 子进程只拿到 PATH 和临时用户目录，不会读到本机的 LLM 配置、API key 和用户设置 */
+const baseEnv = () => ({ PATH: process.env.PATH ?? '', CODEINSIGHT_LOG: 'info', ...tempHomeEnv() });
 
 describe('codeinsight serve process', () => {
   it('kills scip-python and removes its temp output on SIGTERM', async () => {

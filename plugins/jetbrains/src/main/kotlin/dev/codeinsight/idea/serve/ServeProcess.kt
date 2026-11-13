@@ -18,12 +18,15 @@ private val LOG = logger<ServeProcess>()
 
 /** 启动 serve 的命令行、环境和工作目录 */
 data class ServeCommand(val argv: List<String>, val env: Map<String, String>, val workDir: Path) {
+    fun withoutLockRepo(): ServeCommand = copy(argv = argv.filter { it != LOCK_REPO })
+
     companion object {
         /**
          * JS 入口用找到的 Node 直接运行，不依赖 PATH 里的 node，也不经过 cmd.exe（cmd 会解释路径里的 `&`、`%VAR%`）；
          * 其他可执行文件（版本管理器的 shim、.exe）直接执行。PATH 前面加上 Node 所在目录，serve 再起的子进程也用这个 Node。
          * 工作目录用 [workDir]（用户主目录）而不是仓库：Windows 按名字找程序时会先找当前目录，仓库里的同名程序不能被执行。
          * `--exit-on-stdin-close` 让 serve 在插件进程消失（stdin 管道关闭）时自行退出。
+         * `--lock-repo` 锁定项目所在仓库：插件按项目目录打开文件、审查工作区，网页里不能切换到别的仓库。
          */
         fun build(
             node: Path,
@@ -38,10 +41,19 @@ data class ServeCommand(val argv: List<String>, val env: Map<String, String>, va
                 is ServeProgram.NodeScript -> listOf(node.toString(), program.script.toString())
                 is ServeProgram.Executable -> listOf(program.path.toString())
             }
-            val args = mutableListOf("serve", "--repo", repo.toString(), "--exit-on-stdin-close")
+            val args = mutableListOf("serve", "--repo", repo.toString(), LOCK_REPO, "--exit-on-stdin-close")
             if (!dataDir.isNullOrBlank()) args += listOf("--data-dir", dataDir.trim())
             return ServeCommand(launcher + args, childEnv(node, env, windows), workDir)
         }
+
+        const val LOCK_REPO = "--lock-repo"
+
+        /**
+         * serve 因为不认识 `--lock-repo` 而退出（旧版 CLI 的参数解析报 unknown option）。
+         * 旧版 CLI 本来就不能切换仓库，去掉这个参数重启没有影响。
+         */
+        fun rejectsLockRepo(stderrTail: List<String>): Boolean =
+            stderrTail.any { it.contains("unknown option", ignoreCase = true) && it.contains(LOCK_REPO) }
 
         private fun childEnv(node: Path, env: Map<String, String>, windows: Boolean): Map<String, String> {
             val pathKey = env.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
@@ -91,7 +103,16 @@ class ServeProcess private constructor(private val process: Process, val info: S
         private const val STOP_TIMEOUT_S = 6L
         private const val TAIL_LINES = 20
 
-        fun start(cmd: ServeCommand): ServeProcess {
+        /** 启动 serve；旧版 CLI 不认识 `--lock-repo` 而退出时，去掉这个参数再启动一次 */
+        fun start(cmd: ServeCommand): ServeProcess = try {
+            launch(cmd)
+        } catch (e: ServeLaunchException) {
+            if (ServeCommand.LOCK_REPO !in cmd.argv || !ServeCommand.rejectsLockRepo(e.stderrTail)) throw e
+            LOG.warn("serve does not support ${ServeCommand.LOCK_REPO} (older codeinsight CLI), restarting without it")
+            launch(cmd.withoutLockRepo())
+        }
+
+        private fun launch(cmd: ServeCommand): ServeProcess {
             val pb = ProcessBuilder(cmd.argv).directory(cmd.workDir.toFile())
             pb.environment().clear()
             pb.environment().putAll(cmd.env)

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Store } from '@codeinsight/core';
 import type { AskEvent, ChatMessageInfo, ChatSessionInfo } from '@codeinsight/core';
 import { startHttpServer, type RunningHttpServer, type ServerWorkspace } from '../src/index.js';
 import {
@@ -71,10 +72,8 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const e of extra) {
     await e.server.close();
-    e.ws.store.close();
   }
   await server?.close();
-  ws?.store.close();
   await fake?.close();
   if (prevLevel === undefined) delete process.env.CODEINSIGHT_LOG;
   else process.env.CODEINSIGHT_LOG = prevLevel;
@@ -176,16 +175,18 @@ describe('chat answers', () => {
   it('cancels answers in progress and waits for them to be saved when the server closes', async () => {
     const w = await openWorkspace(repo, dataDir, undefined, fakeLlmEnv(fake.url));
     const other = await startHttpServer({ workspace: w });
+    const a = apiFor(other);
+    await indexReady(a);
+    const id = await newSession(a);
+    const stream = await postStream(other, `/api/chat/sessions/${id}/messages`, { question: 'hang on close' });
+    await textArrived(stream);
+    await other.close();
+    // 关闭服务时它的 Store 也被关闭，重新打开读结果
+    const store = new Store(w.layout.dbPath);
     try {
-      const a = apiFor(other);
-      await indexReady(a);
-      const id = await newSession(a);
-      const stream = await postStream(other, `/api/chat/sessions/${id}/messages`, { question: 'hang on close' });
-      await textArrived(stream);
-      await other.close();
-      expect(w.store.chats.messages(id).at(-1)).toMatchObject({ role: 'assistant', content: 'partial answer', meta: { status: 'cancelled' } });
+      expect(store.chats.messages(id).at(-1)).toMatchObject({ role: 'assistant', content: 'partial answer', meta: { status: 'cancelled' } });
     } finally {
-      w.store.close();
+      store.close();
     }
   });
 });

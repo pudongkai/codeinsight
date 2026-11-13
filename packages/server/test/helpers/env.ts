@@ -74,9 +74,9 @@ export function shopRepo(): string {
   return repo;
 }
 
-/** 测试用的 workspace：不读本机环境变量（不会拿到 LLM 配置和 API key），只用 env 里显式给出的（如假 LLM 的地址） */
+/** 测试用的 workspace：不读本机环境变量和用户设置（不会拿到 LLM 配置和 API key），只用 env 里显式给出的（如假 LLM 的地址） */
 export async function openWorkspace(repo: string, dataDir: string, resolver?: Resolver, env: Record<string, string> = {}): Promise<ServerWorkspace> {
-  const config = await loadConfig(repo, { dataDir, env });
+  const config = await loadConfig(repo, { dataDir, env, userSettings: null });
   const layout = await initDataDir(config.dataDir);
   return { repo, config, layout, store: new Store(layout.dbPath), resolver };
 }

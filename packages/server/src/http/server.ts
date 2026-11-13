@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { log } from '@codeinsight/core';
-import { AskRuns } from '../jobs/ask-runs.js';
-import { IndexJobs } from '../jobs/index-jobs.js';
-import { OverviewJobs } from '../jobs/overview-jobs.js';
-import { ReviewJobs } from '../jobs/review-jobs.js';
-import type { ServerWorkspace } from '../workspace.js';
+import path from 'node:path';
+import { log, realPathOr } from '@codeinsight/core';
+import type { Resolver } from '@codeinsight/core';
+import { CHANGE_CHECK_INTERVAL_MS } from '../changes.js';
+import { detectPickerTool, execPicker, PICKER_TIMEOUT_MS, type PickerTool, type RunPicker } from '../dir-picker.js';
+import { closeRepoContext, createRepoContext, rememberRepo, type RepoContext } from '../repo-context.js';
+import { RepoClosedError } from '../jobs/closed.js';
+import { closeWorkspaceStore, openServerWorkspace, type ServerWorkspace } from '../workspace.js';
 import { authenticate, hostAllowed, newToken, sessionCookie, tokenMatches } from './auth.js';
 import type { AppContext, RequestContext, Route } from './context.js';
 import { HttpError, sendError, sendJson } from './respond.js';
@@ -14,29 +16,48 @@ import { chatRoutes } from './routes/chat.js';
 import { entryRoutes } from './routes/entries.js';
 import { indexRoutes } from './routes/index-jobs.js';
 import { overviewRoutes } from './routes/overview.js';
+import { repoRoutes } from './routes/repos.js';
 import { reviewRoutes } from './routes/reviews.js';
 import { similarRoutes } from './routes/similar.js';
 import { sourceRoutes } from './routes/source.js';
+import { settingsRoutes } from './routes/settings.js';
 import { serveStatic } from './routes/static.js';
 import { statusRoutes } from './routes/status.js';
 import { symbolRoutes } from './routes/symbols.js';
 
-const ROUTES: Route[] = [...statusRoutes, ...reviewRoutes, ...indexRoutes, ...sourceRoutes, ...symbolRoutes, ...entryRoutes, ...similarRoutes, ...overviewRoutes, ...chatRoutes];
+const ROUTES: Route[] = [...statusRoutes, ...repoRoutes, ...settingsRoutes, ...reviewRoutes, ...indexRoutes, ...sourceRoutes, ...symbolRoutes, ...entryRoutes, ...similarRoutes, ...overviewRoutes, ...chatRoutes];
 
 /** 只监听本机回环地址 */
 export const LISTEN_HOST = '127.0.0.1';
 
 export interface HttpServerOptions {
-  workspace: ServerWorkspace;
+  /** 启动时打开的仓库；不传时以无仓库启动，等网页选择仓库 */
+  workspace?: ServerWorkspace;
+  /** 锁定启动时的仓库，不能切换到别的仓库；必须同时传 workspace */
+  lockRepo?: boolean;
+  /** 切换仓库时打开工作区；默认 openServerWorkspace */
+  openWorkspace?: (repo: string, dataDir?: string) => Promise<ServerWorkspace>;
+  /** 默认 openWorkspace 打开的工作区使用的解析器（测试注入）；不传时沿用 workspace 的 */
+  resolver?: Resolver;
   /** 0 为随机端口 */
   port?: number;
   /** Web UI 构建产物目录 */
   staticDir?: string;
-  /** 启动时对当前工作区建索引（已有可复用快照时直接复用），默认 true */
+  /** 打开仓库时（启动和切换）对工作区建索引（已有可复用快照时直接复用），默认 true */
   indexOnStart?: boolean;
   /** 定时更新当前快照 last_used_at 的间隔，默认 5 分钟（小于清理规则的 10 分钟） */
   keepAliveMs?: number;
+  /** 读 LLM 配置用的环境变量，默认 process.env */
+  env?: NodeJS.ProcessEnv;
+  /** 选择文件夹窗口：测试注入可用的命令（null 为不可用）、执行函数和超时，不真弹窗 */
+  dirPicker?: { tool?: PickerTool | null; runPicker?: RunPicker; timeoutMs?: number };
+  /** 代码变化检测的最小间隔，默认 10 秒 */
+  changeCheckIntervalMs?: number;
+  /** 测试连接的超时，默认 20 秒 */
+  llmTestTimeoutMs?: number;
 }
+
+const LLM_TEST_TIMEOUT_MS = 20_000;
 
 const DEFAULT_KEEP_ALIVE_MS = 5 * 60 * 1000;
 
@@ -45,10 +66,12 @@ export interface RunningHttpServer {
   token: string;
   /** 带 `?token=` 的首页地址 */
   url: string;
-  indexJobs: IndexJobs;
-  reviewJobs: ReviewJobs;
-  overviewJobs: OverviewJobs;
-  /** 停止监听；drain 为 true 时还等正在跑的审查、建索引、概览任务结束，并中止进行中的问答、等它们保存回答 */
+  /** 当前仓库上下文，没有仓库时为 undefined（测试用） */
+  app(): RepoContext | undefined;
+  /**
+   * 停止监听并关闭当前仓库的 Store；drain 为 true 时先等正在跑的审查、建索引、概览任务结束，
+   * 并中止进行中的问答、等它们保存回答
+   */
   close(opts?: { drain?: boolean }): Promise<void>;
 }
 
@@ -95,13 +118,45 @@ function gate(ctx: RequestContext, token: string, port: number): boolean {
   return true;
 }
 
+export const REPO_HEADER = 'x-codeinsight-repo';
+
+/** 请求带的仓库标识（gen）和当前仓库不同时 409 `repo_changed`；不带的照常处理 */
+function checkRepoHeader(ctx: RequestContext): void {
+  const raw = ctx.req.headers[REPO_HEADER];
+  if (raw === undefined) return;
+  const current = ctx.app.repo?.gen ?? null;
+  if (String(raw) === String(current)) return;
+  ctx.logFields.repoHeader = raw;
+  throw new HttpError(409, 'repo_changed', 'the repository has changed', { repoGen: current });
+}
+
+/**
+ * 进入路由时取一次当前仓库，整个请求只用它。需要仓库的路由请求期间计入它的 inflight，关闭旧 Store 前等请求结束；
+ * 不需要仓库的路由（选择目录、测试连接等可能很久）不计入，切换仓库不用等它们。
+ */
+async function runRoute(ctx: RequestContext, route: Route): Promise<void> {
+  const needsRepo = route.needsRepo !== false;
+  if (needsRepo) {
+    checkRepoHeader(ctx);
+    if (!ctx.app.repo) throw new HttpError(409, 'no_repo', 'no repository is open');
+  }
+  ctx.repo = ctx.app.repo;
+  const repo = needsRepo ? ctx.repo : undefined;
+  if (repo) repo.inflight++;
+  try {
+    await route.handler(ctx);
+  } finally {
+    if (repo) repo.inflight--;
+  }
+}
+
 async function dispatch(ctx: RequestContext): Promise<void> {
   const { pathname } = ctx.url;
   if (pathname !== '/api' && !pathname.startsWith('/api/')) return serveStatic(ctx);
   const match = matchRoute(ROUTES, ctx.req.method ?? 'GET', pathname);
   if (!match) throw new HttpError(404, 'not_found');
   ctx.params = match.params;
-  await match.route.handler(ctx);
+  await runRoute(ctx, match.route);
 }
 
 function handleError(ctx: RequestContext, err: unknown): void {
@@ -110,6 +165,10 @@ function handleError(ctx: RequestContext, err: unknown): void {
     return;
   }
   if (err instanceof HttpError) return sendError(ctx.res, err);
+  if (err instanceof RepoClosedError) {
+    ctx.logFields.repoClosed = err.task;
+    return sendError(ctx.res, new HttpError(409, 'repo_changed', 'the repository has changed', { repoGen: ctx.app.repo?.gen ?? null }));
+  }
   // 详情只写日志：错误信息里可能有本机绝对路径
   ctx.logFields.error = (err as Error).message;
   sendJson(ctx.res, 500, { error: 'internal_error' });
@@ -139,31 +198,72 @@ function listen(server: Server, port: number): Promise<number> {
   });
 }
 
+/** 选择文件夹窗口：锁定仓库时不可用；没有注入时检测本机命令 */
+async function pickerTool(opts: HttpServerOptions): Promise<PickerTool | undefined> {
+  if (opts.lockRepo) return undefined;
+  const injected = opts.dirPicker?.tool;
+  if (injected !== undefined) return injected ?? undefined;
+  return detectPickerTool();
+}
+
+async function newAppContext(opts: HttpServerOptions): Promise<AppContext> {
+  const ws = opts.workspace;
+  if (opts.lockRepo && !ws) throw new Error('lockRepo requires a workspace');
+  const resolver = opts.resolver ?? ws?.resolver;
+  const dp = opts.dirPicker;
+  return {
+    repo: undefined,
+    startup: ws ? { repo: await realPathOr(ws.repo), dataDir: path.resolve(ws.config.dataDir) } : {},
+    nextGen: 1, switching: false, shuttingDown: false, locked: opts.lockRepo === true, indexOnOpen: opts.indexOnStart !== false,
+    recoveredDataDirs: new Set(), closingRepos: new Set(), staticDir: opts.staticDir,
+    openWorkspace: opts.openWorkspace ?? ((repo, dataDir) => openServerWorkspace(repo, { dataDir, resolver })),
+    env: opts.env ?? process.env,
+    dirPicker: { tool: await pickerTool(opts), runPicker: dp?.runPicker ?? execPicker, timeoutMs: dp?.timeoutMs ?? PICKER_TIMEOUT_MS, busy: false },
+    changeCheckIntervalMs: opts.changeCheckIntervalMs ?? CHANGE_CHECK_INTERVAL_MS,
+    llmTest: { timeoutMs: opts.llmTestTimeoutMs ?? LLM_TEST_TIMEOUT_MS, running: false },
+  };
+}
+
+/** 关闭服务时：关闭当前上下文（drain 时先等任务结束）和切换后还在关闭的旧上下文 */
+async function closeRepos(app: AppContext, drain: boolean): Promise<void> {
+  const cur = app.repo;
+  app.repo = undefined;
+  await Promise.all([
+    cur ? closeRepoContext(cur, { drain, reason: 'server_closing' }) : undefined,
+    ...app.closingRepos,
+  ]);
+}
+
 /**
  * 启动本地 HTTP 服务：只监听 127.0.0.1，token 由加密安全随机数生成。
- * 启动时把遗留的 running 审查改为 failed，并在后台对当前工作区建索引。
+ * 传了 workspace 时作为当前仓库：把遗留的 running 任务改为 failed，并在后台对工作区建索引；不传时以无仓库启动。
  */
 export async function startHttpServer(opts: HttpServerOptions): Promise<RunningHttpServer> {
-  const ws = opts.workspace;
+  const app = await newAppContext(opts);
   const token = newToken();
-  const app: AppContext = {
-    ws, indexJobs: new IndexJobs(ws), reviewJobs: new ReviewJobs(ws), overviewJobs: new OverviewJobs(ws), askRuns: new AskRuns(),
-    staticDir: opts.staticDir, touched: new Map(),
-  };
   let port = 0;
   const server = createServer((req, res) => void handle(app, token, port, req, res));
-  port = await listen(server, opts.port ?? 0);
-  log.info('http_listening', { host: LISTEN_HOST, port, repo: ws.repo, staticDir: opts.staticDir });
-  if (opts.indexOnStart !== false) app.indexJobs.start('startup');
-  const keepAlive = setInterval(() => app.indexJobs.touchCurrent(), opts.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
+  try {
+    port = await listen(server, opts.port ?? 0);
+  } catch (err) {
+    // 端口被占用等：还没开始建索引，交给本服务的 Store 在这里关掉
+    if (opts.workspace) closeWorkspaceStore(opts.workspace);
+    throw err;
+  }
+  // 监听成功后才建仓库上下文（会开始建索引）；token 此时还没交出去，不会有请求先到
+  if (opts.workspace) app.repo = createRepoContext(app, opts.workspace, 'startup');
+  log.info('http_listening', { host: LISTEN_HOST, port, repo: app.repo?.ws.repo ?? null, locked: app.locked, dirPicker: app.dirPicker.tool ?? null, staticDir: opts.staticDir });
+  if (app.repo) await rememberRepo(app.repo.ws.repo);
+  const keepAlive = setInterval(() => app.repo?.indexJobs.touchCurrent(), opts.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
   keepAlive.unref();
   return {
-    port, token, url: `http://${LISTEN_HOST}:${port}/?token=${token}`, indexJobs: app.indexJobs, reviewJobs: app.reviewJobs, overviewJobs: app.overviewJobs,
+    port, token, url: `http://${LISTEN_HOST}:${port}/?token=${token}`, app: () => app.repo,
     close: async ({ drain = true } = {}) => {
       clearInterval(keepAlive);
+      app.shuttingDown = true;
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      if (drain) await Promise.all([app.reviewJobs.drain(), app.indexJobs.drain(), app.overviewJobs.drain(), app.askRuns.drain()]);
+      await closeRepos(app, drain);
       log.info('http_closed', { port });
     },
   };

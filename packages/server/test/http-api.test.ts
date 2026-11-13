@@ -54,7 +54,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await server?.close();
-  ws?.store.close();
   if (prevLevel === undefined) delete process.env.CODEINSIGHT_LOG;
   else process.env.CODEINSIGHT_LOG = prevLevel;
 });
@@ -295,7 +294,6 @@ describe('review jobs and snapshot lifecycle', () => {
 
   it('still returns the report after a restart', async () => {
     await server.close();
-    ws.store.close();
     ws = await openWorkspace(repo, dataDir);
     server = await startHttpServer({ workspace: ws, indexOnStart: false });
     const { status, body } = await api<{ status: string; report?: { schemaVersion: number } }>(`/api/reviews/${reviewId}`);

@@ -3,7 +3,7 @@ import { api } from '../api/client';
 import type { ChatSessionDetail, StatusResponse } from '../api/types';
 import { useNav } from '../app/nav';
 import { useCurrentLinks } from '../app/useCurrentLinks';
-import { LLM_SETUP_HELP } from '../overview/GenerateDialog';
+import { LlmSetupHint } from '../settings/LlmSetupHint';
 import { Composer } from './Composer';
 import { AnswerBlock, MessageList, Question } from './MessageList';
 import { noticeText } from './notice';
@@ -12,13 +12,13 @@ import { useAsk, type LiveAnswer } from './useAsk';
 import { useAskNotice } from './useAskNotice';
 import { useChatSessions } from './useChatSessions';
 
-/** 未配置 LLM 时的说明，或首次使用（provider、模型、源码开关变化后）的发送提示 */
+/** 未配置模型服务时的引导，或首次使用（provider、模型、源码开关变化后）的发送提示 */
 function AskGate({ notice }: { notice: ReturnType<typeof useAskNotice> }) {
   if (!notice.known) return null;
   if (!notice.scope) {
     return (
       <div className="notice" data-testid="chat-no-llm">
-        未配置 LLM，不能使用问答。<span className="muted" data-testid="llm-setup-help">{LLM_SETUP_HELP}</span>
+        <LlmSetupHint what="，不能使用问答" />
       </div>
     );
   }

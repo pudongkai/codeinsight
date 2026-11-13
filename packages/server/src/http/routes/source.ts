@@ -1,6 +1,6 @@
 import { readSnapshotFile, sliceLines, SnapshotFileError } from '@codeinsight/core';
 import type { SnapshotFileErrorCode, SnapshotRow } from '@codeinsight/core';
-import type { Route, RequestContext } from '../context.js';
+import { repoOf, type Route, type RequestContext } from '../context.js';
 import { pathErrorToHttp } from '../paths.js';
 import { HttpError, intParam, sendJson } from '../respond.js';
 import { requireSnapshot } from '../snapshot.js';
@@ -24,7 +24,7 @@ function toHttpError(err: unknown): unknown {
 }
 
 async function readFileText(ctx: RequestContext, snap: SnapshotRow, rel: string): Promise<string> {
-  const { repo, store, layout } = ctx.app.ws;
+  const { repo, store, layout } = repoOf(ctx).ws;
   try {
     return await readSnapshotFile({ repo, store, layout }, snap, rel);
   } catch (err) {

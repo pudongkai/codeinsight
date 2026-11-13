@@ -64,7 +64,7 @@ class ServeInfoTest {
         val env = mapOf("PATH" to "/usr/bin", "HOME" to "/Users/u")
         val cmd = ServeCommand.build(node, ServeProgram.NodeScript(ci), Path.of("/repo"), " /tmp/data ", env, home, windows = false)
         assertEquals(
-            listOf(node.toString(), ci.toString(), "serve", "--repo", "/repo", "--exit-on-stdin-close", "--data-dir", "/tmp/data"),
+            listOf(node.toString(), ci.toString(), "serve", "--repo", "/repo", "--lock-repo", "--exit-on-stdin-close", "--data-dir", "/tmp/data"),
             cmd.argv,
         )
         assertTrue(cmd.env["PATH"]!!.startsWith("/Users/u/.nvm/versions/node/v22.14.0/bin"))
@@ -74,7 +74,7 @@ class ServeInfoTest {
         assertFalse(cmd.env.containsKey("NoDefaultCurrentDirectoryInExePath"))
 
         val direct = ServeCommand.build(node, ServeProgram.Executable(Path.of("/shims/codeinsight")), Path.of("/repo"), "", emptyMap(), home, windows = false)
-        assertEquals(listOf("/shims/codeinsight", "serve", "--repo", "/repo", "--exit-on-stdin-close"), direct.argv)
+        assertEquals(listOf("/shims/codeinsight", "serve", "--repo", "/repo", "--lock-repo", "--exit-on-stdin-close"), direct.argv)
     }
 
     @Test

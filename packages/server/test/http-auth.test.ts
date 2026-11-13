@@ -13,11 +13,12 @@ const prevLevel = process.env.CODEINSIGHT_LOG;
 let ws: ServerWorkspace;
 let server: RunningHttpServer;
 let staticDir: string;
+let repoDir: string;
 
 beforeAll(async () => {
   process.env.CODEINSIGHT_LOG = 'info';
   restoreSink = setLogSink((line) => logLines.push(line));
-  const repo = tempDir('ci-auth-repo-');
+  const repo = (repoDir = tempDir('ci-auth-repo-'));
   git(repo, 'init', '-q', '-b', 'main');
   writeFiles(repo, { 'a.py': 'def a():\n    return 1\n' });
   git(repo, 'add', '-A');
@@ -33,7 +34,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await server?.close();
-  ws?.store.close();
   if (restoreSink) setLogSink(restoreSink);
   if (prevLevel === undefined) delete process.env.CODEINSIGHT_LOG;
   else process.env.CODEINSIGHT_LOG = prevLevel;
@@ -133,7 +133,9 @@ describe('http auth', () => {
 
 describe('static placeholder', () => {
   it('serves a placeholder page when the web UI has not been built', async () => {
-    const other = await startHttpServer({ workspace: ws, staticDir: path.join(staticDir, 'missing'), indexOnStart: false });
+    // 关闭服务时会关闭它的 Store，另开一个工作区
+    const own = await openWorkspace(repoDir, tempDir('ci-auth-data-'));
+    const other = await startHttpServer({ workspace: own, staticDir: path.join(staticDir, 'missing'), indexOnStart: false });
     try {
       const res = await request(other.port, '/', { headers: bearer(other.token) });
       expect(res.status).toBe(200);

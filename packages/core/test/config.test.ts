@@ -1,7 +1,8 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { dataDirInRepo, DEFAULT_LAYER_NAMES, loadConfig } from '../src/index.js';
+import { dataDirInRepo, DEFAULT_ANTHROPIC_MODEL, DEFAULT_LAYER_NAMES, llmSources, loadConfig, loadLlmSources, userSettingsPath } from '../src/index.js';
+import type { UserSettings } from '../src/index.js';
 import { tempDir } from './helpers/git-repo.js';
 
 describe('config', () => {
@@ -86,6 +87,7 @@ describe('config', () => {
     const noModel = await loadConfig(tempDir(), { env: { CODEINSIGHT_LLM_PROVIDER: 'openai-compatible' } });
     expect(noModel.llm).toBeUndefined();
     expect(noModel.llmProblem).toContain('model is missing');
+    expect(noModel.llmProblem).toContain('web settings page');
     expect(noModel.warnings).toBeUndefined();
   });
 
@@ -176,5 +178,97 @@ describe('config', () => {
       expect(cfg.overview.sendSource).toBe(false);
       expect(cfg.warnings).toEqual([expect.objectContaining({ code: 'config_value_invalid', message: expect.stringContaining('overview.sendSource') })]);
     }
+  });
+});
+
+describe('config merged with user settings', () => {
+  const user = (llm: UserSettings['llm']): UserSettings => ({ llm, recentRepos: [] });
+
+  function repoWith(llm: Record<string, unknown>): string {
+    const repo = tempDir();
+    writeFileSync(path.join(repo, 'codeinsight.config.json'), JSON.stringify({ llm }));
+    return repo;
+  }
+
+  it('takes provider from user settings > environment > repository config', async () => {
+    const repo = repoWith({ provider: 'openai-compatible', model: 'm' });
+    const env = { CODEINSIGHT_LLM_PROVIDER: 'anthropic' };
+    expect((await loadConfig(repo, { env: {}, userSettings: null })).llm?.provider).toBe('openai-compatible');
+    expect((await loadConfig(repo, { env, userSettings: null })).llm?.provider).toBe('anthropic');
+    expect((await loadConfig(repo, { env, userSettings: user({ provider: 'openai-compatible' }) })).llm?.provider).toBe('openai-compatible');
+  });
+
+  it('takes model from user settings > environment > repository config > anthropic default', async () => {
+    const repo = repoWith({ provider: 'anthropic', model: 'repo-m' });
+    const env = { CODEINSIGHT_LLM_MODEL: 'env-m' };
+    expect((await loadConfig(tempDir(), { env: { CODEINSIGHT_LLM_PROVIDER: 'anthropic' }, userSettings: null })).llm?.model).toBe(DEFAULT_ANTHROPIC_MODEL);
+    expect((await loadConfig(repo, { env: {}, userSettings: null })).llm?.model).toBe('repo-m');
+    expect((await loadConfig(repo, { env, userSettings: null })).llm?.model).toBe('env-m');
+    expect((await loadConfig(repo, { env, userSettings: user({ model: 'user-m' }) })).llm?.model).toBe('user-m');
+  });
+
+  it('takes baseUrl and apiKey from user settings > environment, still ignoring the repository config', async () => {
+    const repo = repoWith({ provider: 'openai-compatible', model: 'm', baseUrl: 'https://evil.example', apiKey: 'repo-key' });
+    const env = { CODEINSIGHT_LLM_BASE_URL: 'http://env.example/v1', CODEINSIGHT_LLM_API_KEY: 'env-key', OPENAI_API_KEY: 'openai-key' };
+    const fromEnv = await loadConfig(repo, { env, userSettings: null });
+    expect(fromEnv.llm).toEqual({ provider: 'openai-compatible', model: 'm', baseUrl: 'http://env.example/v1', apiKey: 'env-key' });
+    const fromUser = await loadConfig(repo, { env, userSettings: user({ baseUrl: 'http://user.example/v1', apiKey: 'user-key' }) });
+    expect(fromUser.llm).toEqual({ provider: 'openai-compatible', model: 'm', baseUrl: 'http://user.example/v1', apiKey: 'user-key' });
+    expect(fromUser.warnings).toEqual([expect.objectContaining({ code: 'config_llm_key_ignored' })]);
+    expect(JSON.stringify(fromUser)).not.toContain('evil.example');
+    expect(JSON.stringify(fromUser)).not.toContain('repo-key');
+  });
+
+  it('picks the provider-specific API key variable by the effective provider', async () => {
+    const env = { ANTHROPIC_API_KEY: 'a-key', OPENAI_API_KEY: 'o-key', CODEINSIGHT_LLM_PROVIDER: 'openai-compatible', CODEINSIGHT_LLM_MODEL: 'm' };
+    expect((await loadConfig(tempDir(), { env, userSettings: null })).llm?.apiKey).toBe('o-key');
+    expect((await loadConfig(tempDir(), { env, userSettings: user({ provider: 'anthropic' }) })).llm?.apiKey).toBe('a-key');
+  });
+
+  it('reports the source of each field and the environment variables shadowed by user settings', () => {
+    const env = { CODEINSIGHT_LLM_MODEL: 'env-m', OPENAI_API_KEY: 'o-key', CODEINSIGHT_LLM_BASE_URL: 'http://env.example/v1' };
+    const s = llmSources({ user: { provider: 'openai-compatible', model: 'user-m' }, repo: { provider: 'anthropic' }, env });
+    expect(s.provider).toEqual({ value: 'openai-compatible', source: 'user' });
+    expect(s.model).toEqual({ value: 'user-m', source: 'user' });
+    expect(s.baseUrl).toEqual({ value: 'http://env.example/v1', source: 'env', env: 'CODEINSIGHT_LLM_BASE_URL' });
+    expect(s.apiKey).toEqual({ value: 'o-key', source: 'env', env: 'OPENAI_API_KEY' });
+    expect(s.shadowed).toEqual([{ field: 'model', by: 'user', env: 'CODEINSIGHT_LLM_MODEL' }]);
+
+    const fromRepo = llmSources({ repo: { provider: 'anthropic', model: 'repo-m' }, env: {} });
+    expect(fromRepo.provider).toEqual({ value: 'anthropic', source: 'repo' });
+    expect(fromRepo.model).toEqual({ value: 'repo-m', source: 'repo' });
+    expect(fromRepo.baseUrl).toEqual({ source: 'default' });
+    expect(fromRepo.apiKey).toEqual({ source: 'none' });
+
+    const defaults = llmSources({ env: { CODEINSIGHT_LLM_PROVIDER: 'anthropic' } });
+    expect(defaults.model).toEqual({ value: DEFAULT_ANTHROPIC_MODEL, source: 'default' });
+    const none = llmSources({ env: {} });
+    expect(none.provider).toEqual({ source: 'none' });
+    expect(none.llm).toBeUndefined();
+    expect(none.problem).toBeUndefined();
+
+    const keyShadowed = llmSources({ user: { provider: 'anthropic', apiKey: 'u-key' }, env: { ANTHROPIC_API_KEY: 'a-key' } });
+    expect(keyShadowed.shadowed).toEqual([{ field: 'apiKey', by: 'user', env: 'ANTHROPIC_API_KEY' }]);
+  });
+
+  it('reads the user settings file under CODEINSIGHT_HOME unless userSettings is null', async () => {
+    const file = userSettingsPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, llm: { provider: 'openai-compatible', model: 'file-m', apiKey: 'file-key' } }), { mode: 0o600 });
+    try {
+      const repo = tempDir();
+      expect((await loadConfig(repo, { env: {} })).llm).toEqual({ provider: 'openai-compatible', model: 'file-m', apiKey: 'file-key' });
+      expect((await loadConfig(repo, { env: {}, userSettings: null })).llm).toBeUndefined();
+      const sources = await loadLlmSources(undefined, { env: {} });
+      expect(sources.model).toEqual({ value: 'file-m', source: 'user' });
+    } finally {
+      writeFileSync(file, '{}');
+    }
+  });
+
+  it('does not read the repository config in loadLlmSources without a repository', async () => {
+    const repo = repoWith({ provider: 'anthropic', model: 'repo-m' });
+    expect((await loadLlmSources(repo, { env: {}, userSettings: null })).model).toEqual({ value: 'repo-m', source: 'repo' });
+    expect((await loadLlmSources(undefined, { env: {}, userSettings: null })).model).toEqual({ source: 'none' });
   });
 });

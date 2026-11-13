@@ -17,6 +17,7 @@ import type {
 } from '../model/types.js';
 import { log } from '../log.js';
 import { ChatTable } from './chats.js';
+import { ExtractCacheTable } from './extract-cache.js';
 import { OverviewTable } from './overviews.js';
 import { isProcessAlive } from './process.js';
 import { EXTRA_SCHEMA_SQL, EXTRA_TABLES, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
@@ -207,6 +208,8 @@ export class Store {
   readonly overviews: OverviewTable;
   /** 问答会话和消息 */
   readonly chats: ChatTable;
+  /** 按文件缓存的提取结果 */
+  readonly extractCache: ExtractCacheTable;
 
   constructor(readonly dbPath: string) {
     const { db, rebuilt } = openDatabase(dbPath);
@@ -214,6 +217,7 @@ export class Store {
     this.rebuilt = rebuilt;
     this.overviews = new OverviewTable(db, dbPath);
     this.chats = new ChatTable(db);
+    this.extractCache = new ExtractCacheTable(db);
   }
 
   close(): void {
@@ -306,6 +310,27 @@ export class Store {
       'INSERT INTO edges(snapshot_id, src_id, dst_id, kind, provenance, confidence, path, line, col) VALUES (?,?,?,?,?,?,?,?,?)',
     );
     for (const e of rows) st.run(e.snapshotId, e.srcId, e.dstId, e.kind, e.provenance, e.confidence, e.path, e.line, e.col);
+  }
+
+  /** 记录快照调用边所用的提取和解析代码指纹 */
+  setEdgesCodeHash(snapshotId: number, codeHash: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO snapshot_edges_code(snapshot_id, code_hash) VALUES (?, ?)').run(snapshotId, codeHash);
+  }
+
+  getEdgesCodeHash(snapshotId: number): string | undefined {
+    const r = this.db.prepare('SELECT code_hash FROM snapshot_edges_code WHERE snapshot_id = ?').get(snapshotId) as Row | undefined;
+    return r ? String(r.code_hash) : undefined;
+  }
+
+  /** 把 from 快照的全部边复制到 to 快照（边里不含快照特有的值）；返回复制的行数 */
+  copyEdges(fromSnapshotId: number, toSnapshotId: number): number {
+    const r = this.db
+      .prepare(
+        'INSERT INTO edges(snapshot_id, src_id, dst_id, kind, provenance, confidence, path, line, col) ' +
+          'SELECT ?, src_id, dst_id, kind, provenance, confidence, path, line, col FROM edges WHERE snapshot_id = ?',
+      )
+      .run(toSnapshotId, fromSnapshotId);
+    return Number(r.changes);
   }
 
   insertEntries(rows: EntryRow[]): void {

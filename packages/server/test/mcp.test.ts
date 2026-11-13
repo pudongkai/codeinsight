@@ -9,6 +9,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Resolver } from '@codeinsight/core';
 import { createMcpServer } from '../src/index.js';
 import { fixtureRepo, openWorkspace, tempDir, writeFiles } from './helpers/env.js';
+import { tempHomeEnv } from './setup-home.js';
 
 const HELPER = path.join(import.meta.dirname, 'helpers', 'mcp-stdio.mjs');
 const FAKE_SCIP = path.resolve(import.meta.dirname, '..', '..', 'core', 'test', 'helpers', 'fake-scip.mjs');
@@ -40,11 +41,11 @@ describe('MCP over stdio', () => {
     repo = fixtureRepo();
     // 未提交的改动，供 review_changes 默认审查工作区
     writeFiles(repo, { 'pkg/repo.py': 'import os\n\n\ndef f(x):\n    """Join a path."""\n    return os.path.join("b", str(x))\n\n\ndef g():\n    return f(1)\n\n\ndef rec(n):\n    return rec(n - 1) if n else 0\n\n\nclass Base:\n    pass\n' });
-    // 子进程只拿到 PATH，不会读到本机的 LLM 配置和 API key
+    // 子进程只拿到 PATH 和临时用户目录，不会读到本机的 LLM 配置、API key 和用户设置
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: [HELPER, repo, tempDir('ci-mcp-data-')],
-      env: { PATH: process.env.PATH ?? '', CODEINSIGHT_LOG: 'info' },
+      env: { PATH: process.env.PATH ?? '', CODEINSIGHT_LOG: 'info', ...tempHomeEnv() },
       stderr: 'pipe',
     });
     transport.stderr?.on('data', (d: Buffer) => (stderr += d.toString()));
@@ -142,7 +143,7 @@ describe('MCP shutdown while indexing', () => {
     const dataDir = tempDir('ci-mcp-close-');
     const pidFile = path.join(tempDir('ci-mcp-pid-'), 'pid');
     const child = spawn(process.execPath, [HELPER, fixtureRepo(), dataDir, FAKE_SCIP], {
-      env: { PATH: process.env.PATH ?? '', FAKE_SCIP_PID_FILE: pidFile, CODEINSIGHT_LOG: 'info' },
+      env: { PATH: process.env.PATH ?? '', FAKE_SCIP_PID_FILE: pidFile, CODEINSIGHT_LOG: 'info', ...tempHomeEnv() },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';

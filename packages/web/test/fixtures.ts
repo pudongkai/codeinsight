@@ -100,9 +100,10 @@ export const makeNav = (): Nav => ({ openSymbol: vi.fn(), showSource: vi.fn(), o
 /** 已配置 anthropic、有快照（id 7，content_key ck1）和概览的 /api/status */
 export function makeStatus(extra: Partial<StatusResponse> = {}): StatusResponse {
   return {
-    repo: '/repo', node: 'v22', llmConfigured: true, llm: { provider: 'anthropic', model: 'claude-x' }, sendSource: true,
+    repo: '/repo', repoGen: 1, repoLocked: false, dirPickerAvailable: true, changes: { checkedAt: null, codeChanged: false, autoReindex: false, autoReindexFailed: false },
+    node: 'v22', llmConfigured: true, llm: { provider: 'anthropic', model: 'claude-x' }, sendSource: true,
     index: { job: null, lastDoneAt: 1 },
-    snapshot: { id: 7, kind: 'working', commitSha: 'a'.repeat(40), contentKey: 'ck1', createdAt: 1, resolverStatus: 'ok', resolverError: null },
+    snapshot: { id: 7, kind: 'working', commitSha: 'a'.repeat(40), contentKey: 'ck1', createdAt: 1, resolverStatus: 'ok', resolverError: null, dirty: false },
     reviews: [], overview: { id: 1, createdAt: 1, stale: false }, ...extra,
   };
 }

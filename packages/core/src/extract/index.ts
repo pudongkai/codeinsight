@@ -36,6 +36,11 @@ export async function extractPythonFiles(sources: SourceFile[]): Promise<Extract
       log.warn('extract_file_failed', { path: s.path, error: (err as Error).message });
     }
   }
+  return resolveCrossFile(files);
+}
+
+/** 全部文件提取完后做跨文件识别：Django 路由入口和数据模型类（会改写 symbol.modelKind） */
+export function resolveCrossFile(files: ExtractedFile[]): ExtractResult {
   const entries = [...files.flatMap((f) => f.entries), ...resolveDjangoEntries(files)];
   return { files, entries, models: resolveModels(files) };
 }

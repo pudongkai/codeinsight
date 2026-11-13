@@ -1,38 +1,60 @@
-import { useCallback, useState } from 'react';
-import { api, errorMessage } from '../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, errorMessage, onRepoChanged } from '../api/client';
 import type { StatusResponse } from '../api/types';
 import { usePolling } from './usePolling';
 
-const POLL_MS = 1500;
+/** 建索引期间的轮询间隔 */
+export const BUSY_POLL_MS = 1500;
+/** 其他时候的轮询间隔：别的标签页切换仓库、改设置后，这个页面在这个时间内跟上 */
+export const IDLE_POLL_MS = 5000;
 
-/** 是否需要继续轮询：索引正在建，或还没有可用的快照且上次没有失败 */
-function needsPolling(s: StatusResponse): boolean {
-  const job = s.index.job;
-  return job?.status === 'running' || (!s.snapshot && job?.status !== 'failed');
+/** 还没读到状态（serve 刚启动）和建索引期间按短间隔 */
+function pollInterval(s: StatusResponse | undefined): number {
+  return !s || s.index.job?.status === 'running' ? BUSY_POLL_MS : IDLE_POLL_MS;
+}
+
+/** 页面是否可见；不可见时暂停轮询 */
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onChange = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', onChange);
+    return () => document.removeEventListener('visibilitychange', onChange);
+  }, []);
+  return visible;
 }
 
 /**
- * /api/status：首次加载、建索引期间轮询，以及手动刷新。
- * 请求失败时显示错误并按间隔重试；refresh 重新开始一轮，状态变成需要轮询时会继续轮询。
+ * /api/status：一直轮询（建索引期间 1.5 秒，其他时候 5 秒），页面不可见时暂停，回到可见时立即读一次。
+ * 请求失败时显示错误并按间隔重试；refresh 和收到 409 repo_changed 时立即重新读。
  */
 export function useStatus() {
   const [status, setStatus] = useState<StatusResponse>();
   const [error, setError] = useState<string>();
   const [round, setRound] = useState(0);
+  const visible = usePageVisible();
+  // 下一次的间隔按刚读到的状态决定，不用等下一次渲染
+  const latest = useRef<StatusResponse>(undefined);
   usePolling<StatusResponse>(
-    {
-      load: () => api.status(),
-      again: needsPolling,
-      onData: (s) => {
-        setStatus(s);
-        setError(undefined);
-      },
-      onError: (err) => setError(`读取服务状态失败：${errorMessage(err)}`),
-      intervalMs: POLL_MS,
-    },
-    [round],
+    visible
+      ? {
+          load: () => api.status(),
+          again: () => true,
+          onData: (s) => {
+            latest.current = s;
+            setStatus(s);
+            setError(undefined);
+          },
+          onError: (err) => setError(`读取服务状态失败：${errorMessage(err)}`),
+          get intervalMs() {
+            return pollInterval(latest.current);
+          },
+        }
+      : undefined,
+    [round, visible],
   );
   const refresh = useCallback(() => setRound((n) => n + 1), []);
+  useEffect(() => onRepoChanged(refresh), [refresh]);
   const reindex = async () => {
     try {
       await api.startIndex();

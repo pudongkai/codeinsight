@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     globalSetup: ['test/global-setup.ts'],
+    setupFiles: ['test/setup-home.ts'],
     testTimeout: 120_000,
     hookTimeout: 120_000,
   },

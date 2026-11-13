@@ -1,6 +1,6 @@
 import { traverse } from '@codeinsight/core';
 import type { SnapshotRow, SymbolRow, TraverseDirection } from '@codeinsight/core';
-import type { Route, RequestContext } from '../context.js';
+import { repoOf, type Route, type RequestContext } from '../context.js';
 import { HttpError, intParam, sendJson } from '../respond.js';
 import { currentSnapshot, entryMap, requireSnapshot, requireSymbol, symbolInfo, symbolInfos } from '../snapshot.js';
 
@@ -14,9 +14,9 @@ function search(ctx: RequestContext): void {
   if (text === '') throw new HttpError(400, 'invalid_param', 'q is required');
   const limit = intParam(q.get('limit'), 'limit', { min: 1, max: MAX_SEARCH_LIMIT, fallback: 50 })!;
   const snap = currentSnapshot(ctx);
-  const rows = ctx.app.ws.store.searchSymbols(snap.id, text, { kind: q.get('kind') || undefined, limit });
+  const rows = repoOf(ctx).ws.store.searchSymbols(snap.id, text, { kind: q.get('kind') || undefined, limit });
   ctx.logFields.results = rows.length;
-  sendJson(ctx.res, 200, { snapshotId: snap.id, results: symbolInfos(ctx.app.ws.store, snap.id, rows) });
+  sendJson(ctx.res, 200, { snapshotId: snap.id, results: symbolInfos(repoOf(ctx).ws.store, snap.id, rows) });
 }
 
 function target(ctx: RequestContext): { snap: SnapshotRow; sym: SymbolRow } {
@@ -26,7 +26,7 @@ function target(ctx: RequestContext): { snap: SnapshotRow; sym: SymbolRow } {
 
 /** 直接调用方 / 被调用方（call + reference 边）的个数，按正式代码和测试代码分开 */
 function neighborCounts(ctx: RequestContext, snap: SnapshotRow, sym: SymbolRow, direction: TraverseDirection) {
-  const r = traverse(ctx.app.ws.store, snap.id, [sym.id], { direction, depth: 1 });
+  const r = traverse(repoOf(ctx).ws.store, snap.id, [sym.id], { direction, depth: 1 });
   const ids = [...r.reached.get(sym.id)!.keys()];
   const test = ids.filter((id) => r.symbols.get(id)!.isTest).length;
   return { total: ids.length, prod: ids.length - test, test };
@@ -35,7 +35,7 @@ function neighborCounts(ctx: RequestContext, snap: SnapshotRow, sym: SymbolRow, 
 /** GET /api/symbols/:snapshot/:id：位置、签名、docstring、入口信息、调用方和被调用方数量 */
 function detail(ctx: RequestContext): void {
   const { snap, sym } = target(ctx);
-  const store = ctx.app.ws.store;
+  const store = repoOf(ctx).ws.store;
   const parent = sym.parentId ? store.getSymbol(snap.id, sym.parentId) : undefined;
   const entries = store.getEntriesForSymbol(snap.id, sym.id).map((e) => ({ kind: e.kind, framework: e.framework, detail: e.detail }));
   sendJson(ctx.res, 200, {
@@ -61,8 +61,8 @@ function tree(direction: TraverseDirection) {
     const q = ctx.url.searchParams;
     const depth = intParam(q.get('depth'), 'depth', { min: 1, max: MAX_TREE_DEPTH, fallback: 1 })!;
     const includeTests = q.get('tests') !== 'false' && q.get('tests') !== '0';
-    const r = traverse(ctx.app.ws.store, snap.id, [sym.id], { direction, depth, includeTests });
-    const entries = entryMap(ctx.app.ws.store, snap.id, [...r.symbols.keys()]);
+    const r = traverse(repoOf(ctx).ws.store, snap.id, [sym.id], { direction, depth, includeTests });
+    const entries = entryMap(repoOf(ctx).ws.store, snap.id, [...r.symbols.keys()]);
     const info = (s: SymbolRow) => symbolInfo(s, entries.get(s.id));
     const nodes = [...r.reached.get(sym.id)!]
       .map(([id, d]) => ({ ...info(r.symbols.get(id)!), depth: d }))

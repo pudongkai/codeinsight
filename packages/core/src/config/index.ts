@@ -7,8 +7,9 @@ import { DEFAULT_PARTITION_THRESHOLDS, type PartitionThresholds } from '../overv
 import { DEFAULT_SNIPPET_LIMITS, type SnippetLimits } from '../overview/snippets.js';
 import type { ExternalCategory } from '../overview/types.js';
 import type { Warning } from '../report/types.js';
+import { isLlmProvider, readUserSettings, userSettingsPath, type LlmProvider, type UserLlmSettings, type UserSettings } from '../settings/index.js';
 
-export type LlmProvider = 'anthropic' | 'openai-compatible';
+export type { LlmProvider };
 
 export interface LlmConfig {
   provider: LlmProvider;
@@ -107,7 +108,7 @@ export const CONFIG_FILE = 'codeinsight.config.json';
 export const DEFAULT_DATA_DIR = '.codeinsight';
 
 /**
- * 只能从环境变量读取的 LLM 配置项。仓库里的配置文件随被审查的代码一起来，不可信：
+ * 不读仓库配置、只能从环境变量或用户设置读取的 LLM 配置项。仓库里的配置文件随被审查的代码一起来，不可信：
  * 能改请求地址或指定读取哪个环境变量，就能把用户的 API key 或其他环境变量发到任意地址。
  */
 const ENV_ONLY_LLM_KEYS: Record<string, string> = {
@@ -125,7 +126,7 @@ function ignoredLlmKeys(file: FileConfig): Warning[] {
   const envs = [...new Set(keys.map((k) => ENV_ONLY_LLM_KEYS[k]))].join(', ');
   return [{
     code: 'config_llm_key_ignored', level: 'warning',
-    message: `ignored ${keys.map((k) => `llm.${k}`).join(', ')} in ${CONFIG_FILE}: for safety these can only be set by environment variables (${envs})`,
+    message: `ignored ${keys.map((k) => `llm.${k}`).join(', ')} in ${CONFIG_FILE}: for safety these can only be set by environment variables (${envs}) or in the user settings`,
   }];
 }
 
@@ -203,7 +204,7 @@ function envInts(env: NodeJS.ProcessEnv, name: string, count: number, min: numbe
 }
 
 /** 环境变量能关闭源码发送，不能打开仓库配置关掉的 */
-function envTurnsOff(env: NodeJS.ProcessEnv, name: string): boolean {
+export function envTurnsOff(env: NodeJS.ProcessEnv, name: string): boolean {
   return /^(0|false|no|off)$/i.test(env[name]?.trim() ?? '');
 }
 
@@ -310,36 +311,126 @@ function ignoredLimitWarnings(ignored: IgnoredLimit[]): Warning[] {
   }];
 }
 
-type LlmResolution = { llm?: LlmConfig; problem?: string };
+export type LlmSource = 'user' | 'env' | 'repo' | 'default' | 'none';
+export type LlmField = 'provider' | 'model' | 'baseUrl' | 'apiKey';
+
+export interface LlmFieldSource {
+  /** 取到的值；baseUrl 用客户端内置默认值时为 undefined */
+  value?: string;
+  source: LlmSource;
+  /** source 为 env 时的变量名 */
+  env?: string;
+}
+
+export interface LlmSources {
+  provider: LlmFieldSource;
+  model: LlmFieldSource;
+  baseUrl: LlmFieldSource;
+  apiKey: LlmFieldSource;
+  /** 环境变量也设了值、但被用户设置盖住的项 */
+  shadowed: { field: LlmField; by: 'user'; env: string }[];
+  /** 生效的配置；provider 没有或有误时为 undefined */
+  llm?: LlmConfig;
+  /** 配置有误（provider 不支持、缺 model）时的原因 */
+  problem?: string;
+}
+
+export interface LlmSourcesInput {
+  user?: UserLlmSettings;
+  /** 仓库配置里的 llm 部分；没有仓库时不传。只取 provider、model */
+  repo?: { provider?: unknown; model?: unknown };
+  env: NodeJS.ProcessEnv;
+}
+
+const LLM_ENV = {
+  provider: 'CODEINSIGHT_LLM_PROVIDER',
+  model: 'CODEINSIGHT_LLM_MODEL',
+  baseUrl: 'CODEINSIGHT_LLM_BASE_URL',
+  apiKey: 'CODEINSIGHT_LLM_API_KEY',
+} as const;
+
+const PROVIDER_KEY_ENV: Record<LlmProvider, string> = { anthropic: 'ANTHROPIC_API_KEY', 'openai-compatible': 'OPENAI_API_KEY' };
+
+/** 用户设置 > 环境变量（按顺序取第一个有值的）> 仓库配置；空字符串按没设处理 */
+function pickField(user: string | undefined, env: NodeJS.ProcessEnv, envNames: string[], repo?: unknown): LlmFieldSource {
+  if (user) return { value: user, source: 'user' };
+  for (const name of envNames) if (env[name]) return { value: env[name], source: 'env', env: name };
+  if (repo !== undefined && repo !== null && repo !== '') return { value: String(repo), source: 'repo' };
+  return { source: 'none' };
+}
+
+/** 用户设置盖住了环境变量的项（环境变量取 envNames 里第一个有值的） */
+function shadowedBy(field: LlmField, user: string | undefined, env: NodeJS.ProcessEnv, envNames: string[]): LlmSources['shadowed'] {
+  const name = envNames.find((n) => env[n]);
+  return user && name ? [{ field, by: 'user', env: name }] : [];
+}
 
 /**
- * provider 和 model 可来自环境变量或仓库配置；请求地址和 API key 只来自环境变量。
- * 配置有误时不抛错（否则所有命令都起不来），返回原因，由意图检查转成 warning。
+ * LLM 各项的取值和来源。用户设置和环境变量都是用户自己给的，可以写请求地址和 API key；
+ * 仓库配置随被分析的代码一起来，只取 provider 和 model。配置有误时不抛错，返回 problem。
  */
-function resolveLlm(file: FileConfig, env: NodeJS.ProcessEnv): LlmResolution {
-  const provider = env.CODEINSIGHT_LLM_PROVIDER ?? file.llm?.provider;
-  if (!provider) return {};
-  if (provider !== 'anthropic' && provider !== 'openai-compatible') {
-    return { problem: `unsupported LLM provider: ${String(provider)} (expected anthropic or openai-compatible)` };
-  }
-  const model = env.CODEINSIGHT_LLM_MODEL ?? file.llm?.model ?? (provider === 'anthropic' ? DEFAULT_ANTHROPIC_MODEL : undefined);
-  if (!model) return { problem: 'LLM provider openai-compatible configured but model is missing (set CODEINSIGHT_LLM_MODEL or llm.model)' };
-  const apiKey = env.CODEINSIGHT_LLM_API_KEY ?? (provider === 'anthropic' ? env.ANTHROPIC_API_KEY : env.OPENAI_API_KEY);
-  return { llm: { provider, model, baseUrl: env.CODEINSIGHT_LLM_BASE_URL, apiKey } };
+export function llmSources(input: LlmSourcesInput): LlmSources {
+  const { user = {}, repo = {}, env } = input;
+  const provider = pickField(user.provider, env, [LLM_ENV.provider], repo.provider);
+  const p = isLlmProvider(provider.value) ? provider.value : undefined;
+  const keyEnvs = [LLM_ENV.apiKey, ...(p ? [PROVIDER_KEY_ENV[p]] : [])];
+  const model = pickField(user.model, env, [LLM_ENV.model], repo.model);
+  if (model.source === 'none' && p === 'anthropic') Object.assign(model, { value: DEFAULT_ANTHROPIC_MODEL, source: 'default' });
+  const baseUrl = pickField(user.baseUrl, env, [LLM_ENV.baseUrl]);
+  if (baseUrl.source === 'none' && p) baseUrl.source = 'default';
+  const apiKey = pickField(user.apiKey, env, keyEnvs);
+  const shadowed = [
+    ...shadowedBy('provider', user.provider, env, [LLM_ENV.provider]),
+    ...shadowedBy('model', user.model, env, [LLM_ENV.model]),
+    ...shadowedBy('baseUrl', user.baseUrl, env, [LLM_ENV.baseUrl]),
+    ...shadowedBy('apiKey', user.apiKey, env, keyEnvs),
+  ];
+  const out: LlmSources = { provider, model, baseUrl, apiKey, shadowed };
+  if (provider.value === undefined) return out;
+  if (!p) return { ...out, problem: `unsupported LLM provider: ${provider.value} (expected anthropic or openai-compatible)` };
+  if (!model.value) return { ...out, problem: 'LLM provider openai-compatible configured but model is missing (set CODEINSIGHT_LLM_MODEL or llm.model, or fill it in on the web settings page)' };
+  return { ...out, llm: { provider: p, model: model.value, baseUrl: baseUrl.value, apiKey: apiKey.value } };
 }
 
 export interface LoadConfigOptions {
   /** 命令行的 --data-dir，优先级最高 */
   dataDir?: string;
   env?: NodeJS.ProcessEnv;
+  /** 用户设置；不传时读用户设置文件，null 表示不读 */
+  userSettings?: UserSettings | null;
 }
 
-/** 配置优先级：命令行 > 环境变量 > codeinsight.config.json > 默认值；LLM 的请求地址和 API key 只读环境变量 */
+/** 读用户设置出错（权限不足等）时记日志按空设置继续，不让所有命令都起不来 */
+async function userSettingsFor(opts: LoadConfigOptions): Promise<UserSettings | undefined> {
+  if (opts.userSettings !== undefined) return opts.userSettings ?? undefined;
+  try {
+    return await readUserSettings();
+  } catch (err) {
+    log.warn('user_settings_read_failed', { path: userSettingsPath(), error: (err as Error).message });
+    return undefined;
+  }
+}
+
+/**
+ * LLM 各项的取值和来源（设置接口用）：没有仓库时不读仓库配置。
+ * opts 同 loadConfig 的 env、userSettings。
+ */
+export async function loadLlmSources(repo: string | undefined, opts: Pick<LoadConfigOptions, 'env' | 'userSettings'> = {}): Promise<LlmSources> {
+  const file = repo === undefined ? {} : await readFileConfig(repo);
+  const user = await userSettingsFor(opts);
+  return llmSources({ user: user?.llm, repo: file.llm, env: opts.env ?? process.env });
+}
+
+/**
+ * 配置优先级：命令行 > 环境变量 > codeinsight.config.json > 默认值；
+ * LLM 各项是用户设置 > 环境变量 > 仓库配置，请求地址和 API key 不读仓库配置。
+ */
 export async function loadConfig(repo: string, opts: LoadConfigOptions = {}): Promise<CodeInsightConfig> {
   const env = opts.env ?? process.env;
   const file = await readFileConfig(repo);
   const dataDirRaw = opts.dataDir ?? env.CODEINSIGHT_DATA_DIR ?? file.dataDir ?? DEFAULT_DATA_DIR;
-  const llm = resolveLlm(file, env);
+  const user = await userSettingsFor(opts);
+  const llm = llmSources({ user: user?.llm, repo: file.llm, env });
   if (llm.problem) log.warn('config_llm_invalid', { reason: llm.problem });
   const limits = costLimits(file, env);
   const warnings = [...ignoredLlmKeys(file), ...ignoredLimitWarnings(limits.ignored), ...limits.warnings];

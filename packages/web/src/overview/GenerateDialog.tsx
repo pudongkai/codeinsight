@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { api } from '../api/client';
 import type { OverviewEstimate, OverviewParams, StatusResponse } from '../api/types';
 import { useApi } from '../browse/useApi';
+import { LlmSetupHint } from '../settings/LlmSetupHint';
+import { Modal } from '../settings/Modal';
 import type { StartResult } from './useOverviewJob';
 
 interface Props {
@@ -9,10 +11,6 @@ interface Props {
   onStart(params: OverviewParams, confirmed: boolean): Promise<StartResult>;
   onClose(): void;
 }
-
-export const LLM_SETUP_HELP =
-  '配置方法：启动 serve 前设置环境变量 CODEINSIGHT_LLM_PROVIDER（anthropic 或 openai-compatible）、CODEINSIGHT_LLM_API_KEY，' +
-  '需要时再设置 CODEINSIGHT_LLM_BASE_URL、CODEINSIGHT_LLM_MODEL，然后重启 serve。';
 
 function estimateText(e: OverviewEstimate): string {
   const to = `${e.provider ?? ''}（${e.model ?? ''}）`;
@@ -64,7 +62,7 @@ function LlmBody({ status, onStart, onClose }: Props) {
   );
 }
 
-/** 未配置 LLM：只生成结构部分，说明如何配置 */
+/** 未配置 LLM：只生成结构部分，引导去设置模型服务 */
 function NoLlmBody({ onStart, onClose }: Props) {
   const [error, setError] = useState<string>();
   const submit = async () => {
@@ -75,7 +73,7 @@ function NoLlmBody({ onStart, onClose }: Props) {
   return (
     <>
       <p>未配置 LLM：只生成结构部分（模块、依赖、外部依赖、功能分组、边界问题），名称用目录名，不发送任何代码。</p>
-      <p className="muted" data-testid="llm-setup-help">{LLM_SETUP_HELP}</p>
+      <div className="setup-hint"><LlmSetupHint /></div>
       {error && <div className="error" data-testid="overview-start-error">{error}</div>}
       <div className="actions">
         <button type="button" className="small" onClick={onClose}>取消</button>
@@ -88,11 +86,9 @@ function NoLlmBody({ onStart, onClose }: Props) {
 /** 生成概览的弹窗：显示估算和发送范围，确认后发起 */
 export function GenerateDialog(props: Props) {
   return (
-    <div className="modal-backdrop">
-      <div className="panel modal" role="dialog" aria-label="生成概览" data-testid="overview-dialog">
-        <h3>生成概览</h3>
-        {props.status.llm ? <LlmBody {...props} /> : <NoLlmBody {...props} />}
-      </div>
-    </div>
+    <Modal label="生成概览" testId="overview-dialog">
+      <h3>生成概览</h3>
+      {props.status.llm ? <LlmBody {...props} /> : <NoLlmBody {...props} />}
+    </Modal>
   );
 }

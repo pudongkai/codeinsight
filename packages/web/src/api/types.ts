@@ -40,6 +40,8 @@ export interface SnapshotView {
   createdAt: number;
   resolverStatus: string;
   resolverError: string | null;
+  /** 工作区快照包含未提交改动 */
+  dirty: boolean;
 }
 
 export type ReviewStatus = 'running' | 'done' | 'failed';
@@ -61,8 +63,25 @@ export interface ReviewSummary {
   createdAt: number;
 }
 
+/** 代码变化检测的结果 */
+export interface ChangesView {
+  checkedAt: number | null;
+  codeChanged: boolean;
+  autoReindex: boolean;
+  /** 当前变化的代码自动更新索引失败过，不再自动重试 */
+  autoReindexFailed: boolean;
+}
+
 export interface StatusResponse {
-  repo: string;
+  /** 当前仓库根目录；没有打开仓库时为 null */
+  repo: string | null;
+  /** 每打开一次仓库加 1；没有仓库时为 null */
+  repoGen: number | null;
+  /** serve 锁定了仓库（插件启动）：不显示切换入口 */
+  repoLocked: boolean;
+  /** 能弹出系统选择文件夹窗口 */
+  dirPickerAvailable: boolean;
+  changes: ChangesView;
   node: string;
   llmConfigured: boolean;
   /** 当前的 LLM 配置，未配置时为 null */
@@ -145,6 +164,8 @@ export interface OverviewResponse {
   stale: boolean;
   /** 当前快照未就绪时为 null */
   currentContentKey: string | null;
+  /** 概览所基于的代码含未提交改动 */
+  snapshotDirty: boolean;
   /** 比当前概览更新、但不含 AI 说明的记录 */
   newerStructureId?: number;
 }
@@ -185,3 +206,78 @@ export interface ChatSessionDetail extends ChatSessionInfo {
   answering: boolean;
   messages: ChatMessageInfo[];
 }
+
+/** GET /api/repos 的最近列表项 */
+export interface RecentRepo {
+  path: string;
+  lastOpenedAt: number;
+  /** 路径现在是否还是目录 */
+  exists: boolean;
+}
+
+/** GET /api/repos */
+export interface ReposResponse {
+  current: { path: string; gen: number; dataDir: string } | null;
+  startupRepo: string | null;
+  locked: boolean;
+  recent: RecentRepo[];
+}
+
+/** POST /api/repo 成功的响应 */
+export interface OpenRepoResult {
+  repo: string;
+  repoGen: number;
+  dataDir: string;
+  /** 与当前仓库相同，什么都没做 */
+  reused: boolean;
+}
+
+/** 409 repo_busy 里列出的任务 */
+export interface RepoTask {
+  kind: 'index' | 'overview' | 'review' | 'ask';
+  id: number;
+  cancellable: boolean;
+}
+
+/** POST /api/repo/pick-dir */
+export type PickDirResult = { status: 'selected'; path: string } | { status: 'cancelled' } | { status: 'timeout' };
+
+export type LlmProvider = 'anthropic' | 'openai-compatible';
+export type LlmSourceKind = 'user' | 'env' | 'repo' | 'default' | 'none';
+
+export interface LlmFieldView {
+  value: string | null;
+  source: LlmSourceKind;
+  /** source 为 env 时的变量名 */
+  env?: string;
+}
+
+/** GET /api/settings */
+export interface SettingsResponse {
+  path: string;
+  llm: {
+    provider: LlmFieldView;
+    baseUrl: LlmFieldView;
+    model: LlmFieldView;
+    /** 不含 key 原文；足够长时给末 4 位 */
+    apiKey: { set: boolean; last4?: string; source: LlmSourceKind; env?: string };
+    /** 环境变量也设了值、但被用户设置盖住的项 */
+    shadowed: { field: 'provider' | 'model' | 'baseUrl' | 'apiKey'; by: 'user'; env: string }[];
+  };
+  effective: { configured: boolean; provider: string | null; model: string | null; problem: string | null };
+  autoReindex: boolean;
+}
+
+/** 保存和测试连接的表单：空字符串表示不保存（apiKey 为空表示不修改） */
+export interface LlmForm {
+  provider: LlmProvider;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  clearApiKey: boolean;
+}
+
+/** POST /api/settings/llm/test */
+export type LlmTestResult =
+  | { ok: true; provider: string; model: string; origin: string; ms: number }
+  | { ok: false; reason: string; message: string; ms: number };

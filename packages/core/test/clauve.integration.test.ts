@@ -273,3 +273,45 @@ describe.skipIf(!CLAUVE)('clauve overview with a fake LLM (CODEINSIGHT_CLAUVE)',
     expect(changed.report.modules.find((m) => m.id === 'server/modules/billing')!.aiStatus).toBe('cached');
   }, 600_000);
 });
+
+/** 快照的 files、symbols、entries、edges，去掉 snapshot_id 后排序 */
+function snapshotRows(store: Store, id: number): Record<string, string[]> {
+  const sorted = (rows: object[]) => rows.map((r) => {
+    const rest: Record<string, unknown> = { ...r };
+    delete rest.snapshotId;
+    return JSON.stringify(rest);
+  }).sort();
+  return {
+    files: sorted(store.getFiles(id)), symbols: sorted(store.getSymbols(id)), entries: sorted(store.getEntries(id)), edges: sorted(store.getEdges(id)),
+  };
+}
+
+describe.skipIf(!CLAUVE)('clauve incremental working snapshot (CODEINSIGHT_CLAUVE)', () => {
+  it('gives the same rows as a full build after changing a lease module file', async () => {
+    const statusBefore = git(path.resolve(CLAUVE!), 'status', '--porcelain');
+    const copy = tempDir('ci-clauve-incr-');
+    git(copy, 'clone', '-q', '--no-checkout', path.resolve(CLAUVE!), '.');
+    git(copy, 'checkout', '-q', COMMIT);
+    const build = async (dataDir: string) => {
+      const config = await loadConfig(copy, { dataDir, env: {} });
+      const layout = await initDataDir(config.dataDir);
+      const store = new Store(layout.dbPath);
+      const { snapshot } = await buildSnapshot({ repo: copy, store, layout, config });
+      expect(snapshot).toMatchObject({ kind: 'working', extractStatus: 'ok', resolverStatus: 'ok' });
+      return { store, snapshot };
+    };
+    const dataDir = tempDir('ci-clauve-incr-data-');
+    (await build(dataDir)).store.close();
+    const repoFile = path.join(copy, 'server/modules/lease/repository.py');
+    writeFileSync(repoFile, `${readFileSync(repoFile, 'utf8')}\n\ndef _incremental_probe():\n    return insert_audit_log\n`);
+    const incremental = await build(dataDir);
+    const full = await build(tempDir('ci-clauve-full-data-'));
+    try {
+      expect(snapshotRows(incremental.store, incremental.snapshot.id)).toEqual(snapshotRows(full.store, full.snapshot.id));
+    } finally {
+      incremental.store.close();
+      full.store.close();
+    }
+    expect(git(path.resolve(CLAUVE!), 'status', '--porcelain')).toBe(statusBefore);
+  }, 900_000);
+});

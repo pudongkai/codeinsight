@@ -1,6 +1,6 @@
 import type { OverviewReport } from '@codeinsight/core/overview/types';
 import type { OverviewResponse } from '../api/types';
-import { formatTime } from '../format';
+import { basedOn, formatTime } from '../format';
 
 interface Props {
   data: OverviewResponse;
@@ -64,7 +64,9 @@ export function SystemCard(props: Props) {
         </div>
         {r.system ? <p data-testid="system-summary">{r.system.summary}</p> : <p className="muted">没有 AI 生成的系统简介（未配置 LLM、只生成了结构部分或请求失败）。</p>}
         <Stats r={r} />
-        <p className="muted">生成于 {formatTime(r.generatedAt)} · {aiText(r)}</p>
+        <p className="muted" data-testid="overview-source">
+          生成于 {formatTime(r.generatedAt)} · {basedOn(r.snapshot.commitSha, props.data.snapshotDirty)} · {aiText(r)}
+        </p>
       </section>
       <Notices {...props} />
     </>

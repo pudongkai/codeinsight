@@ -1,13 +1,32 @@
 /**
  * HTTP API 客户端：页面里所有接口调用都经过这里。
  * 认证只靠 serve 设置的 HttpOnly cookie（同源请求自动带上），前端不接触 token。
+ * 读到 status 后，之后的请求都带 `X-CodeInsight-Repo: <repoGen>`：仓库被别的页面切换后，服务端返回 409 repo_changed，
+ * 页面收到通知后重新读 status 并重建仓库相关的内容。
  */
 import type { AskEvent, ChatSessionInfo } from '@codeinsight/core/ask/events';
 import { NdjsonParseError, readNdjson } from './stream';
 import type {
-  ChatSessionDetail, EntryItem, OverviewEstimate, OverviewJob, OverviewParams, OverviewResponse, ReviewParams, ReviewResponse, SourceResponse,
-  StatusResponse, SymbolDetail, SymbolInfo, TreeResponse,
+  ChatSessionDetail, EntryItem, LlmForm, LlmTestResult, OpenRepoResult, OverviewEstimate, OverviewJob, OverviewParams, OverviewResponse, PickDirResult,
+  ReposResponse, ReviewParams, ReviewResponse, SettingsResponse, SourceResponse, StatusResponse, SymbolDetail, SymbolInfo, TreeResponse,
 } from './types';
+
+export const REPO_HEADER = 'X-CodeInsight-Repo';
+
+/** 最近一次 status 的 repoGen；还没读到 status 时为 undefined，此时请求不带仓库标识 */
+let repoGen: number | null | undefined;
+const repoChangedListeners = new Set<() => void>();
+
+/** 订阅“服务端的当前仓库已不是页面所用的仓库”（409 repo_changed）；返回取消订阅函数 */
+export function onRepoChanged(listener: () => void): () => void {
+  repoChangedListeners.add(listener);
+  return () => repoChangedListeners.delete(listener);
+}
+
+/** 测试用：回到还没读到 status 的状态 */
+export function resetRepoGen(): void {
+  repoGen = undefined;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -32,6 +51,10 @@ export class ApiError extends Error {
   get permanent(): boolean {
     return this.status === 401 || this.status === 404;
   }
+
+  get repoChanged(): boolean {
+    return this.status === 409 && this.code === 'repo_changed';
+  }
 }
 
 /** fetch 网络失败时的错误 */
@@ -44,7 +67,16 @@ async function responseError(res: Response): Promise<ApiError> {
   const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string } & Record<string, unknown>;
   const { error, message, ...extra } = data;
   const code = error ?? `http_${res.status}`;
-  return new ApiError(res.status, code, message ? `${code}: ${message}` : code, extra);
+  const err = new ApiError(res.status, code, message ? `${code}: ${message}` : code, extra);
+  if (err.repoChanged) for (const l of repoChangedListeners) l();
+  return err;
+}
+
+function headersFor(body: unknown): Record<string, string> | undefined {
+  const h: Record<string, string> = {};
+  if (body !== undefined) h['Content-Type'] = 'application/json';
+  if (repoGen !== undefined) h[REPO_HEADER] = String(repoGen);
+  return Object.keys(h).length > 0 ? h : undefined;
 }
 
 /** 带 JSON 请求体的同源请求；网络失败时抛 network_error */
@@ -53,7 +85,7 @@ async function send(method: 'GET' | 'POST' | 'DELETE', url: string, body?: unkno
     return await fetch(url, {
       method,
       credentials: 'same-origin',
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers: headersFor(body),
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,
     });
@@ -62,8 +94,8 @@ async function send(method: 'GET' | 'POST' | 'DELETE', url: string, body?: unkno
   }
 }
 
-async function request<T>(method: 'GET' | 'POST' | 'DELETE', url: string, body?: unknown): Promise<T> {
-  const res = await send(method, url, body);
+async function request<T>(method: 'GET' | 'POST' | 'DELETE', url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await send(method, url, body, signal);
   if (!res.ok) throw await responseError(res);
   return (await res.json().catch(() => ({}))) as T;
 }
@@ -90,8 +122,14 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
 
 const sym = (snapshot: number, id: string) => `/api/symbols/${snapshot}/${encodeURIComponent(id)}`;
 
+async function status(): Promise<StatusResponse> {
+  const s = await request<StatusResponse>('GET', '/api/status');
+  repoGen = s.repoGen;
+  return s;
+}
+
 export const api = {
-  status: () => request<StatusResponse>('GET', '/api/status'),
+  status,
   startIndex: () => request<{ id: number; status: string }>('POST', '/api/index'),
   createReview: (params: ReviewParams) => request<{ id: number }>('POST', '/api/reviews', params),
   review: (id: number) => request<ReviewResponse>('GET', `/api/reviews/${id}`),
@@ -113,6 +151,17 @@ export const api = {
   /** 提问：开始前的错误抛 ApiError，开始后逐个回调事件；signal 中止即停止回答 */
   ask: (sessionId: number, question: string, onEvent: (e: AskEvent) => void, signal?: AbortSignal) =>
     postNdjson<AskEvent>(`/api/chat/sessions/${sessionId}/messages`, { question }, onEvent, signal),
+  repos: () => request<ReposResponse>('GET', '/api/repos'),
+  openRepo: (path: string, cancelRunning = false) => request<OpenRepoResult>('POST', '/api/repo', { path, cancelRunning }),
+  /** 在 serve 所在的机器上弹出系统选择文件夹窗口，等用户选完才返回 */
+  /** signal 中止时断开请求，服务端随之结束弹窗 */
+  pickDir: (signal?: AbortSignal) => request<PickDirResult>('POST', '/api/repo/pick-dir', {}, signal),
+  removeRecentRepo: (path: string) => request<unknown>('DELETE', `/api/repos/recent${qs({ path })}`),
+  settings: () => request<SettingsResponse>('GET', '/api/settings'),
+  saveLlmSettings: (form: LlmForm) => request<SettingsResponse>('POST', '/api/settings/llm', form),
+  resetLlmSettings: () => request<SettingsResponse>('DELETE', '/api/settings/llm'),
+  testLlm: (form: LlmForm) => request<LlmTestResult>('POST', '/api/settings/llm/test', form),
+  saveGeneralSettings: (p: { autoReindex: boolean }) => request<SettingsResponse>('POST', '/api/settings', p),
 };
 
 export type Api = typeof api;

@@ -22,7 +22,7 @@ vi.mock('../src/graph/FlowGraph', () => ({
 }));
 
 function response(extra: Partial<OverviewResponse> = {}): OverviewResponse {
-  return { id: 1, overview: makeOverview(), stale: false, currentContentKey: 'ck1', ...extra };
+  return { id: 1, overview: makeOverview(), stale: false, currentContentKey: 'ck1', snapshotDirty: false, ...extra };
 }
 
 function renderPage(n: Nav = nav(), s: StatusResponse = status()) {
@@ -69,6 +69,14 @@ describe('OverviewPage', () => {
     expect(states.map((s) => [s.dataset.status, s.textContent])).toEqual([['ok', 'AI'], ['failed', 'AI 失败'], ['cached', 'AI·缓存']]);
     expect(screen.getAllByTestId('stub-edge').map((e) => e.dataset.tone)).toEqual(['cycle', 'cycle', 'layer']);
     expect(api.overview).toHaveBeenCalledWith(undefined);
+  });
+
+  it('the system card shows when it was generated and which commit it is based on, with uncommitted changes noted', async () => {
+    vi.spyOn(api, 'overview').mockResolvedValue(response({ snapshotDirty: true }));
+    renderPage();
+    const source = await screen.findByTestId('overview-source');
+    expect(source.textContent).toContain(`基于 ${'a'.repeat(8)}（含未提交改动）`);
+    expect(source.textContent).toMatch(/^生成于 \d{4}-\d{2}-\d{2} /);
   });
 
   it('clicking a module shows its responsibility, external dependencies and env vars', async () => {

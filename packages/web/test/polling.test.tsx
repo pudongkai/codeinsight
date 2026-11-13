@@ -2,7 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from '../src/api/client';
 import type { ReviewResponse, StatusResponse } from '../src/api/types';
-import { useStatus } from '../src/app/useStatus';
+import { BUSY_POLL_MS, IDLE_POLL_MS, useStatus } from '../src/app/useStatus';
 import { MAX_RETRY_MS, retryDelay } from '../src/app/usePolling';
 import { useReviewJob } from '../src/review/useReviewJob';
 import { makeReport } from './fixtures';
@@ -10,6 +10,18 @@ import { makeReport } from './fixtures';
 const down = () => new ApiError(0, 'network_error', 'network down');
 const done = (id: number): ReviewResponse => ({ id, status: 'done', report: makeReport() }) as ReviewResponse;
 const ready = { snapshot: { id: 1 }, index: { job: { status: 'done' } }, reviews: [] } as unknown as StatusResponse;
+const indexing = { snapshot: null, index: { job: { status: 'running' } }, reviews: [] } as unknown as StatusResponse;
+
+function setHidden(hidden: boolean) {
+  Object.defineProperty(document, 'hidden', { value: hidden, configurable: true });
+  act(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+}
+
+afterEach(() => {
+  Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+});
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -44,7 +56,7 @@ describe('useReviewJob', () => {
 });
 
 describe('useStatus', () => {
-  it('retries when the first /api/status fails and stops once the snapshot is ready', async () => {
+  it('retries when the first /api/status fails, then keeps polling every 5 seconds once the snapshot is ready', async () => {
     const status = vi.spyOn(api, 'status').mockRejectedValueOnce(down()).mockRejectedValueOnce(down()).mockResolvedValue(ready);
     const { result } = renderHook(() => useStatus());
     await flush();
@@ -57,11 +69,43 @@ describe('useStatus', () => {
     await act(() => vi.advanceTimersByTimeAsync(1500));
     expect(result.current.status).toBe(ready);
     expect(result.current.error).toBeUndefined();
-    await act(() => vi.advanceTimersByTimeAsync(6000));
+    await act(() => vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 1));
+    expect(status).toHaveBeenCalledTimes(3);
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(status).toHaveBeenCalledTimes(4);
+  });
+
+  it('polls every 1.5 seconds while the index is being built', async () => {
+    const status = vi.spyOn(api, 'status').mockResolvedValue(indexing);
+    renderHook(() => useStatus());
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(BUSY_POLL_MS * 2));
     expect(status).toHaveBeenCalledTimes(3);
   });
 
-  it('refresh() reads the status again after polling stopped', async () => {
+  it('pauses while the page is hidden and reads once right away when it becomes visible again', async () => {
+    const status = vi.spyOn(api, 'status').mockResolvedValue(ready);
+    renderHook(() => useStatus());
+    await flush();
+    setHidden(true);
+    await act(() => vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 4));
+    expect(status).toHaveBeenCalledTimes(1);
+    setHidden(false);
+    await flush();
+    expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the status again right away when a request gets 409 repo_changed', async () => {
+    const status = vi.spyOn(api, 'status').mockResolvedValue(ready);
+    renderHook(() => useStatus());
+    await flush();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: 'repo_changed', repoGen: 2 }), { status: 409 }));
+    await act(() => api.entries().catch(() => undefined));
+    await flush();
+    expect(status).toHaveBeenCalledTimes(2);
+  });
+
+  it('refresh() reads the status again', async () => {
     const status = vi.spyOn(api, 'status').mockResolvedValue(ready);
     const { result } = renderHook(() => useStatus());
     await flush();

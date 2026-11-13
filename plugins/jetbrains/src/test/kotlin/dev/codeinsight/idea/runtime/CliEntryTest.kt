@@ -81,10 +81,18 @@ class CliEntryTest {
         val repo = root.resolve("repo & %TEMP%")
         val home = root.resolve("home")
         val cmd = ServeCommand.build(node, program, repo, null, emptyMap(), home, windows = true)
-        assertEquals(listOf(node.toString(), main.toString(), "serve", "--repo", repo.toString(), "--exit-on-stdin-close"), cmd.argv)
+        assertEquals(listOf(node.toString(), main.toString(), "serve", "--repo", repo.toString(), "--lock-repo", "--exit-on-stdin-close"), cmd.argv)
+        assertEquals(listOf(node.toString(), main.toString(), "serve", "--repo", repo.toString(), "--exit-on-stdin-close"), cmd.withoutLockRepo().argv)
         assertFalse(cmd.argv.any { it.lowercase().endsWith(".cmd") || it.lowercase().contains("cmd.exe") })
         assertEquals(home, cmd.workDir)
         assertEquals("1", cmd.env["NoDefaultCurrentDirectoryInExePath"])
+    }
+
+    @Test
+    fun `an unknown --lock-repo option in serve's stderr is recognised, other errors are not`() {
+        assertTrue(ServeCommand.rejectsLockRepo(listOf("error: Unknown option '--lock-repo'. To specify a positional argument starting with a '-', place it at the end")))
+        assertFalse(ServeCommand.rejectsLockRepo(listOf("error: Unknown option '--other'")))
+        assertFalse(ServeCommand.rejectsLockRepo(listOf("error: --lock-repo needs a repository: pass --repo or run inside a git repository")))
     }
 
     @Test

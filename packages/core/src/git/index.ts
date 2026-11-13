@@ -313,6 +313,15 @@ export async function workingContentKey(repo: string, headSha: string, excludeDi
   return `${headSha}-${h.digest('hex').slice(0, 16)}`;
 }
 
+/** 没有改动时 workingContentKey 的后缀（空输入的 sha1 前 16 位） */
+const CLEAN_KEY_SUFFIX = createHash('sha1').digest('hex').slice(0, 16);
+
+/** workingContentKey 算出的内容键是否包含相对 HEAD 的改动（含未跟踪文件） */
+export function workingKeyHasChanges(contentKey: string): boolean {
+  const i = contentKey.lastIndexOf('-');
+  return i >= 0 && contentKey.slice(i + 1) !== CLEAN_KEY_SUFFIX;
+}
+
 /** 提交是否有父提交（仓库的首个提交没有） */
 export async function hasParent(repo: string, sha: string): Promise<boolean> {
   const parts = (await runGit(repo, ['rev-list', '--parents', '-n', '1', sha])).trim().split(/\s+/);
