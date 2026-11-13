@@ -159,7 +159,6 @@ export const api = {
   removeRecentRepo: (path: string) => request<unknown>('DELETE', `/api/repos/recent${qs({ path })}`),
   settings: () => request<SettingsResponse>('GET', '/api/settings'),
   saveLlmSettings: (form: LlmForm) => request<SettingsResponse>('POST', '/api/settings/llm', form),
-  resetLlmSettings: () => request<SettingsResponse>('DELETE', '/api/settings/llm'),
   testLlm: (form: LlmForm) => request<LlmTestResult>('POST', '/api/settings/llm/test', form),
   saveGeneralSettings: (p: { autoReindex: boolean }) => request<SettingsResponse>('POST', '/api/settings', p),
 };

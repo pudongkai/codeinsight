@@ -179,14 +179,6 @@ async function saveLlm(ctx: RequestContext): Promise<void> {
   sendJson(ctx.res, 200, await settingsView(ctx, settings));
 }
 
-/** DELETE /api/settings/llm：删掉用户设置里的模型服务配置，之后按环境变量和仓库配置 */
-async function deleteLlm(ctx: RequestContext): Promise<void> {
-  const settings = await updateUserSettings((s) => ({ ...s, llm: undefined }));
-  log.info('user_settings_saved', { llm: 'removed' });
-  await refreshRepoConfig(ctx.app);
-  sendJson(ctx.res, 200, await settingsView(ctx, settings));
-}
-
 /** POST /api/settings `{autoReindex}`：通用设置 */
 async function saveGeneral(ctx: RequestContext): Promise<void> {
   const autoReindex = optBool(await readJsonBody(ctx.req), 'autoReindex');
@@ -265,6 +257,5 @@ export const settingsRoutes: Route[] = [
   { method: 'GET', pattern: '/api/settings', handler: getSettings, needsRepo: false },
   { method: 'POST', pattern: '/api/settings', handler: saveGeneral, needsRepo: false },
   { method: 'POST', pattern: '/api/settings/llm', handler: saveLlm, needsRepo: false },
-  { method: 'DELETE', pattern: '/api/settings/llm', handler: deleteLlm, needsRepo: false },
   { method: 'POST', pattern: '/api/settings/llm/test', handler: testLlm, needsRepo: false },
 ];

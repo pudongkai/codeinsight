@@ -64,6 +64,13 @@ async function start(opts: HttpServerOptions): Promise<{ server: RunningHttpServ
 const saveLlm = (api: Api, body: Record<string, unknown>) => api<SettingsView>('/api/settings/llm', { method: 'POST', body });
 const testLlm = (api: Api, body: Record<string, unknown>) => api<TestResult>('/api/settings/llm/test', { method: 'POST', body });
 
+/** 从用户设置文件里去掉模型服务配置，后面的用例从未配置开始 */
+function clearUserLlm(): void {
+  const s = JSON.parse(readFileSync(userSettingsPath(), 'utf8')) as Record<string, unknown>;
+  delete s.llm;
+  writeFileSync(userSettingsPath(), JSON.stringify(s));
+}
+
 beforeAll(async () => {
   process.env.CODEINSIGHT_LOG = 'debug';
   restoreSink = setLogSink((line) => logLines.push(line));
@@ -96,7 +103,8 @@ describe('settings api without a repository', () => {
     const saved = await saveLlm(api, { provider: 'anthropic', model: 'user-model' });
     expect(saved.body.llm.model).toEqual({ value: 'user-model', source: 'user' });
     expect((await api<Status>('/api/status')).body.llm).toEqual({ provider: 'anthropic', model: 'user-model' });
-    expect((await api('/api/settings/llm', { method: 'DELETE' })).body).toMatchObject({ llm: { model: { source: 'default' } } });
+    clearUserLlm();
+    expect((await api<SettingsView>('/api/settings')).body).toMatchObject({ llm: { model: { source: 'default' } } });
   });
 
   it('saves the general settings', async () => {
@@ -204,7 +212,7 @@ describe('settings api with a repository', () => {
     await saveLlm(api, { provider: 'openai-compatible', baseUrl: fake.url, model: 'user-model-2', apiKey: KEY });
   });
 
-  it('keeps the old config for a running overview and restores env values on DELETE', async () => {
+  it('keeps the old config for a running overview', async () => {
     await saveLlm(api, { provider: 'anthropic', baseUrl: fake.url, model: 'ov-old', apiKey: KEY });
     let release!: () => void;
     gate = new Promise<void>((r) => (release = r));
@@ -221,11 +229,6 @@ describe('settings api with a repository', () => {
     });
     const models = new Set(fake.requests.filter((r) => String(r.body.model).startsWith('ov-')).map((r) => r.body.model));
     expect([...models]).toEqual(['ov-old']);
-
-    const d = await api<SettingsView>('/api/settings/llm', { method: 'DELETE' });
-    expect(d.body.llm.model).toEqual({ value: 'env-model', source: 'env', env: 'CODEINSIGHT_LLM_MODEL' });
-    expect(d.body.llm.provider.source).toBe('none');
-    expect((await api<Status>('/api/status')).body.llmConfigured).toBe(false);
   });
 
   it('never returns or logs the API key', () => {
@@ -302,7 +305,7 @@ describe('settings saved by another serve process', () => {
     expect((await saveLlm(b.api, { provider: 'openai-compatible', baseUrl: fake.url, model: 'other-proc', apiKey: KEY })).status).toBe(200);
     expect((await a.api<Status>('/api/status')).body.llm).toEqual({ provider: 'openai-compatible', model: 'other-proc' });
     expect(wsA.config.llm).toMatchObject({ model: 'other-proc' });
-    await b.api('/api/settings/llm', { method: 'DELETE' });
+    clearUserLlm();
   });
 });
 
@@ -310,7 +313,7 @@ describe('settings api auth', () => {
   it('requires the token and an allowed Origin on the new endpoints', async () => {
     const { server } = await start({ env: {} });
     const endpoints: [string, string][] = [
-      ['GET', '/api/settings'], ['POST', '/api/settings'], ['POST', '/api/settings/llm'], ['DELETE', '/api/settings/llm'],
+      ['GET', '/api/settings'], ['POST', '/api/settings'], ['POST', '/api/settings/llm'],
       ['POST', '/api/settings/llm/test'], ['POST', '/api/repo/pick-dir'],
     ];
     for (const [method, p] of endpoints) {

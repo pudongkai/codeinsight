@@ -90,7 +90,6 @@ function LlmSection({ s }: { s: SettingsForm }) {
       {problem && <div className="warn" data-testid="settings-problem">当前配置有问题：{problem}</div>}
       {s.test && <div className={s.test.ok ? 'ok-inline' : 'error-inline'} data-testid="settings-test-result">{testResultText(s.test)}</div>}
       <div className="actions">
-        <button type="button" className="small" data-testid="settings-reset" disabled={s.busy !== undefined} onClick={() => void s.reset()}>恢复为环境变量配置</button>
         <button type="button" className="small" data-testid="settings-test" disabled={s.busy !== undefined} onClick={() => void s.testConnection()}>
           {s.busy === 'test' ? '正在测试…' : '测试连接'}
         </button>

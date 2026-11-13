@@ -88,16 +88,12 @@ describe('SettingsDialog', () => {
     expect(test.mock.calls[0]![0]).toMatchObject({ apiKey: '', provider: 'openai-compatible' });
   });
 
-  it('a failed save shows the reason; "恢复为环境变量配置" calls DELETE; the auto reindex switch saves right away', async () => {
+  it('a failed save shows the reason; the auto reindex switch saves right away', async () => {
     vi.spyOn(api, 'saveLlmSettings').mockRejectedValue(new Error('invalid_param: baseUrl must be a valid URL'));
-    const reset = vi.spyOn(api, 'resetLlmSettings').mockResolvedValue(settings({ provider: { value: 'anthropic', source: 'env', env: 'CODEINSIGHT_LLM_PROVIDER' } }));
     const general = vi.spyOn(api, 'saveGeneralSettings').mockResolvedValue(settings({}, { autoReindex: true }));
     renderDialog();
     fireEvent.click(await screen.findByTestId('settings-save'));
     expect((await screen.findByTestId('settings-message')).textContent).toBe('保存失败：invalid_param: baseUrl must be a valid URL');
-    fireEvent.click(screen.getByTestId('settings-reset'));
-    await waitFor(() => expect(screen.getByTestId('settings-provider-source').textContent).toContain('环境变量 CODEINSIGHT_LLM_PROVIDER'));
-    expect(reset).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByTestId('settings-autoReindex'));
     await waitFor(() => expect(input('settings-autoReindex').checked).toBe(true));
     expect(general).toHaveBeenCalledWith({ autoReindex: true });
