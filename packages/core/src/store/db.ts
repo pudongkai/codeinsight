@@ -20,6 +20,7 @@ import { ChatTable } from './chats.js';
 import { ExtractCacheTable } from './extract-cache.js';
 import { OverviewTable } from './overviews.js';
 import { isProcessAlive } from './process.js';
+import { ProposalTable } from './proposals.js';
 import { EXTRA_SCHEMA_SQL, EXTRA_TABLES, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 import { immediateTransaction } from './transaction.js';
 
@@ -208,6 +209,8 @@ export class Store {
   readonly overviews: OverviewTable;
   /** 问答会话和消息 */
   readonly chats: ChatTable;
+  /** 问答里生成的待确认修改 */
+  readonly proposals: ProposalTable;
   /** 按文件缓存的提取结果 */
   readonly extractCache: ExtractCacheTable;
 
@@ -217,6 +220,7 @@ export class Store {
     this.rebuilt = rebuilt;
     this.overviews = new OverviewTable(db, dbPath);
     this.chats = new ChatTable(db);
+    this.proposals = new ProposalTable(db);
     this.extractCache = new ExtractCacheTable(db);
   }
 

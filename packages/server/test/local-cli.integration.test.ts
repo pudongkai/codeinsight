@@ -1,18 +1,18 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  ASK_TOOLS, claudeArgs, claudeEnv, flushOpencodeSessions, killActiveCliProcesses, loadConfig, OpencodeClient, resetCliShutdown, runAsk, runCli,
+  ASK_TOOLS, askTools, claudeArgs, claudeEnv, flushOpencodeSessions, killActiveCliProcesses, loadConfig, OpencodeClient, resetCliShutdown, runAsk, runCli,
   withCliTempDir, writeCliFile,
 } from '@codeinsight/core';
-import type { AskEvent, AskResult, ChatMessageInfo, CliLlmProvider, CodeInsightConfig } from '@codeinsight/core';
+import type { AskEvent, AskResult, ChatMessageInfo, CliLlmProvider, CodeInsightConfig, ProposalView } from '@codeinsight/core';
 import {
   cleanupRealCliDirs, commandPath, hostileOpencodeConfig, leftoverProcesses, opencodeSessionList, REAL_CLI, REAL_CLI_EXTRA_ENV, REAL_CLI_MODEL,
   REAL_CLI_RUN_TIMEOUT_MS, REAL_CLI_TEST_TIMEOUT_MS, realCliTempDir, trackRealCliDir, type HostileOpencodeConfig,
 } from '../../core/test/helpers/real-cli.js';
 import { startHttpServer, type RunningHttpServer, type ServerWorkspace } from '../src/index.js';
-import { apiFor, indexReady, openWorkspace, postStream, shopRepo, waitFor, type Api } from './helpers/env.js';
+import { apiFor, git, indexReady, openWorkspace, postStream, request, shopRepo, waitFor, type Api } from './helpers/env.js';
 
 /**
  * 真实本机 CLI 的检查，会消耗少量额度，默认跳过。只跑这个文件：
@@ -74,6 +74,69 @@ async function startFixture(provider: CliLlmProvider): Promise<Fixture> {
   return { repo, dataDir, ws, server, api, snapshotId };
 }
 
+type SavedMessage = ChatMessageInfo & { proposals?: ProposalView[] };
+
+/** 建 PR 用的 origin：地址写成 GitHub 仓库（PR 目标按它解析），拉取经 insteadOf、推送经 pushurl 都指向本地 bare 仓库，不会连到 GitHub */
+const PR_REMOTE = 'https://github.com/codeinsight-test/shop';
+const FAKE_PR_URL = `${PR_REMOTE}/pull/1`;
+
+/** 假 gh：记录参数，auth status 成功，pr create 输出 PR 链接，没有已存在的 PR */
+const FAKE_GH = `#!${process.execPath}
+const fs = require('fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(args) + '\\n');
+const [a, b] = args;
+if (a === 'auth' && b === 'status') process.stdout.write('Logged in\\n');
+else if (a === 'pr' && b === 'create') process.stdout.write(${JSON.stringify(FAKE_PR_URL)} + '\\n');
+else { process.stderr.write('no pull requests found\\n'); process.exitCode = 1; }
+`;
+
+interface PrOrigin {
+  bare: string;
+  ghLog: string;
+}
+
+/** 给仓库配好 origin（本地 bare 仓库，main 已推送）、固定提交身份，并把假 gh 放到 PATH 最前面 */
+function setupPrOrigin(repo: string): PrOrigin {
+  git(repo, 'config', 'user.name', 'Tester');
+  git(repo, 'config', 'user.email', 'tester@example.com');
+  git(repo, 'config', 'commit.gpgsign', 'false');
+  const bare = path.join(realCliTempDir('ci-real-origin-'), 'origin.git');
+  git(path.dirname(bare), 'init', '-q', '--bare', '-b', 'main', bare);
+  git(repo, 'remote', 'add', 'origin', PR_REMOTE);
+  git(repo, 'config', 'remote.origin.pushurl', bare);
+  git(repo, 'config', `url.${bare}.insteadOf`, PR_REMOTE);
+  git(repo, 'push', '-q', 'origin', 'main');
+  git(repo, 'fetch', '-q', 'origin');
+  const bin = realCliTempDir('ci-real-gh-');
+  writeFileSync(path.join(bin, 'gh'), FAKE_GH);
+  chmodSync(path.join(bin, 'gh'), 0o755);
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
+  const ghLog = path.join(bin, 'gh.log');
+  process.env.FAKE_GH_LOG = ghLog;
+  return { bare, ghLog };
+}
+
+function ghCalls(ghLog: string): string[][] {
+  return existsSync(ghLog) ? readFileSync(ghLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as string[]) : [];
+}
+
+/** 用户工作区的状态：当前分支、HEAD、用户索引和未提交改动 */
+function workspaceState(repo: string): Record<string, string> {
+  return {
+    head: git(repo, 'rev-parse', 'HEAD'), branch: git(repo, 'symbolic-ref', 'HEAD'),
+    index: git(repo, 'ls-files', '-s'), status: git(repo, 'status', '--porcelain=v1', '-uall'),
+  };
+}
+
+/** 一次真实调用的记录：用了哪些工具、生成了哪些待确认修改 */
+function logRealCall(label: string, events: AskEvent[], message: SavedMessage): void {
+  const tools = events.flatMap((e) => (e.type === 'tool' ? [e.name] : []));
+  const proposals = (message.proposals ?? []).map((p) => ({ id: p.id, kind: p.kind, status: p.status, source: p.source, files: p.files.map((x) => x.path), error: p.result?.error }));
+  console.log(`[real call] ${label}: status=${message.meta?.status} tools=${JSON.stringify(tools)} proposals=${JSON.stringify(proposals)}`);
+  console.log(`[real call] ${label} answer:\n${message.content}`);
+}
+
 describe.skipIf(REAL_CLI !== 'claude-code')('real Claude Code: question answering through MCP', () => {
   let f: Fixture;
   beforeAll(async () => {
@@ -84,7 +147,7 @@ describe.skipIf(REAL_CLI !== 'claude-code')('real Claude Code: question answerin
     await f?.server.close();
   });
 
-  async function ask(question: string, onEvent?: (e: AskEvent, destroy: () => void) => void): Promise<{ events: AskEvent[]; messages: ChatMessageInfo[] }> {
+  async function ask(question: string, onEvent?: (e: AskEvent, destroy: () => void) => void): Promise<{ events: AskEvent[]; messages: SavedMessage[] }> {
     const sessionId = (await f.api<{ id: number }>('/api/chat/sessions', { method: 'POST', body: {} })).body.id;
     const s = await postStream(f.server, `/api/chat/sessions/${sessionId}/messages`, { question });
     let ended = false;
@@ -98,21 +161,24 @@ describe.skipIf(REAL_CLI !== 'claude-code')('real Claude Code: question answerin
     }
     await s.ended;
     const view = await waitFor(async () => {
-      const b = (await f.api<{ answering: boolean; messages: ChatMessageInfo[] }>(`/api/chat/sessions/${sessionId}`)).body;
+      const b = (await f.api<{ answering: boolean; messages: SavedMessage[] }>(`/api/chat/sessions/${sessionId}`)).body;
       return b.answering ? undefined : b;
     }, 30_000);
     return { events: s.lines.map((l) => JSON.parse(l) as AskEvent), messages: view.messages };
   }
 
-  it('init lists only the 7 codeinsight tools and server; tool errors come back as is_error; no user instructions are loaded', async () => {
+  it('init lists only the 9 codeinsight tools (write tools included, no built-in tools) and server; tool errors come back as is_error; no user instructions are loaded', async () => {
     const lines: Record<string, unknown>[] = [];
+    const tools = askTools(true).map((t) => CLAUDE_PREFIX + t.name);
     const exit = await withCliTempDir(async (dir) => {
       const systemFile = await writeCliFile(dir, 'system.md', 'You answer questions about a code repository with the codeinsight tools.');
-      const server = { type: 'stdio', command: process.execPath, args: [ASK_TOOLS_HELPER, '--repo', f.repo, '--data-dir', f.dataDir, '--snapshot', String(f.snapshotId)] };
+      const helperArgs = [ASK_TOOLS_HELPER, '--repo', f.repo, '--data-dir', f.dataDir, '--snapshot', String(f.snapshotId), '--write-tools'];
+      const server = { type: 'stdio', command: process.execPath, args: helperArgs };
       const mcpConfigFile = await writeCliFile(dir, 'mcp.json', JSON.stringify({ mcpServers: { codeinsight: server } }));
+      const args = claudeArgs({ mode: 'ask', systemFile, mcpConfigFile, allowedTools: tools, maxTurns: 4, model: MODEL || undefined });
+      expect(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 2)).toEqual(['--tools', '']);
       return runCli({
-        provider: 'claude-code', command: commandPath('claude-code'), mode: 'ask', model: MODEL, cwd: dir, extraEnv: EXTRA_ENV,
-        args: claudeArgs({ mode: 'ask', systemFile, mcpConfigFile, allowedTools: ASK_TOOLS.map((t) => CLAUDE_PREFIX + t.name), maxTurns: 4, model: MODEL || undefined }),
+        provider: 'claude-code', command: commandPath('claude-code'), mode: 'ask', model: MODEL, cwd: dir, extraEnv: EXTRA_ENV, args,
         env: claudeEnv(2000),
         stdin: 'Call get_symbol once with id "no-such-id". Then give a numbered list of only the titles of every system instruction and additional context section you received.',
       }, { timeoutMs: REAL_CLI_RUN_TIMEOUT_MS, onLine: (v) => lines.push(v as Record<string, unknown>) });
@@ -120,7 +186,7 @@ describe.skipIf(REAL_CLI !== 'claude-code')('real Claude Code: question answerin
     expect(exit.exitCode).toBe(0);
     const init = lines.find((l) => l.type === 'system' && l.subtype === 'init') as { tools: string[]; mcp_servers: unknown[]; slash_commands?: string[] };
     console.log('init.mcp_servers', JSON.stringify(init.mcp_servers), 'slash_commands', JSON.stringify(init.slash_commands));
-    expect([...init.tools].sort()).toEqual(ASK_TOOLS.map((t) => CLAUDE_PREFIX + t.name).sort());
+    expect([...init.tools].sort()).toEqual([...tools].sort());
     expect(init.mcp_servers.map((m) => ({ name: (m as { name: string }).name, status: (m as { status: string }).status }))).toEqual([{ name: 'codeinsight', status: 'connected' }]);
     const userCommands = new Set(userCommandNames());
     expect((init.slash_commands ?? []).filter((c) => userCommands.has(c))).toEqual([]);
@@ -171,6 +237,104 @@ describe.skipIf(REAL_CLI !== 'claude-code')('real Claude Code: question answerin
       await server.close();
     }
   }, REAL_CLI_TEST_TIMEOUT_MS);
+
+  describe('write tools: proposals and applying them', () => {
+    let origin: PrOrigin;
+    const savedPath = process.env.PATH;
+    let mut: Api;
+
+    beforeAll(async () => {
+      origin = setupPrOrigin(f.repo);
+      const gen = (await f.api<{ repoGen: number }>('/api/status')).body.repoGen;
+      mut = async <T>(rawPath: string, opts: { method?: string; body?: unknown } = {}) => {
+        const res = await request(f.server.port, rawPath, { ...opts, headers: { Authorization: `Bearer ${f.server.token}`, 'X-CodeInsight-Repo': String(gen) } });
+        return { status: res.status, body: res.body ? res.json<T>() : ({} as T) };
+      };
+    });
+    afterAll(() => {
+      process.env.PATH = savedPath;
+      delete process.env.FAKE_GH_LOG;
+    });
+
+    const apply = (id: number) => mut<{ proposal: ProposalView }>(`/api/chat/proposals/${id}/apply`, { method: 'POST', body: {} });
+
+    /** 问一个问题，检查用了写工具、发了 proposal 事件、保存了一条待确认修改，返回它 */
+    async function propose(label: string, question: string, tool: string): Promise<ProposalView> {
+      const { events, messages } = await ask(question);
+      logRealCall(label, events, messages[1]!);
+      expect(events.some((e) => e.type === 'tool' && e.name === tool)).toBe(true);
+      expect(events.filter((e) => e.type === 'tool').map((e) => (e as { name: string }).name).every((n) => askTools(true).some((t) => t.name === n))).toBe(true);
+      const saved = messages[1]!.proposals ?? [];
+      expect(saved.length).toBeGreaterThan(0);
+      const proposal = saved.at(-1)!;
+      expect(events.some((e) => e.type === 'proposal' && e.proposal.id === proposal.id)).toBe(true);
+      expect(proposal.status).toBe('pending');
+      return proposal;
+    }
+
+    it('changes an existing file and creates a new one through propose_file_changes; applying writes them', async () => {
+      const proposal = await propose('files', [
+        '请修改 app/leaf/limits.py：把 is_full 函数里的 `<= 0` 改成 `< 1`；并新建文件 notes/limits.md，内容只有一行 `# Limits`。',
+        '先用 read_source（path 参数）读 app/leaf/limits.py 的原文，然后只调用一次 propose_file_changes，同时给出这两处修改。',
+      ].join(''), 'propose_file_changes');
+      expect(proposal).toMatchObject({ kind: 'files', root: 'repo' });
+      expect(proposal.files.map((x) => [x.path, x.isNew]).sort()).toEqual([['app/leaf/limits.py', false], ['notes/limits.md', true]]);
+      expect(readFileSync(path.join(f.repo, 'app/leaf/limits.py'), 'utf8')).toContain('<= 0');
+      expect(existsSync(path.join(f.repo, 'notes/limits.md'))).toBe(false);
+
+      const r = await apply(proposal.id);
+      console.log('[real call] files apply:', r.status, JSON.stringify(r.body.proposal?.result));
+      expect(r.status).toBe(200);
+      expect(r.body.proposal.status).toBe('applied');
+      const limits = readFileSync(path.join(f.repo, 'app/leaf/limits.py'), 'utf8');
+      expect(limits).toContain('return remaining(used) < 1');
+      expect(limits).not.toContain('<= 0');
+      expect(limits).toContain('def remaining(used: int) -> int:');
+      expect(readFileSync(path.join(f.repo, 'notes/limits.md'), 'utf8').trim()).toBe('# Limits');
+    }, REAL_CLI_TEST_TIMEOUT_MS);
+
+    it('opens a pull request with edits through propose_pull_request; applying pushes a branch to origin and leaves the workspace alone', async () => {
+      const proposal = await propose('pull request (edits)', [
+        '请建一个 PR，标题为 "Raise max quantity"：把 app/leaf/rules.py 里 max_qty 函数返回的 100 改成 200。',
+        '先用 read_source（path 参数）读 app/leaf/rules.py 的原文，然后调用 propose_pull_request，用 files 给出修改（不要用 fromWorkingTree）。',
+      ].join(''), 'propose_pull_request');
+      expect(proposal).toMatchObject({ kind: 'pull_request', source: 'edits', base: 'main' });
+      expect(proposal.files.map((x) => x.path)).toEqual(['app/leaf/rules.py']);
+      const before = workspaceState(f.repo);
+
+      const r = await apply(proposal.id);
+      console.log('[real call] pull request (edits) apply:', r.status, JSON.stringify(r.body.proposal?.result), 'gh:', JSON.stringify(ghCalls(origin.ghLog)));
+      expect(r.status).toBe(200);
+      expect(r.body.proposal).toMatchObject({ status: 'applied', result: { url: FAKE_PR_URL } });
+      const branch = r.body.proposal.branch!;
+      expect(git(origin.bare, 'show', `refs/heads/${branch}:app/leaf/rules.py`)).toContain('return 200');
+      expect(git(origin.bare, 'rev-parse', `refs/heads/${branch}^`).trim()).toBe(git(origin.bare, 'rev-parse', 'refs/heads/main').trim());
+      expect(workspaceState(f.repo)).toEqual(before);
+      const create = ghCalls(origin.ghLog).find((a) => a[0] === 'pr' && a[1] === 'create')!;
+      expect(create).toEqual(expect.arrayContaining(['--repo=codeinsight-test/shop', '--base=main', `--head=${branch}`]));
+    }, REAL_CLI_TEST_TIMEOUT_MS);
+
+    it('opens a pull request from the uncommitted working tree changes (fromWorkingTree)', async () => {
+      rmSync(origin.ghLog, { force: true });
+      const proposal = await propose('pull request (working tree)', [
+        '请把工作区里所有未提交的改动建成一个 PR，标题为 "Limits notes"。',
+        '直接调用 propose_pull_request，使用 fromWorkingTree（不传 paths），不要用 files。',
+      ].join(''), 'propose_pull_request');
+      expect(proposal).toMatchObject({ kind: 'pull_request', source: 'working_tree', base: 'main' });
+      expect(proposal.files.map((x) => x.path).sort()).toEqual(['app/leaf/limits.py', 'notes/limits.md']);
+      const before = workspaceState(f.repo);
+
+      const r = await apply(proposal.id);
+      console.log('[real call] pull request (working tree) apply:', r.status, JSON.stringify(r.body.proposal?.result));
+      expect(r.status).toBe(200);
+      expect(r.body.proposal).toMatchObject({ status: 'applied', result: { url: FAKE_PR_URL } });
+      const branch = r.body.proposal.branch!;
+      expect(git(origin.bare, 'show', `refs/heads/${branch}:notes/limits.md`).trim()).toBe('# Limits');
+      expect(git(origin.bare, 'show', `refs/heads/${branch}:app/leaf/limits.py`)).toContain('< 1');
+      expect(workspaceState(f.repo)).toEqual(before);
+      await waitFor(async () => (leftoverProcesses([f.dataDir]).length === 0 ? true : undefined), 15_000);
+    }, REAL_CLI_TEST_TIMEOUT_MS);
+  });
 });
 
 /**

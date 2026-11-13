@@ -164,4 +164,12 @@ describe('codeinsight serve', () => {
   it('rejects an invalid --port', async () => {
     await expect(startServe(['--port', 'abc'])).rejects.toThrow(/--port/);
   });
+
+  it('refuses to start with an --add-dir that is missing or a system directory', async () => {
+    const repo = makeRepo();
+    await expect(startServe(['--repo', repo, '--data-dir', tempDir('ci-serve-data-'), '--add-dir', path.join(repo, 'nope')], { staticDir: tempDir('ci-serve-web-') }))
+      .rejects.toThrow(/--add-dir .*not an existing directory/);
+    await expect(startServe(['--repo', repo, '--data-dir', tempDir('ci-serve-data-'), '--add-dir', '/usr'], { staticDir: tempDir('ci-serve-web-') }))
+      .rejects.toThrow(/--add-dir \/usr: system directories/);
+  });
 });

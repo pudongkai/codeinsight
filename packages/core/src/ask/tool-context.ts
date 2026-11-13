@@ -4,8 +4,9 @@ import type { OverviewReport } from '../overview/types.js';
 import type { EntryInfo } from '../report/types.js';
 import type { DataDirLayout } from '../store/data-dir.js';
 import type { Store } from '../store/db.js';
+import type { ProposalDrafts } from './proposal-drafts.js';
 
-/** 问答工具的执行环境：都只读、都作用于当前快照 */
+/** 问答工具的执行环境：查询工具都只读、都作用于当前快照 */
 export interface AskToolContext {
   repo: string;
   store: Store;
@@ -17,6 +18,17 @@ export interface AskToolContext {
   overview?: OverviewReport;
   /** 中止时逐个读文件的工具（grep_code）在读完当前文件后停下 */
   signal?: AbortSignal;
+  /** 给出时提供两个写工具（只生成待确认的修改，不写盘） */
+  write?: WriteToolsContext;
+}
+
+/** 写工具的环境：仓库以外的可写目录（启动时 --add-dir 指定、已检查过的真实路径，第 i 个名为 dir<i+1>） */
+export interface WriteToolsContext {
+  dirs: string[];
+  /** 问答所在的会话：同会话里还在等确认的修改涉及同一文件或分支时并入新的修改 */
+  sessionId?: number;
+  /** 本次问答里写工具已生成的结果，第一次调用写工具时建立；同一个 WriteToolsContext 内的调用据此叠加 */
+  drafts?: ProposalDrafts;
 }
 
 /** 一次工具调用的结果：返回给模型的文字，以及其中出现的符号（收集成回答的 refs） */

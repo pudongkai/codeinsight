@@ -46,6 +46,9 @@ describe('config', () => {
     expect(cfg.moduleDepth).toBe(3);
     expect(cfg.llm).toBeUndefined();
     expect(dataDirInRepo(cfg)).toBe('.codeinsight');
+    // 以 .. 开头的目录名仍在仓库内
+    expect(dataDirInRepo({ repo, dataDir: path.join(repo, '..data') })).toBe('..data');
+    expect(dataDirInRepo({ repo, dataDir: path.join(repo, '..', 'data') })).toBeUndefined();
   });
 
   it('merges file, env and cli options', async () => {

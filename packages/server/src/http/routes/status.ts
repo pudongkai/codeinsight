@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises';
-import { envTurnsOff, isCliProvider, LIMIT_ENV, llmSources, loadLlmSources, log, readUserSettings, userSettingsPath, workingKeyHasChanges } from '@codeinsight/core';
+import { envTurnsOff, isCliProvider, LIMIT_ENV, llmSources, loadLlmSources, log, readUserSettings, userSettingsPath, workingKeyHasChanges, writeScopeView } from '@codeinsight/core';
 import type { LlmConfig, LlmSource, SnapshotRow, UserSettings } from '@codeinsight/core';
 import { jobView } from '../../jobs/index-jobs.js';
 import { overviewStale } from '../../jobs/overview-jobs.js';
@@ -116,7 +116,10 @@ async function settingsOrEmpty(app: AppContext): Promise<UserSettings> {
   return settings;
 }
 
-/** 仓库、Node 版本、LLM 配置和源码发送开关、索引进度和当前快照、最近的审查和当前概览（不含报告正文）、代码变化 */
+/**
+ * 仓库、Node 版本、LLM 配置和源码发送开关、索引进度和当前快照、最近的审查和当前概览（不含报告正文）、代码变化，
+ * 以及写入范围（当前仓库和 --add-dir 目录的名字，不含绝对路径）
+ */
 async function status(ctx: RequestContext): Promise<void> {
   const { app } = ctx;
   const settings = await settingsOrEmpty(app);
@@ -124,7 +127,10 @@ async function status(ctx: RequestContext): Promise<void> {
   // 本接口不计入仓库的 inflight，等待之后取当前仓库，之后同步读它的 Store，不会读到已关闭的旧仓库
   const repo = app.repo;
   const fields = repo ? repoFields(repo, settings, app.env, autoReindex) : await noRepoFields(app, settings, autoReindex);
-  sendJson(ctx.res, 200, { ...fields, node: process.version, repoLocked: app.locked, dirPickerAvailable: app.dirPicker.tool !== undefined && !app.locked });
+  sendJson(ctx.res, 200, {
+    ...fields, node: process.version, repoLocked: app.locked, dirPickerAvailable: app.dirPicker.tool !== undefined && !app.locked,
+    writeScope: writeScopeView(app.writableDirs, repo !== undefined),
+  });
 }
 
 export const statusRoutes: Route[] = [{ method: 'GET', pattern: '/api/status', handler: status, needsRepo: false }];

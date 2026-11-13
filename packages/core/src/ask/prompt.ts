@@ -25,6 +25,33 @@ const RULES = [
 
 const NO_SOURCE_RULE = '- Source sending is turned off: read_source returns only signatures, docstring first lines and locations, and grep_code returns only locations. Do not ask for code bodies.';
 
+const WRITE_RULE = [
+  '- You cannot change files yourself. When the user asks to change or create files, call propose_file_changes;',
+  'for a pull request, call propose_pull_request. Edit existing files with exact old/new snippets copied from',
+  'read_source, without the line-number prefix. A later call can keep editing a file proposed earlier in this answer',
+  '(its old text may quote what you added), and pull request calls with the same branch add to one pull request.',
+  'The user reviews and applies proposals in the UI. Never say a change was made or a PR exists.',
+].join(' ');
+
+const WRITE_NO_SOURCE_RULE = [
+  '- You cannot change files yourself. When the user asks to change or create files, call propose_file_changes;',
+  'for a pull request, call propose_pull_request. Source sending is turned off, so you cannot see file contents:',
+  'propose_file_changes accepts only create (new files) and propose_pull_request accepts only fromWorkingTree.',
+  'The user reviews and applies proposals in the UI. Never say a change was made or a PR exists.',
+].join(' ');
+
+/** 可写位置：当前仓库和 --add-dir 目录的别名，目录只给最后一级名字 */
+function writableRule(dirNames: readonly string[]): string {
+  const dirs = dirNames.map((n, i) => `dir${i + 1} (${n})`);
+  const extra = dirs.length > 0 ? `; ${dirs.join(', ')} (new files only)` : '';
+  return `- Writable locations: repo (this repository)${extra}. Other paths are rejected.`;
+}
+
+/** 提供写工具时追加的规则 */
+export function writeRules(sendSource: boolean, dirNames: readonly string[]): string[] {
+  return [sendSource ? WRITE_RULE : WRITE_NO_SOURCE_RULE, writableRule(dirNames)];
+}
+
 /** 概览的系统简介和模块列表（id、名称、职责），超过上限时只列到上限为止 */
 export function overviewContext(r: OverviewReport): string {
   const head = ['System overview (generated earlier; may be slightly out of date):'];
@@ -39,8 +66,10 @@ export function overviewContext(r: OverviewReport): string {
   return text;
 }
 
-export function askSystemPrompt(opts: { sendSource: boolean; overview?: OverviewReport }): string {
-  const parts = [[...RULES, ...(opts.sendSource ? [] : [NO_SOURCE_RULE])].join('\n')];
+/** writeDirs：提供写工具时给出（--add-dir 目录的最后一级名字，可以为空）；不给时没有写工具的规则 */
+export function askSystemPrompt(opts: { sendSource: boolean; overview?: OverviewReport; writeDirs?: readonly string[] }): string {
+  const write = opts.writeDirs ? writeRules(opts.sendSource, opts.writeDirs) : [];
+  const parts = [[...RULES, ...(opts.sendSource ? [] : [NO_SOURCE_RULE]), ...write].join('\n')];
   if (opts.overview) parts.push(overviewContext(opts.overview));
   return parts.join('\n\n');
 }

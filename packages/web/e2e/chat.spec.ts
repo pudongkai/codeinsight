@@ -6,6 +6,9 @@ import { shopRepo, startServe, tempDir, type Serve } from './helpers/cli';
 test.describe.configure({ mode: 'serial' });
 
 const STOP_QUESTION = '这个问题会被停止';
+const LONG_QUESTION = '给一个很长的回答';
+/** 一条比视口高得多的回答，用来检查对话区自己滚动 */
+const LONG_ANSWER = Array.from({ length: 80 }, (_, i) => `第 ${i + 1} 段说明。`).join('\n\n');
 /** 文字分段慢慢发出，页面上能看到逐步出现的回答 */
 const SLOW = { deltaChars: 4, chunkChars: 40, delayMs: 80 };
 
@@ -19,6 +22,7 @@ function firstSymbol(result: string) {
 /** 第一轮让模型搜索 refund_order，第二轮根据搜索结果回答并引用符号和源码位置；“停止”用例的问题写一点文字后停住 */
 function reply(req: Parameters<typeof firstUserText>[0]) {
   if (firstUserText(req).includes(STOP_QUESTION)) return { text: '正在查找相关代码', hang: true };
+  if (firstUserText(req).includes(LONG_QUESTION)) return { text: LONG_ANSWER };
   const results = toolResults(req);
   if (results.length === 0) return { toolCalls: [{ name: 'search_symbols', input: { query: 'refund_order' } }] };
   const s = firstSymbol(results[0]!);
@@ -114,4 +118,46 @@ test('after reloading the page the sessions and answers are still there', async 
   await expect(answer).toHaveAttribute('data-status', 'done');
   await expect(answer.getByTestId('sym-link')).toHaveText('refund_order');
   await expect(answer.getByTestId('tool-step')).toHaveText('搜索符号 refund_order');
+});
+
+test('with a long conversation the input stays at the bottom of the viewport and the session list stays put', async ({ page }) => {
+  await openChat(page);
+  await page.getByTestId('ask-notice-accept').click();
+  await page.getByTestId('session-new').click();
+  await ask(page, LONG_QUESTION);
+  const answer = page.getByTestId('chat-answer');
+  await expect(answer).toHaveAttribute('data-status', 'done');
+  await expect(answer.getByTestId('answer-text')).toContainText('第 80 段说明。');
+  const viewport = page.viewportSize()!;
+  const composer = page.locator('.chat-composer');
+  const box = (await composer.boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  expect(box.y + box.height).toBeGreaterThan(viewport.height - 60);
+  // 回答完自动停在底部，最后一段可见
+  await expect(answer.getByText('第 80 段说明。')).toBeInViewport();
+  const list = page.getByTestId('session-list');
+  const before = (await list.boundingBox())!;
+  const messages = page.getByTestId('chat-messages');
+  await messages.hover();
+  await page.mouse.wheel(0, -3000);
+  await expect(page.getByTestId('chat-to-bottom')).toBeVisible();
+  await page.mouse.wheel(0, 3000);
+  await page.evaluate(() => window.scrollTo(0, 10_000));
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect((await list.boundingBox())!.y).toBe(before.y);
+  expect((await composer.boundingBox())!.y).toBe(box.y);
+});
+
+test('the collapsed session list stays collapsed after reloading', async ({ page }) => {
+  await openChat(page);
+  await expect(page.getByTestId('session-item').first()).toBeVisible();
+  await page.getByTestId('session-collapse').click();
+  await expect(page.getByTestId('session-item')).toHaveCount(0);
+  const messages = (await page.getByTestId('chat-messages').boundingBox())!;
+  expect(messages.x).toBeLessThan(100);
+  await openChat(page);
+  await expect(page.getByTestId('session-expand')).toBeVisible();
+  await expect(page.getByTestId('session-item')).toHaveCount(0);
+  await page.getByTestId('session-expand').click();
+  await expect(page.getByTestId('session-item').first()).toBeVisible();
 });

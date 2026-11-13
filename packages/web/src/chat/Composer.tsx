@@ -1,4 +1,6 @@
 import { isQuestionTooLong, MAX_QUESTION_CHARS } from '@codeinsight/core/ask/events';
+import type { StatusResponse } from '../api/types';
+import { WriteScopeNote } from './WriteScopeNote';
 
 interface Props {
   draft: string;
@@ -8,10 +10,12 @@ interface Props {
   blocked: boolean;
   onSend(question: string): void;
   onStop(): void;
+  /** 助手可以提出修改的范围，显示在输入框上方 */
+  writeScope?: StatusResponse['writeScope'];
 }
 
 /** 输入框和发送 / 停止按钮；Enter 发送，Shift+Enter 换行 */
-export function Composer({ draft, onDraft, answering, blocked, onSend, onStop }: Props) {
+export function Composer({ draft, onDraft, answering, blocked, onSend, onStop, writeScope }: Props) {
   const tooLong = isQuestionTooLong(draft);
   const canSend = draft.trim() !== '' && !answering && !blocked && !tooLong;
   const send = () => {
@@ -19,6 +23,7 @@ export function Composer({ draft, onDraft, answering, blocked, onSend, onStop }:
   };
   return (
     <div className="chat-composer">
+      <WriteScopeNote scope={writeScope} />
       <textarea data-testid="chat-input" rows={3} value={draft} placeholder="问一个关于这份代码的问题，如“退款流程怎么走”"
         onChange={(e) => onDraft(e.target.value)}
         onKeyDown={(e) => {

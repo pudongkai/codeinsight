@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ASK_TOOLS, buildSnapshot, resetCliShutdown, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult } from '@codeinsight/core';
+import { ASK_TOOLS, buildSnapshot, resetCliShutdown, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult, WRITE_TOOLS } from '@codeinsight/core';
 import type { AskEvent, AskToolContext, ChatMessageInfo } from '@codeinsight/core';
 import { askToolContext, startHttpServer, type RunningHttpServer, type ServerWorkspace } from '../src/index.js';
 import { apiFor, indexReady, openWorkspace, postStream, shopRepo, tempDir, waitFor, type Api } from './helpers/env.js';
@@ -72,6 +72,46 @@ describe('codeinsight mcp --ask-tools', () => {
       expect(t.inputSchema).toEqual(ASK_TOOLS.find((a) => a.name === t.name)!.inputSchema);
       expect(t.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
     }
+  });
+
+  it('--write-tools adds the two write tools, not marked read-only; without it they are not listed', async () => {
+    const outside = tempDir('ci-ask-tools-writable-');
+    const client = await connect(['--write-tools', '--writable-dir', outside]);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual([...ASK_TOOLS, ...WRITE_TOOLS].map((t) => t.name));
+    for (const t of tools.filter((x) => WRITE_TOOLS.some((w) => w.name === x.name))) {
+      expect(t.inputSchema).toEqual(WRITE_TOOLS.find((w) => w.name === t.name)!.inputSchema);
+      expect(t.annotations?.readOnlyHint).toBeUndefined();
+    }
+    const ok = await client.callTool({ name: 'propose_file_changes', arguments: { root: 'dir1', summary: 's', files: [{ path: 'n.md', create: 'x' }] } });
+    expect(ok.isError).toBeFalsy();
+    expect(text(ok)).toMatch(/^Proposal ready \(change #1\): 1 files\./);
+    expect(existsSync(path.join(outside, 'n.md'))).toBe(false);
+    // 同一个 MCP 进程里后面的调用在前面生成的内容上继续修改
+    const more = await client.callTool({ name: 'propose_file_changes', arguments: { root: 'dir1', summary: 's', files: [{ path: 'n.md', edits: [{ old: 'x', new: 'x2' }] }] } });
+    expect(more.isError).toBeFalsy();
+    expect(text(more)).toContain('(change #2)');
+    expect(text(more)).toContain('merged with earlier change #1 into one proposal');
+    const bad = await client.callTool({ name: 'propose_file_changes', arguments: { summary: 's', files: [{ path: '.git/hooks/x', create: 'x' }] } });
+    expect(bad.isError).toBe(true);
+    expect(text(bad)).toMatch(/^error: write_not_allowed: /);
+    const plain = await (await connect()).listTools();
+    expect(plain.tools.map((t) => t.name)).toEqual(ASK_TOOLS.map((t) => t.name));
+  });
+
+  it('with --session merges a pending proposal of that session touching the same file', async () => {
+    const outside = tempDir('ci-ask-tools-session-');
+    const sessionId = ws.store.chats.createSession('mcp');
+    const messageId = ws.store.chats.addMessage(sessionId, 'assistant', 'a', null);
+    const file = { path: 'notes-mcp.md', isNew: true, content: 'base\n', baseSha1: null };
+    ws.store.proposals.insert(sessionId, messageId, { kind: 'files', status: 'pending', payload: { root: 'repo', rootPath: repo, summary: 'earlier', files: [file] } });
+    const call = { name: 'propose_file_changes', arguments: { summary: 's', files: [{ path: 'notes-mcp.md', edits: [{ old: 'base', new: 'base+' }] }] } };
+    const merged = await (await connect(['--write-tools', '--writable-dir', outside, '--session', String(sessionId)])).callTool(call);
+    expect(merged.isError).toBeFalsy();
+    expect(text(merged)).toContain('merged with 1 pending proposal(s) from earlier answers');
+    // 不带 --session 时不看会话里的修改，文件不存在
+    const plain = await (await connect(['--write-tools', '--writable-dir', outside])).callTool(call);
+    expect(text(plain)).toMatch(/^error: not_found: /);
   });
 
   it('search_symbols and read_source return the same text as runAskTool', async () => {

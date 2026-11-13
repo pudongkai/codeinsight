@@ -3,7 +3,7 @@
 // 第 n 次运行用第 n 项（超出时用最后一项），次数按 FAKE_CLI_RECORD 里已有的行数算。
 // 每次运行把 pid、argv、stdin、cwd、PWD、环境变量名、FAKE_CLI_RECORD_ENV 列出的变量值、系统提示文件的权限和内容、
 // MCP 配置文件的权限和内容追加一行 JSON 到 FAKE_CLI_RECORD。
-// 问答场景（stream、stream-no-partial、stream-then-hang）按 stream-json 格式输出文字增量、工具调用和工具结果，
+// 问答场景（stream、stream-no-partial、stream-then-hang、stream-write）按 stream-json 格式输出文字增量、工具调用和工具结果，
 // 不启动 MCP 服务；工具结果文字取 FAKE_CLI_TOOL_RESULT，FAKE_CLI_NO_USAGE=1 时 result 行不带用量，
 // FAKE_CLI_TOOL_STRING=1 时 tool_result 的 content 是字符串（Claude Code 对 MCP 工具结果的实际格式）。
 import { spawn } from 'node:child_process';
@@ -82,6 +82,32 @@ function askStream(partial) {
   result({ result: '退款由 refund 处理。', num_turns: 2, ...(process.env.FAKE_CLI_NO_USAGE === '1' ? { usage: undefined, total_cost_usd: undefined } : {}) });
 }
 
+/** 调两次写工具：第一次成功（结果文字可用 FAKE_CLI_WRITE_RESULT 替换），第二次返回 write_not_allowed */
+function askWriteStream() {
+  init();
+  message(true, '生成修改。', [
+    { id: 'tw_1', name: 'propose_file_changes', input: { summary: 's', files: [{ path: 'notes/a.md', create: 'SECRET-CONTENT-1' }] } },
+    { id: 'tw_2', name: 'propose_file_changes', input: { root: 'dir9', summary: 's', files: [{ path: 'b.md', create: 'SECRET-CONTENT-2' }] } },
+  ]);
+  toolResult('tw_1', process.env.FAKE_CLI_WRITE_RESULT ?? 'Proposal ready (change #1): 1 files. The user must review and apply it in the UI; nothing has been written yet.');
+  toolResult('tw_2', 'error: write_not_allowed: unknown root "dir9"; writable roots: repo', true);
+  message(true, '请确认。');
+  result({ result: '请确认。', num_turns: 2 });
+}
+
+/** 并行的两次写调用：开始顺序是先改后建，工具服务实际先执行了后一个（结果里的 change 编号反过来） */
+function askWriteParallel() {
+  init();
+  message(true, '生成修改。', [
+    { id: 'tp_1', name: 'propose_file_changes', input: { summary: 'edit', files: [{ path: 'docs/par.md', edits: [{ old: 'v1', new: 'v2' }] }] } },
+    { id: 'tp_2', name: 'propose_file_changes', input: { summary: 'create', files: [{ path: 'docs/par.md', create: 'v1\n' }] } },
+  ]);
+  toolResult('tp_1', 'Proposal ready (change #2): 1 files. The user must review and apply it in the UI; nothing has been written yet.');
+  toolResult('tp_2', 'Proposal ready (change #1): 1 files. The user must review and apply it in the UI; nothing has been written yet.');
+  message(true, '请确认。');
+  result({ result: '请确认。', num_turns: 2 });
+}
+
 const scenarios = {
   'ok-text': () => { init(); result({ result: process.env.FAKE_CLI_TEXT ?? 'OK' }); },
   'ok-structured': () => {
@@ -136,6 +162,8 @@ const scenarios = {
   hang,
   'slow-then-hang': () => { out({ type: 'system', subtype: 'init', model: 'claude-fake-1' }); hang(); },
   stream: () => askStream(true),
+  'stream-write': askWriteStream,
+  'stream-write-parallel': askWriteParallel,
   'stream-no-partial': () => askStream(false),
   'stream-then-hang': () => { init(); message(true, '已经收到的部分'); hang(); },
   'spawn-grandchild': () => {

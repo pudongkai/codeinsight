@@ -8,10 +8,12 @@ import { logCliExit, logCliFailure } from '../llm/cli/process.js';
 import { LlmTruncatedError, type CliError } from '../llm/index.js';
 import { log } from '../log.js';
 import type { ChatTurn } from '../store/chats.js';
-import { addRefsByIds, appendText, ASK_MAX_TOKENS, ASK_TIMEOUT_MS, emit, failure, type AskRun, type AskToolServer, type LoopEnd } from './agent.js';
+import { addRefsByIds, appendText, ASK_MAX_TOKENS, ASK_TIMEOUT_MS, emit, failure, trackWrite, type AskRun, type AskToolServer, type LoopEnd } from './agent.js';
+import type { PendingWrite } from './save-proposals.js';
 import type { AskLimitReason, AskToolError, AskUsage } from './events.js';
 import { LIMIT_EMPTY_ANSWER, TRUNCATED_ANSWER_NOTE } from './prompt.js';
-import { ASK_TOOLS } from './tools.js';
+import { redactWriteArgs } from './redact.js';
+import { askTools, changeNumber } from './tools.js';
 
 /** 两次输出之间的最长间隔 */
 export const CLI_ASK_IDLE_TIMEOUT_MS = 120_000;
@@ -25,7 +27,7 @@ const CLI_NOTE = [
   `(such as ${CLAUDE_TOOL_PREFIX} or ${OPENCODE_TOOL_PREFIX}) but they are the tools described above.`,
 ].join(' ');
 
-const TOOL_ERRORS = new Set<AskToolError>(['not_found', 'path_not_allowed', 'file_changed', 'file_too_large', 'invalid_args', 'overview_missing', 'internal_error']);
+const TOOL_ERRORS = new Set<AskToolError>(['not_found', 'path_not_allowed', 'file_changed', 'file_too_large', 'invalid_args', 'overview_missing', 'write_not_allowed', 'internal_error']);
 /** 工具结果里符号行的开头（symbolLine 的格式 `<id> <kind> <qualifiedName> @ <path>:<line>`） */
 const SYMBOL_LINE = /^\s*(\S+) \S+ \S+ @ \S+:\d/;
 
@@ -36,19 +38,24 @@ export function cliAskPrompt(history: ChatTurn[], question: string): string {
   return `之前的对话：\n\n${turns}\n\n当前问题：${question}`;
 }
 
-/** ask-tools 服务的参数：调用方给的命令加上仓库、数据目录、快照和上限 */
+/** ask-tools 服务的参数：调用方给的命令加上仓库、数据目录、快照和上限；提供写工具时加上开关和可写目录 */
 export function toolServerArgs(run: AskRun, server: AskToolServer): string[] {
   const { repo, layout, snapshot, config } = run.opts;
+  const w = run.ctx.write;
+  const write = w ? ['--write-tools', ...w.dirs.flatMap((d) => ['--writable-dir', d]), ...(w.sessionId !== undefined ? ['--session', String(w.sessionId)] : [])] : [];
   return [
     ...server.args, '--repo', repo, '--data-dir', layout.root, '--snapshot', String(snapshot.id),
-    ...(run.ctx.sendSource ? [] : ['--no-source']), '--max-tool-chars', String(config.ask.maxToolChars),
+    ...(run.ctx.sendSource ? [] : ['--no-source']), '--max-tool-chars', String(config.ask.maxToolChars), ...write,
   ];
 }
 
 interface PendingTool {
   name: string;
+  /** 写工具已去掉文件内容 */
   args: Record<string, unknown>;
   started: number;
+  /** 写工具调用：原始参数，成功后标为 ok */
+  write?: PendingWrite;
 }
 
 interface StreamState {
@@ -79,11 +86,24 @@ function objectArgs(input: unknown): Record<string, unknown> {
 }
 
 function toolStarted(st: StreamState, id: string, rawName: string, input: unknown, prefix: string): PendingTool {
-  const tool = { name: rawName.startsWith(prefix) ? rawName.slice(prefix.length) : rawName, args: objectArgs(input), started: Date.now() };
+  const name = rawName.startsWith(prefix) ? rawName.slice(prefix.length) : rawName;
+  const raw = objectArgs(input);
+  const write = trackWrite(st.run, name, raw);
+  const tool: PendingTool = { name, args: redactWriteArgs(name, raw), started: Date.now(), ...(write ? { write } : {}) };
   st.pending.set(id, tool);
   st.newMessage = true;
   emit(st.run, { type: 'tool', name: tool.name, args: tool.args });
   return tool;
+}
+
+/** 去掉 CLI 可能给工具结果加的外层包装（`<tool_use_error>` 标签、`Error: ` 前缀） */
+function unwrapToolText(text: string): string {
+  return text.trim().replace(/^<tool_use_error>\s*/, '').replace(/\s*<\/tool_use_error>$/, '').replace(/^Error:\s*(?=error: )/, '');
+}
+
+/** 工具没有成功：CLI 标了出错，或结果文字以 `error: ` 开头（含超过上限被跳过的 `error: skipped: …`） */
+export function toolCallFailed(text: string, isError: boolean): boolean {
+  return isError || unwrapToolText(text).startsWith('error: ');
 }
 
 /**
@@ -91,7 +111,7 @@ function toolStarted(st: StreamState, id: string, rawName: string, input: unknow
  * 认不出错误码但 CLI 标了出错时为 internal_error
  */
 export function toolErrorOf(text: string, isError: boolean): AskToolError | undefined {
-  const body = text.trim().replace(/^<tool_use_error>\s*/, '').replace(/\s*<\/tool_use_error>$/, '').replace(/^Error:\s*(?=error: )/, '');
+  const body = unwrapToolText(text);
   const code = /^error: ([a-z_]+):/.exec(body)?.[1] as AskToolError | undefined;
   if (code && TOOL_ERRORS.has(code)) return code;
   return isError ? 'internal_error' : undefined;
@@ -101,6 +121,11 @@ export function toolErrorOf(text: string, isError: boolean): AskToolError | unde
 function toolFinished(st: StreamState, tool: PendingTool, text: string, isError: boolean, ms = Date.now() - tool.started): void {
   const code = toolErrorOf(text, isError);
   const error = code ? { error: code } : {};
+  if (tool.write && !toolCallFailed(text, isError)) {
+    tool.write.ok = true;
+    const seq = changeNumber(unwrapToolText(text));
+    if (seq !== undefined) tool.write.seq = seq;
+  }
   const { run } = st;
   run.toolChars += text.length;
   run.toolCalls.push({ name: tool.name, args: tool.args, resultChars: text.length, ms, ...error });
@@ -250,7 +275,7 @@ async function claudePlan(st: StreamState, client: ClaudeCodeClient, dir: string
   const spec: CliSpec = {
     provider: 'claude-code', command: client.opts.command, mode: 'ask', model: client.model, cwd: dir, extraEnv: client.opts.extraEnv,
     args: claudeArgs({
-      mode: 'ask', systemFile, mcpConfigFile, allowedTools: ASK_TOOLS.map((t) => `${CLAUDE_TOOL_PREFIX}${t.name}`),
+      mode: 'ask', systemFile, mcpConfigFile, allowedTools: askTools(run.ctx.write !== undefined).map((t) => `${CLAUDE_TOOL_PREFIX}${t.name}`),
       maxTurns: run.opts.config.ask.maxRounds + 1, model: client.model,
     }),
     env: claudeEnv(ASK_MAX_TOKENS), stdin: st.prompt,

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { effectiveSendSource, type CodeInsightConfig } from '../config/index.js';
 import { chatWithLog, type ChatMessage, type ChatResult, type ToolCall } from '../llm/chat.js';
 import { isCliClient, LlmError, ToolsUnsupportedError, type LlmClient } from '../llm/index.js';
@@ -10,16 +11,19 @@ import { symbolRef } from '../review/impact.js';
 import type { DataDirLayout } from '../store/data-dir.js';
 import type { ChatTurn } from '../store/chats.js';
 import type { Store } from '../store/db.js';
-import type {
-  AskErrorCode, AskEvent, AskLimitReason, AskMessageMeta, AskStatus, AskToolCallRecord, AskUsage,
+import { proposalView, type NewProposal, type ProposalRow } from '../store/proposals.js';
+import {
+  isWriteTool, type AskErrorCode, type AskEvent, type AskLimitReason, type AskMessageMeta, type AskStatus, type AskToolCallRecord, type AskUsage,
 } from './events.js';
 import { runCliAsk } from './cli-agent.js';
 import { symbolLinkIds } from './links.js';
 import {
   askSystemPrompt, initialMessages, LIMIT_EMPTY_ANSWER, LIMIT_PROMPT, TRUNCATED_ANSWER_NOTE, TRUNCATED_ARGS_PROMPT, trimHistory,
 } from './prompt.js';
-import { entriesOf, type AskToolContext } from './tool-context.js';
-import { ASK_TOOLS, invalidArgsRun, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult } from './tools.js';
+import { redactWriteArgs } from './redact.js';
+import { pinProposalTrees, proposalLogFields, rebuildProposals, type PendingWrite } from './save-proposals.js';
+import { entriesOf, type AskToolContext, type WriteToolsContext } from './tool-context.js';
+import { askTools, invalidArgsRun, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult } from './tools.js';
 
 /** 每轮的输出上限 */
 export const ASK_MAX_TOKENS = 4096;
@@ -45,6 +49,8 @@ export interface AskOptions {
   timeoutMs?: number;
   /** 问答工具 MCP 服务的启动命令（`codeinsight mcp --ask-tools`）；本机 CLI 问答必须有 */
   toolServer?: AskToolServer;
+  /** 提供写工具（serve 发起的问答）；只在同时给了 sessionId 时生效。dirs 为启动时检查过的 --add-dir 真实路径 */
+  writeTools?: WriteToolsContext;
 }
 
 export interface AskToolServer {
@@ -58,6 +64,8 @@ export interface AskResult {
   meta: AskMessageMeta;
   /** 保存到会话时回答那条消息的 id */
   messageId?: number;
+  /** 写工具调用的原始参数（含文件内容），只在内存里交给调用方，不进事件和 meta */
+  pendingWrites: PendingWrite[];
 }
 
 export type AskClientResult = { client: LlmClient } | { code: 'llm_not_configured'; message: string };
@@ -91,6 +99,16 @@ export interface AskRun {
   refs: Map<string, SymbolRef>;
   /** 任一轮没有 usage 时为 null */
   usage: AskUsage | null;
+  /** 写工具调用的原始参数（含文件内容，只在内存里），保存回答时据此重新生成待确认的修改 */
+  pendingWrites: PendingWrite[];
+}
+
+/** 写工具调用开始时记下原始参数；其他工具返回 undefined */
+export function trackWrite(run: AskRun, name: string, args: Record<string, unknown>): PendingWrite | undefined {
+  if (!isWriteTool(name)) return undefined;
+  const w: PendingWrite = { name, args, ok: false, at: Date.now() };
+  run.pendingWrites.push(w);
+  return w;
 }
 
 interface Run extends AskRun {
@@ -123,7 +141,7 @@ async function chatRound(run: Run, toolChoice: 'auto' | 'none'): Promise<ChatRes
     appendText(run, delta);
   };
   const r = await chatWithLog(run.opts.client, {
-    system: run.system, messages: run.messages, tools: ASK_TOOLS, toolChoice, maxTokens: ASK_MAX_TOKENS, signal: run.signal, onText,
+    system: run.system, messages: run.messages, tools: askTools(run.ctx.write !== undefined), toolChoice, maxTokens: ASK_MAX_TOKENS, signal: run.signal, onText,
   }, { round: run.rounds });
   addUsage(run, r);
   return r;
@@ -135,10 +153,13 @@ function inputArgs(call: ToolCall): Record<string, unknown> {
 
 /** 执行一个工具调用：发 tool / tool_done 事件，结果截断后计入累计字符数，收集出现的符号 */
 async function executeCall(run: Run, call: ToolCall): Promise<{ id: string; content: string; isError?: boolean }> {
-  const args = inputArgs(call);
+  const raw = inputArgs(call);
+  const args = redactWriteArgs(call.name, raw);
+  const write = trackWrite(run, call.name, raw);
   emit(run, { type: 'tool', name: call.name, args });
   const started = Date.now();
   const out = call.invalidArgs ? invalidArgsRun() : await runAskTool(run.ctx, call.name, call.input);
+  if (write && !out.error) write.ok = true;
   const content = truncateToolResult(out.content);
   const ms = Date.now() - started;
   run.toolChars += content.length;
@@ -240,29 +261,48 @@ function messageMeta(run: AskRun, end: LoopEnd): AskMessageMeta {
   };
 }
 
-/** 存回答；会话在回答过程中被删除（外键不存在）时只记日志 */
-function saveAnswer(run: AskRun, meta: AskMessageMeta): number | undefined {
+/** 正常结束（done / limited）的会话问答：按成功的写调用重新生成待确认的修改；失败、取消时不保存修改 */
+async function proposalsToSave(run: AskRun, end: LoopEnd): Promise<NewProposal[]> {
+  if (run.opts.sessionId === undefined || 'code' in end || !run.pendingWrites.some((w) => w.ok)) return [];
+  return rebuildProposals(run.ctx, run.pendingWrites, run.userSignal ? { signal: run.userSignal } : {});
+}
+
+/**
+ * 回答和待确认的修改在同一个事务里保存，返回回答 id 和修改的展示信息；
+ * 会话在回答过程中被删除（外键不存在）时只记日志
+ */
+function saveAnswer(run: AskRun, meta: AskMessageMeta, proposals: NewProposal[]): { messageId?: number; rows: ProposalRow[] } {
   const { sessionId } = run.opts;
-  if (sessionId === undefined) return undefined;
+  if (sessionId === undefined) return { rows: [] };
+  const { store } = run.ctx;
   try {
-    return run.ctx.store.chats.addMessage(sessionId, 'assistant', run.answer, meta);
+    const messageId = store.transaction(() => {
+      const id = store.chats.addMessage(sessionId, 'assistant', run.answer, meta);
+      for (const p of proposals) store.proposals.insertMerging(sessionId, id, p);
+      return id;
+    });
+    const rows = proposals.length > 0 ? store.proposals.listByMessages([messageId]) : [];
+    for (const r of rows) log.info('proposal_saved', proposalLogFields(r));
+    return { messageId, rows };
   } catch (err) {
     log.warn('ask_message_not_saved', { sessionId, error: (err as Error).message.split('\n')[0] });
-    return undefined;
+    return { rows: [] };
   }
 }
 
-function finish(run: AskRun, end: LoopEnd, started: number): AskResult {
+async function finish(run: AskRun, end: LoopEnd, started: number): Promise<AskResult> {
   addLinkedRefs(run);
   const meta = messageMeta(run, end);
-  const messageId = saveAnswer(run, meta);
+  const { messageId, rows } = saveAnswer(run, meta, await proposalsToSave(run, end));
+  await pinProposalTrees(run.ctx.repo, run.ctx.layout.root, rows);
   const id = messageId !== undefined ? { messageId } : {};
+  for (const row of rows) emit(run, { type: 'proposal', proposal: proposalView(row) });
   if ('code' in end) emit(run, { type: 'error', ...id, code: end.code, message: end.message });
   else emit(run, { type: 'done', ...id, status: end.status, ...(end.reason ? { reason: end.reason } : {}), refs: meta.refs, ...(meta.usage ? { usage: meta.usage } : {}) });
   const fields = { status: end.status, reason: 'reason' in end ? end.reason : undefined, code: 'code' in end ? end.code : undefined, rounds: run.rounds, toolCalls: run.toolCalls.length, toolChars: run.toolChars, chars: run.answer.length, refs: run.refs.size, ms: Date.now() - started };
   if (end.status === 'failed') log.warn('ask_failed', fields);
   else log.info('ask_done', fields);
-  return { status: end.status, answer: run.answer, meta, ...id };
+  return { status: end.status, answer: run.answer, meta, ...id, pendingWrites: run.pendingWrites };
 }
 
 /** 快照对应的当前概览（问答的系统提示和 get_module 用），没有时为 undefined */
@@ -278,11 +318,14 @@ function startRun(opts: AskOptions): AskRun {
   const history = opts.sessionId !== undefined ? trimHistory(store.chats.turns(opts.sessionId)) : [];
   const timeout = AbortSignal.timeout(opts.timeoutMs ?? ASK_TIMEOUT_MS);
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
-  const ctx: AskToolContext = { repo: opts.repo, store, layout: opts.layout, snapshot, sendSource, signal, ...(overview ? { overview } : {}) };
+  // 写工具只在网页问答（有会话）里提供
+  const write = opts.sessionId !== undefined && opts.writeTools ? { dirs: [...opts.writeTools.dirs], sessionId: opts.sessionId } : undefined;
+  const ctx: AskToolContext = { repo: opts.repo, store, layout: opts.layout, snapshot, sendSource, signal, ...(overview ? { overview } : {}), ...(write ? { write } : {}) };
+  const writeDirs = write?.dirs.map((d) => path.basename(d));
   return {
-    opts, ctx, system: askSystemPrompt({ sendSource, ...(overview ? { overview } : {}) }), history,
+    opts, ctx, system: askSystemPrompt({ sendSource, ...(overview ? { overview } : {}), ...(writeDirs ? { writeDirs } : {}) }), history,
     signal, ...(opts.signal ? { userSignal: opts.signal } : {}), timeout,
-    answer: '', rounds: 0, toolChars: 0, toolCalls: [], refs: new Map(), usage: { inputTokens: 0, outputTokens: 0 },
+    answer: '', rounds: 0, toolChars: 0, toolCalls: [], refs: new Map(), usage: { inputTokens: 0, outputTokens: 0 }, pendingWrites: [],
   };
 }
 
@@ -308,9 +351,9 @@ export async function runAsk(opts: AskOptions): Promise<AskResult> {
   emit(run, { type: 'start', ...(userMessageId !== undefined ? { messageId: userMessageId } : {}) });
   log.info('ask_started', {
     provider: opts.client.provider, model: opts.client.model, sessionId: opts.sessionId, questionChars: opts.question.length,
-    sendSource: run.ctx.sendSource, overview: run.ctx.overview !== undefined, historyTurns: run.history.length,
+    sendSource: run.ctx.sendSource, overview: run.ctx.overview !== undefined, historyTurns: run.history.length, writeTools: run.ctx.write !== undefined,
     maxRounds: opts.config.ask.maxRounds, maxToolChars: opts.config.ask.maxToolChars,
   });
   const end = isCliClient(opts.client) ? await runCliAsk(run, opts.client) : await runApiAsk(run);
-  return finish(run, end, started);
+  return await finish(run, end, started);
 }

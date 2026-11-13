@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../log.js';
+import { isOutsideRelative } from '../util/paths.js';
 import { DEFAULT_LAYER_NAMES, LAYERS, type LayerNames } from '../overview/boundary.js';
 import { EXTERNAL_CATEGORIES } from '../overview/external-table.js';
 import { DEFAULT_PARTITION_THRESHOLDS, type PartitionThresholds } from '../overview/partition-state.js';
@@ -580,6 +581,6 @@ export function effectiveSendSource(config: Pick<CodeInsightConfig, 'overview'>,
 /** 数据目录在仓库内时返回相对路径（用于从文件清单中排除），否则返回 undefined */
 export function dataDirInRepo(cfg: Pick<CodeInsightConfig, 'repo' | 'dataDir'>): string | undefined {
   const rel = path.relative(cfg.repo, cfg.dataDir);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  if (rel === '' || isOutsideRelative(rel)) return undefined;
   return rel.split(path.sep).join('/');
 }

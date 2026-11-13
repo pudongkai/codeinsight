@@ -9,7 +9,7 @@ import { DEFAULT_STATIC_DIR } from '../web-assets.js';
 import { askToolServer } from './mcp.js';
 import { openWorkspace, type Workspace } from './workspace.js';
 
-export const SERVE_USAGE = `Usage: codeinsight serve [--repo DIR] [--port 0] [--open] [--data-dir DIR] [--lock-repo] [--exit-on-stdin-close]
+export const SERVE_USAGE = `Usage: codeinsight serve [--repo DIR] [--port 0] [--open] [--data-dir DIR] [--lock-repo] [--add-dir DIR]... [--exit-on-stdin-close]
 
 Start the local web UI / HTTP API on 127.0.0.1 (random port by default).
 Without --repo, opens the git repository containing the current directory; if there is none,
@@ -18,6 +18,9 @@ Prints one JSON line to stdout: {"port":..,"token":"..","url":"..","repo":"..","
 (repo and dataDir are absolute paths, or null when started without a repository).
 --data-dir applies to the repository opened at startup. --open opens the url in the default browser.
 --lock-repo keeps the startup repository: the web UI cannot switch to another one (needs a repository).
+--add-dir DIR (repeatable, at most 10) lets the assistant propose new files in DIR besides the open repository;
+every write is confirmed in the web UI. System directories, the home directory itself, hidden directories in it,
+.git and .codeinsight directories are refused. The writable locations cannot be changed from the web UI.
 --exit-on-stdin-close shuts down like SIGTERM when stdin reaches EOF (for parent processes such as IDE plugins,
 so serve does not outlive a parent that crashed or was killed).
 `;
@@ -32,6 +35,7 @@ function parseServeArgs(argv: string[]) {
       'data-dir': { type: 'string' },
       'exit-on-stdin-close': { type: 'boolean' },
       'lock-repo': { type: 'boolean' },
+      'add-dir': { type: 'string', multiple: true },
       help: { type: 'boolean', short: 'h' },
     },
     strict: true,
@@ -85,7 +89,7 @@ export async function startServe(argv: string[], deps: ServeDeps = {}): Promise<
   const ws = opened && { ...opened, resolver: deps.resolver };
   const server = await startHttpServer({
     workspace: ws, lockRepo: args['lock-repo'] === true, resolver: deps.resolver, port: args.port, staticDir: deps.staticDir ?? DEFAULT_STATIC_DIR,
-    askToolServer: askToolServer(),
+    askToolServer: askToolServer(), addDirs: args['add-dir'] ?? [],
   });
   const line = {
     port: server.port, token: server.token, url: server.url,

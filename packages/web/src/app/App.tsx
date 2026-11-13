@@ -11,6 +11,7 @@ import { SourcePanel } from '../source/SourcePanel';
 import { sourceKey } from '../source/useSource';
 import { NavContext } from './nav';
 import { StatusBar } from './StatusBar';
+import { useHeaderHeight } from './useHeaderHeight';
 import { useNavigation, type Tab } from './useNavigation';
 import { useStatus } from './useStatus';
 
@@ -43,9 +44,10 @@ function Notice({ text, onDismiss }: { text: string; onDismiss(): void }) {
 function RepoView({ s, switched }: { s: StatusState; switched: ReturnType<typeof useSwitchNotice> }) {
   const { status, refresh } = s;
   const n = useNavigation(refresh, status && (status.overview ? 'overview' : 'browse'));
+  const layout = useHeaderHeight();
   return (
     <NavContext.Provider value={n.nav}>
-      <header>
+      <header ref={layout.header}>
         <StatusBar status={status} error={s.error} onReindex={() => void s.reindex()} onRepoSwitched={refresh} />
         <nav className="tabs">
           {TABS.map(([t, label]) => (
@@ -53,9 +55,11 @@ function RepoView({ s, switched }: { s: StatusState; switched: ReturnType<typeof
           ))}
         </nav>
       </header>
-      {switched.notice && <Notice text={switched.notice} onDismiss={switched.dismiss} />}
-      {n.banner && <div className="notice" data-testid="banner">{n.banner}</div>}
-      <main className={n.source ? 'with-source' : ''}>
+      <div ref={layout.notices}>
+        {switched.notice && <Notice text={switched.notice} onDismiss={switched.dismiss} />}
+        {n.banner && <div className="notice" data-testid="banner">{n.banner}</div>}
+      </div>
+      <main ref={layout.main} className={n.source ? 'with-source' : ''}>
         <div className="content">
           <div hidden={n.tab !== 'overview'}>
             <OverviewPage status={status} refreshStatus={refresh} />

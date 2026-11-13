@@ -1,7 +1,9 @@
 import { askClient, isQuestionTooLong, log, MAX_QUESTION_CHARS, runAsk } from '@codeinsight/core';
 import type { AskEvent, ChatSessionInfo, LlmClient, SnapshotRow } from '@codeinsight/core';
 import { repoOf, type Route, type RequestContext } from '../context.js';
-import { HttpError, idParam, optString, readJsonBody, sendJson } from '../respond.js';
+import { applyProposal, dismissProposal, dropSessionProposalRefs, proposalDiff, withProposals, type ProposalOutcome } from '../../proposals/service.js';
+import type { WriteEnv } from '../../proposals/apply-files.js';
+import { HttpError, idParam, optBool, optString, readJsonBody, sendJson } from '../respond.js';
 import { currentSnapshot } from '../snapshot.js';
 
 /** 问题正文不进日志，只记长度 */
@@ -32,16 +34,18 @@ async function createSession(ctx: RequestContext): Promise<void> {
   sendJson(ctx.res, 201, { id });
 }
 
-/** 会话、是否正在回答和全部消息 */
+/** 会话、是否正在回答和全部消息；每条回答带它的待确认修改 */
 function getSession(ctx: RequestContext): void {
   const s = requireSession(ctx);
-  sendJson(ctx.res, 200, { ...s, answering: repoOf(ctx).askRuns.isAnswering(s.id), messages: repoOf(ctx).ws.store.chats.messages(s.id) });
+  const { store } = repoOf(ctx).ws;
+  sendJson(ctx.res, 200, { ...s, answering: repoOf(ctx).askRuns.isAnswering(s.id), messages: withProposals(store, store.chats.messages(s.id)) });
 }
 
 /** 有正在回答的问题时先中止它、等回答保存，再删除会话（消息随外键一起删除） */
 async function deleteSession(ctx: RequestContext): Promise<void> {
   const s = requireSession(ctx);
   const cancelled = await repoOf(ctx).askRuns.cancel(s.id, 'session_deleted');
+  ctx.logFields.proposalRefs = await dropSessionProposalRefs(repoOf(ctx).ws.store, s.id, writeEnv(ctx));
   repoOf(ctx).ws.store.chats.deleteSession(s.id);
   ctx.logFields.cancelled = cancelled;
   sendJson(ctx.res, 200, { deleted: true, cancelled });
@@ -70,7 +74,10 @@ async function streamAnswer(ctx: RequestContext, input: AnswerInput, signal: Abo
     if (!res.destroyed && !res.writableEnded) res.write(JSON.stringify(e) + '\n');
   };
   try {
-    await runAsk({ repo, store, layout, config, ...input, signal, onEvent: write, ...(ctx.app.askToolServer ? { toolServer: ctx.app.askToolServer } : {}) });
+    await runAsk({
+      repo, store, layout, config, ...input, signal, onEvent: write, writeTools: { dirs: ctx.app.writableDirs },
+      ...(ctx.app.askToolServer ? { toolServer: ctx.app.askToolServer } : {}),
+    });
   } finally {
     res.off('close', onClose);
     if (!res.writableEnded) res.end();
@@ -97,10 +104,51 @@ async function askQuestion(ctx: RequestContext): Promise<void> {
   await r.done;
 }
 
+function proposalId(ctx: RequestContext): number {
+  const id = idParam(ctx.params.id, 'proposal id');
+  ctx.logFields.proposalId = id;
+  return id;
+}
+
+function writeEnv(ctx: RequestContext): WriteEnv {
+  const { ws } = repoOf(ctx);
+  return { repo: ws.repo, dataDir: ws.layout.root, writableDirs: ctx.app.writableDirs };
+}
+
+/** 成功时返回 value，否则按原因抛 HttpError（带上冲突文件和更新后的卡片） */
+function unwrap<T>(r: ProposalOutcome<T>): T {
+  if (r.ok) return r.value;
+  throw new HttpError(r.status, r.code, r.message, { ...(r.files ? { files: r.files } : {}), ...(r.proposal ? { proposal: r.proposal } : {}) });
+}
+
+/** GET /api/chat/proposals/:id/diff：每个文件的统一 diff */
+async function getProposalDiff(ctx: RequestContext): Promise<void> {
+  const files = unwrap(await proposalDiff(repoOf(ctx).ws.store, proposalId(ctx), writeEnv(ctx)));
+  sendJson(ctx.res, 200, { files });
+}
+
+/** POST /api/chat/proposals/:id/apply `{force?}`：执行，返回更新后的卡片 */
+async function postApplyProposal(ctx: RequestContext): Promise<void> {
+  const id = proposalId(ctx);
+  const force = optBool(await readJsonBody(ctx.req), 'force') ?? false;
+  ctx.logFields.force = force;
+  const proposal = unwrap(await applyProposal(repoOf(ctx).ws.store, id, writeEnv(ctx), force));
+  sendJson(ctx.res, 200, { proposal });
+}
+
+/** POST /api/chat/proposals/:id/dismiss */
+async function postDismissProposal(ctx: RequestContext): Promise<void> {
+  const proposal = unwrap(await dismissProposal(repoOf(ctx).ws.store, proposalId(ctx), writeEnv(ctx)));
+  sendJson(ctx.res, 200, { proposal });
+}
+
 export const chatRoutes: Route[] = [
   { method: 'GET', pattern: '/api/chat/sessions', handler: listSessions },
   { method: 'POST', pattern: '/api/chat/sessions', handler: createSession },
   { method: 'GET', pattern: '/api/chat/sessions/:id', handler: getSession },
   { method: 'DELETE', pattern: '/api/chat/sessions/:id', handler: deleteSession },
   { method: 'POST', pattern: '/api/chat/sessions/:id/messages', handler: askQuestion },
+  { method: 'GET', pattern: '/api/chat/proposals/:id/diff', handler: getProposalDiff },
+  { method: 'POST', pattern: '/api/chat/proposals/:id/apply', handler: postApplyProposal, requireRepoHeader: true },
+  { method: 'POST', pattern: '/api/chat/proposals/:id/dismiss', handler: postDismissProposal, requireRepoHeader: true },
 ];

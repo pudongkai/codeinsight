@@ -2,24 +2,67 @@ import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { log } from '../log.js';
+import { stopReason } from '../util/exec-stop.js';
 
-const execFileP = promisify(execFile);
-
-export class GitError extends Error {}
-
-export async function runGit(repo: string, args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileP('git', ['-C', repo, ...args], {
-      maxBuffer: 256 * 1024 * 1024,
-      encoding: 'utf8',
-    });
-    return stdout;
-  } catch (err) {
-    const e = err as { stderr?: string; message: string };
-    throw new GitError(`git ${args.join(' ')} failed: ${(e.stderr ?? e.message).trim()}`);
+/** git 命令失败：stopped 为 timeout（超时被结束）或 aborted（调用方取消），stderr 为原始错误输出 */
+export class GitError extends Error {
+  constructor(message: string, readonly detail: { stopped?: 'timeout' | 'aborted'; stderr?: string } = {}) {
+    super(message);
   }
+}
+
+export interface RunGitOptions {
+  /** 替换子进程的环境变量（默认继承本进程） */
+  env?: NodeJS.ProcessEnv;
+  /** 超时后结束子进程并按失败处理 */
+  timeoutMs?: number;
+  /** 中止时结束子进程 */
+  signal?: AbortSignal;
+  /** 写进标准输入的内容 */
+  input?: string | Uint8Array;
+  /** 'buffer' 时按原始字节返回输出（读文件内容用） */
+  encoding?: 'utf8' | 'buffer';
+  /** 除 0 以外也按成功处理的退出码（如 `git diff --no-index` 有差异时为 1） */
+  okExitCodes?: readonly number[];
+  /** 输出上限，默认 256 MB */
+  maxBuffer?: number;
+}
+
+/** 把 execFile 的失败转成 GitError：区分超时、取消和普通失败 */
+export function gitFailure(args: string[], err: unknown, opts: RunGitOptions): GitError {
+  const e = err as { stderr?: string | Buffer; message: string };
+  const stderr = e.stderr === undefined ? undefined : String(e.stderr);
+  const stopped = stopReason(err, opts.signal);
+  const reason = stopped === 'timeout' ? 'timed out' : stopped === 'aborted' ? 'cancelled' : (stderr || e.message).trim();
+  return new GitError(`git ${args.join(' ')} failed: ${reason}`, { ...(stopped ? { stopped } : {}), ...(stderr !== undefined ? { stderr } : {}) });
+}
+
+function exitCodeOk(err: unknown, opts: RunGitOptions): boolean {
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'number' && (opts.okExitCodes ?? []).includes(code) && !stopReason(err, opts.signal);
+}
+
+/** 执行 git（不经 shell）：失败时抛 GitError；给了 input 时写进标准输入 */
+export function runGit(repo: string, args: string[], opts: RunGitOptions & { encoding: 'buffer' }): Promise<Buffer>;
+export function runGit(repo: string, args: string[], opts?: RunGitOptions & { encoding?: 'utf8' }): Promise<string>;
+export function runGit(repo: string, args: string[], opts: RunGitOptions = {}): Promise<string | Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = execFile('git', ['-C', repo, ...args], {
+      maxBuffer: opts.maxBuffer ?? 256 * 1024 * 1024,
+      encoding: opts.encoding ?? 'utf8',
+      ...(opts.env ? { env: opts.env } : {}),
+      ...(opts.timeoutMs ? { timeout: opts.timeoutMs, killSignal: 'SIGKILL' as const } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    }, (err, stdout, stderr) => {
+      if (!err || exitCodeOk(err, opts)) resolve(stdout);
+      else reject(gitFailure(args, Object.assign(err, { stderr }), opts));
+    });
+    if (opts.input !== undefined) {
+      child.stdin?.on('error', () => undefined); // git 提前退出时由回调里的错误报告
+      child.stdin?.end(opts.input);
+    }
+  });
 }
 
 export async function repoRoot(repo: string): Promise<string> {
@@ -192,7 +235,8 @@ function countLines(s: string): number {
   return s.split('\n').length - (s.endsWith('\n') ? 1 : 0);
 }
 
-interface TreeEntry {
+/** ls-tree 的一条记录 */
+export interface TreeEntry {
   mode: string;
   type: string;
   oid: string;
@@ -340,4 +384,25 @@ export async function readFileAtCommit(repo: string, sha: string, filePath: stri
 /** 区间 (base, head] 的提交说明，作为默认意图文本；多个提交之间用 `---` 分隔 */
 export async function commitMessages(repo: string, base: string, head: string): Promise<string> {
   return (await runGit(repo, ['log', '--format=%B%n---', `${base}..${head}`])).trim().replace(/\n*---$/, '').trim();
+}
+
+/** 区间里每个提交的标题（一行），最多 limit 条，新的在前 */
+export async function commitSubjects(repo: string, range: string, limit = 50): Promise<string[]> {
+  const out = await runGit(repo, ['log', `--max-count=${limit}`, '--format=%s', '--end-of-options', range, '--']);
+  return out.split('\n').filter((l) => l !== '');
+}
+
+/**
+ * 提交里这些路径（按字面匹配）各自的条目，不存在的路径不在结果里。
+ * 用 `-t` 让上级目录本身也列出来，调用方可以据此判断上级是不是目录。
+ */
+export async function treeEntries(repo: string, commit: string, paths: string[]): Promise<Map<string, TreeEntry>> {
+  const out = await runGit(repo, ['--literal-pathspecs', 'ls-tree', '-t', '-z', commit, '--', ...paths]);
+  const wanted = new Set(paths);
+  return new Map(parseLsTree(out).filter((e) => wanted.has(e.path)).map((e) => [e.path, e]));
+}
+
+/** blob 的原始字节（不按 UTF-8 解码，调用方自己判断编码） */
+export async function readBlob(repo: string, oid: string): Promise<Buffer> {
+  return runGit(repo, ['cat-file', 'blob', oid], { encoding: 'buffer' });
 }

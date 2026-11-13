@@ -47,6 +47,7 @@ function recoverOnce(app: AppContext, ctx: RepoContext): void {
   app.recoveredDataDirs.add(key);
   ctx.reviewJobs.recoverInterrupted();
   ctx.overviewJobs.recoverInterrupted();
+  ctx.ws.store.proposals.failInterrupted();
 }
 
 /** 为打开的工作区建上下文：分配 gen、中断记录恢复、按设置在后台建索引 */

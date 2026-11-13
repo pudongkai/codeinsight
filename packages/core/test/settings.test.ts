@@ -3,7 +3,7 @@ import os, { homedir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  codeinsightHome, MAX_RECENT_REPOS, readUserSettings, removeRecentRepo, setLogSink, touchRecentRepo, updateUserSettings,
+  codeinsightHome, MAX_RECENT_REPOS, PathNotAllowedError, readUserSettings, removeRecentRepo, setLogSink, touchRecentRepo, updateUserSettings,
   userSettingsPath, writeFileAtomic,
 } from '../src/index.js';
 import { tempDir } from './helpers/git-repo.js';
@@ -230,6 +230,17 @@ describe('user settings for local CLI providers', () => {
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify({ version: 1, llm: { provider: 'claude-code', extraEnv: ['A=b'] } }));
     expect((await readUserSettings({ path: file })).llm).toEqual({ provider: 'claude-code' });
+  });
+});
+
+describe('writeFileAtomic inside a root', () => {
+  it('accepts directory names starting with .. and refuses targets outside the root', async () => {
+    const root = realpathSync(tempDir('ci-atomic-dots-'));
+    await writeFileAtomic(path.join(root, '..notes', 'a.md'), 'x', { root, exclusive: true });
+    expect(readFileSync(path.join(root, '..notes', 'a.md'), 'utf8')).toBe('x');
+    const sibling = `${root}-sibling`;
+    await expect(writeFileAtomic(path.join(sibling, 'b.md'), 'x', { root })).rejects.toBeInstanceOf(PathNotAllowedError);
+    expect(existsSync(sibling)).toBe(false);
   });
 });
 

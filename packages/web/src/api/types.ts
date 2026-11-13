@@ -1,5 +1,5 @@
 /** HTTP API 的响应形状（与 packages/server/src/http/routes 一致） */
-import type { ChatMessageInfo, ChatSessionInfo } from '@codeinsight/core/ask/events';
+import type { ChatMessageInfo, ChatSessionInfo, ProposalView } from '@codeinsight/core/ask/events';
 import type { OverviewReport } from '@codeinsight/core/overview/types';
 import type { ReviewReport } from '@codeinsight/core/report/types';
 
@@ -95,6 +95,8 @@ export interface StatusResponse {
   reviews: ReviewSummary[];
   /** 当前概览的摘要，没有概览时为 null */
   overview: { id: number; createdAt: number; stale: boolean } | null;
+  /** 问答里助手可以提出修改的范围：repo 为是否有当前仓库，dirs 为 --add-dir 目录名（仅新建） */
+  writeScope?: { repo: boolean; dirs: string[] };
 }
 
 export interface ReviewResponse {
@@ -206,7 +208,30 @@ export interface OverviewJob {
 export interface ChatSessionDetail extends ChatSessionInfo {
   /** 这个会话是否有问题正在回答（可能来自另一个页面） */
   answering: boolean;
-  messages: ChatMessageInfo[];
+  messages: ChatMessageView[];
+}
+
+/** 会话里的一条消息；回答带它的待确认修改 */
+export type ChatMessageView = ChatMessageInfo & { proposals?: ProposalView[] };
+
+/** GET /api/chat/proposals/:id/diff 里一个文件的统一 diff */
+export interface ProposalFileDiff {
+  path: string;
+  isNew: boolean;
+  diff: string;
+  /** 磁盘上的内容和生成修改时不同（新文件为期间被创建了） */
+  changedSinceProposal?: true;
+  /** PR 里被删除的文件 */
+  deleted?: true;
+  /** 原文件太大，不生成 diff */
+  tooLarge?: true;
+}
+
+/** apply 返回 409 时不能直接写入的文件；canForce 的可以带 force 重发 */
+export interface ProposalConflict {
+  path: string;
+  code: 'file_changed_since_proposal' | 'file_exists';
+  canForce: boolean;
 }
 
 /** GET /api/repos 的最近列表项 */

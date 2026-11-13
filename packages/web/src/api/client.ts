@@ -4,10 +4,10 @@
  * 读到 status 后，之后的请求都带 `X-CodeInsight-Repo: <repoGen>`：仓库被别的页面切换后，服务端返回 409 repo_changed，
  * 页面收到通知后重新读 status 并重建仓库相关的内容。
  */
-import type { AskEvent, ChatSessionInfo } from '@codeinsight/core/ask/events';
+import type { AskEvent, ChatSessionInfo, ProposalView } from '@codeinsight/core/ask/events';
 import { NdjsonParseError, readNdjson } from './stream';
 import type {
-  ChatSessionDetail, EntryItem, LlmForm, LlmTestResult, OpenRepoResult, OverviewEstimate, OverviewJob, OverviewParams, OverviewResponse, PickDirResult,
+  ChatSessionDetail, EntryItem, LlmForm, LlmTestResult, OpenRepoResult, OverviewEstimate, OverviewJob, OverviewParams, OverviewResponse, PickDirResult, ProposalFileDiff,
   ReposResponse, ReviewParams, ReviewResponse, SettingsResponse, SourceResponse, StatusResponse, SymbolDetail, SymbolInfo, TreeResponse,
 } from './types';
 
@@ -151,6 +151,10 @@ export const api = {
   /** 提问：开始前的错误抛 ApiError，开始后逐个回调事件；signal 中止即停止回答 */
   ask: (sessionId: number, question: string, onEvent: (e: AskEvent) => void, signal?: AbortSignal) =>
     postNdjson<AskEvent>(`/api/chat/sessions/${sessionId}/messages`, { question }, onEvent, signal),
+  proposalDiff: (id: number) => request<{ files: ProposalFileDiff[] }>('GET', `/api/chat/proposals/${id}/diff`),
+  /** 执行待确认修改；冲突时抛 409，extra 里带 files（冲突文件）和 proposal（最新状态） */
+  applyProposal: (id: number, force = false) => request<{ proposal: ProposalView }>('POST', `/api/chat/proposals/${id}/apply`, force ? { force } : {}),
+  dismissProposal: (id: number) => request<{ proposal: ProposalView }>('POST', `/api/chat/proposals/${id}/dismiss`, {}),
   repos: () => request<ReposResponse>('GET', '/api/repos'),
   openRepo: (path: string, cancelRunning = false) => request<OpenRepoResult>('POST', '/api/repo', { path, cancelRunning }),
   /** 在 serve 所在的机器上弹出系统选择文件夹窗口，等用户选完才返回 */

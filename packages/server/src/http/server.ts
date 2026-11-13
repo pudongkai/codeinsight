@@ -1,8 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
-import { log, realPathOr } from '@codeinsight/core';
-import type { AskToolServer, Resolver } from '@codeinsight/core';
+import { log, realPathOr, resolveAddDirs } from '@codeinsight/core';
+import type { AddDirCheckOptions, AskToolServer, Resolver } from '@codeinsight/core';
 import { CHANGE_CHECK_INTERVAL_MS } from '../changes.js';
 import { detectPickerTool, execPicker, PICKER_TIMEOUT_MS, type PickerTool, type RunPicker } from '../dir-picker.js';
 import { closeRepoContext, createRepoContext, rememberRepo, type RepoContext } from '../repo-context.js';
@@ -21,6 +21,7 @@ import { reviewRoutes } from './routes/reviews.js';
 import { similarRoutes } from './routes/similar.js';
 import { sourceRoutes } from './routes/source.js';
 import { settingsRoutes } from './routes/settings.js';
+import { abortPullRequests } from '../proposals/pull-request.js';
 import { serveStatic } from './routes/static.js';
 import { statusRoutes } from './routes/status.js';
 import { symbolRoutes } from './routes/symbols.js';
@@ -59,6 +60,10 @@ export interface HttpServerOptions {
   llmTestCliTimeoutMs?: number;
   /** 本机 CLI 问答用的工具服务启动命令（`codeinsight mcp --ask-tools`） */
   askToolServer?: AskToolServer;
+  /** 仓库以外可写的目录（`serve --add-dir`），启动时检查，不合法时 startHttpServer 抛 AddDirError */
+  addDirs?: string[];
+  /** --add-dir 检查用的主目录、系统目录名单（测试注入），默认取本机实际值 */
+  addDirCheck?: AddDirCheckOptions;
 }
 
 const LLM_TEST_TIMEOUT_MS = 20_000;
@@ -125,9 +130,10 @@ function gate(ctx: RequestContext, token: string, port: number): boolean {
 
 export const REPO_HEADER = 'x-codeinsight-repo';
 
-/** 请求带的仓库标识（gen）和当前仓库不同时 409 `repo_changed`；不带的照常处理 */
-function checkRepoHeader(ctx: RequestContext): void {
+/** 请求带的仓库标识（gen）和当前仓库不同时 409 `repo_changed`；不带的照常处理，路由要求必须带时返回 400 */
+function checkRepoHeader(ctx: RequestContext, required: boolean): void {
   const raw = ctx.req.headers[REPO_HEADER];
+  if (raw === undefined && required) throw new HttpError(400, 'repo_header_required', 'this request must carry the X-CodeInsight-Repo header');
   if (raw === undefined) return;
   const current = ctx.app.repo?.gen ?? null;
   if (String(raw) === String(current)) return;
@@ -142,7 +148,7 @@ function checkRepoHeader(ctx: RequestContext): void {
 async function runRoute(ctx: RequestContext, route: Route): Promise<void> {
   const needsRepo = route.needsRepo !== false;
   if (needsRepo) {
-    checkRepoHeader(ctx);
+    checkRepoHeader(ctx, route.requireRepoHeader === true);
     if (!ctx.app.repo) throw new HttpError(409, 'no_repo', 'no repository is open');
   }
   ctx.repo = ctx.app.repo;
@@ -227,6 +233,7 @@ async function newAppContext(opts: HttpServerOptions): Promise<AppContext> {
     changeCheckIntervalMs: opts.changeCheckIntervalMs ?? CHANGE_CHECK_INTERVAL_MS,
     llmTest: { timeoutMs: opts.llmTestTimeoutMs ?? LLM_TEST_TIMEOUT_MS, cliTimeoutMs: opts.llmTestCliTimeoutMs ?? LLM_TEST_CLI_TIMEOUT_MS, running: false },
     ...(opts.askToolServer ? { askToolServer: opts.askToolServer } : {}),
+    writableDirs: await resolveAddDirs(opts.addDirs ?? [], opts.addDirCheck),
   };
 }
 
@@ -245,7 +252,14 @@ async function closeRepos(app: AppContext, drain: boolean): Promise<void> {
  * 传了 workspace 时作为当前仓库：把遗留的 running 任务改为 failed，并在后台对工作区建索引；不传时以无仓库启动。
  */
 export async function startHttpServer(opts: HttpServerOptions): Promise<RunningHttpServer> {
-  const app = await newAppContext(opts);
+  let app: AppContext;
+  try {
+    app = await newAppContext(opts);
+  } catch (err) {
+    // --add-dir 不合法等：还没开始建索引，交给本服务的 Store 在这里关掉
+    if (opts.workspace) closeWorkspaceStore(opts.workspace);
+    throw err;
+  }
   const token = newToken();
   let port = 0;
   const server = createServer((req, res) => void handle(app, token, port, req, res));
@@ -258,7 +272,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
   }
   // 监听成功后才建仓库上下文（会开始建索引）；token 此时还没交出去，不会有请求先到
   if (opts.workspace) app.repo = createRepoContext(app, opts.workspace, 'startup');
-  log.info('http_listening', { host: LISTEN_HOST, port, repo: app.repo?.ws.repo ?? null, locked: app.locked, dirPicker: app.dirPicker.tool ?? null, staticDir: opts.staticDir });
+  log.info('http_listening', { host: LISTEN_HOST, port, repo: app.repo?.ws.repo ?? null, locked: app.locked, dirPicker: app.dirPicker.tool ?? null, staticDir: opts.staticDir, writableDirs: app.writableDirs.length });
   if (app.repo) await rememberRepo(app.repo.ws.repo);
   const keepAlive = setInterval(() => app.repo?.indexJobs.touchCurrent(), opts.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
   keepAlive.unref();
@@ -268,6 +282,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
       clearInterval(keepAlive);
       app.shuttingDown = true;
       app.llmTest.controller?.abort();
+      abortPullRequests();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await closeRepos(app, drain);

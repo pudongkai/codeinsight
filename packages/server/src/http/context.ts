@@ -39,6 +39,8 @@ export interface AppContext {
   llmTest: { timeoutMs: number; cliTimeoutMs: number; running: boolean; controller?: AbortController };
   /** 本机 CLI 问答用的工具服务启动命令；没有时 CLI 问答以 internal_error 结束 */
   askToolServer?: AskToolServer;
+  /** 启动时 --add-dir 指定、检查过的可写目录（真实路径，第 i 个名为 dir<i+1>）；运行中不变 */
+  writableDirs: string[];
 }
 
 export interface RequestContext {
@@ -62,6 +64,8 @@ export interface Route {
   handler: Handler;
   /** 默认 true：没有当前仓库时返回 409 `no_repo`，并检查 X-CodeInsight-Repo；为 false 时两者都不做 */
   needsRepo?: boolean;
+  /** 为 true 时请求必须带 X-CodeInsight-Repo（不带返回 400）：按自增 id 改数据的操作，避免切换仓库后作用到另一个仓库的同号记录 */
+  requireRepoHeader?: boolean;
 }
 
 /** 当前请求的仓库上下文；没有仓库时 409 `no_repo` */

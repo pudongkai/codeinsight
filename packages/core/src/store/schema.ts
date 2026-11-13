@@ -93,8 +93,9 @@ CREATE TABLE reviews (
  * 不随 SCHEMA_VERSION 删库重建的表：每次打开库时缺哪张就建哪张（`IF NOT EXISTS`，并发重复执行无害），
  * 已有的快照和审查记录保留，旧版本打开带这些表的库时版本号一致，也不会删库。
  * 以后要加列时同样先检查列是否存在再 `ALTER TABLE ADD COLUMN`。
+ * 引用其他额外表的表排在被引用的表前面，按列表顺序删表时不会遇到被引用的表已不存在。
  */
-export const EXTRA_TABLES = ['overviews', 'chat_sessions', 'chat_messages', 'extract_cache', 'snapshot_edges_code'] as const;
+export const EXTRA_TABLES = ['overviews', 'chat_proposals', 'chat_sessions', 'chat_messages', 'extract_cache', 'snapshot_edges_code'] as const;
 
 export const EXTRA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS overviews (
@@ -147,4 +148,20 @@ CREATE TABLE IF NOT EXISTS snapshot_edges_code (
   snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id) ON DELETE CASCADE,
   code_hash TEXT NOT NULL
 );
+
+-- 问答里生成的待确认修改（写文件 / 建 PR），payload 为保存时算好的修改；pid 为正在执行它的 serve 进程
+CREATE TABLE IF NOT EXISTS chat_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress TEXT,
+  result TEXT,
+  pid INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_proposals_message ON chat_proposals(message_id);
 `;

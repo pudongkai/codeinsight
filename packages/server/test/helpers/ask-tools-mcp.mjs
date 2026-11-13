@@ -1,4 +1,4 @@
-// 按 `codeinsight mcp --ask-tools` 的参数启动问答工具 MCP 服务（stdio）；配置不读本机环境变量。
+// 按 `codeinsight mcp --ask-tools` 的参数（含 --write-tools、--writable-dir）启动问答工具 MCP 服务（stdio）；配置不读本机环境变量。
 // 快照不存在或没建好时 stderr 写一行原因并以 1 退出。
 import { parseArgs } from 'node:util';
 import { initDataDir, loadConfig, Store } from '@codeinsight/core';
@@ -8,6 +8,7 @@ const { values } = parseArgs({
   options: {
     repo: { type: 'string' }, 'data-dir': { type: 'string' }, snapshot: { type: 'string' },
     'no-source': { type: 'boolean' }, 'max-tool-chars': { type: 'string' },
+    'write-tools': { type: 'boolean' }, 'writable-dir': { type: 'string', multiple: true }, session: { type: 'string' },
   },
   strict: true,
 });
@@ -15,7 +16,8 @@ const config = await loadConfig(values.repo, { dataDir: values['data-dir'], env:
 const layout = await initDataDir(config.dataDir);
 const store = new Store(layout.dbPath);
 try {
-  const ctx = askToolContext({ repo: values.repo, config, layout, store }, Number(values.snapshot), values['no-source'] !== true);
+  const write = values['write-tools'] ? { dirs: values['writable-dir'] ?? [], ...(values.session ? { sessionId: Number(values.session) } : {}) } : undefined;
+  const ctx = askToolContext({ repo: values.repo, config, layout, store }, Number(values.snapshot), values['no-source'] !== true, write);
   await runAskToolsMcpStdio(ctx, { maxToolChars: Number(values['max-tool-chars'] ?? config.ask.maxToolChars) });
 } catch (err) {
   if (!(err instanceof AskToolsSnapshotError)) throw err;

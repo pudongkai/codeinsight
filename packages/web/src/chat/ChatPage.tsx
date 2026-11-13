@@ -1,8 +1,9 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import type { ChatSessionDetail, StatusResponse } from '../api/types';
 import { useNav } from '../app/nav';
 import { useCurrentLinks } from '../app/useCurrentLinks';
+import { useStoredFlag } from '../stored-flag';
 import { LlmSetupHint } from '../settings/LlmSetupHint';
 import { Composer } from './Composer';
 import { AnswerBlock, MessageList, Question } from './MessageList';
@@ -11,6 +12,9 @@ import { SessionList } from './SessionList';
 import { useAsk, type LiveAnswer } from './useAsk';
 import { useAskNotice } from './useAskNotice';
 import { useChatSessions } from './useChatSessions';
+import { useFollowBottom, type FollowBottom } from './useFollowBottom';
+
+const SIDEBAR_KEY = 'codeinsight.chat.sidebarCollapsed';
 
 /** 未配置模型服务时的引导，或首次使用（provider、模型、源码开关变化后）的发送提示 */
 function AskGate({ notice }: { notice: ReturnType<typeof useAskNotice> }) {
@@ -36,19 +40,25 @@ interface ConversationProps {
   live: LiveAnswer | undefined;
   links: ReturnType<typeof useCurrentLinks>;
   status: StatusResponse | undefined;
+  follow: FollowBottom;
 }
 
 /** 已保存的消息，加上正在接收的这次问答（回答保存完、重新读到之前由它显示） */
-function Conversation({ detail, live, links, status }: ConversationProps) {
+function Conversation({ detail, live, links, status, follow }: ConversationProps) {
   const messages = detail?.messages ?? [];
   const shared = { links, snapshotId: status?.snapshot?.id, currentContentKey: status?.snapshot?.contentKey };
   return (
-    <div className="chat-messages" data-testid="chat-messages">
-      <MessageList messages={live ? messages.slice(0, live.base) : messages} {...shared} />
-      {live && <Question text={live.question} />}
-      {live && <AnswerBlock answer={live.answer} {...shared} />}
-      {!live && detail?.answering && <p className="muted" data-testid="answering-elsewhere">这个会话正在回答一个问题，完成后显示。</p>}
-      {!live && messages.length === 0 && <p className="muted">提问后，AI 会查询代码索引（符号、调用关系、源码）来回答，回答里的符号和源码位置可以点击打开。</p>}
+    <div className="chat-scroll">
+      <div className="chat-messages" data-testid="chat-messages" ref={follow.ref} onScroll={follow.onScroll}>
+        <MessageList messages={live ? messages.slice(0, live.base) : messages} {...shared} />
+        {live && <Question text={live.question} />}
+        {live && <AnswerBlock answer={live.answer} {...shared} />}
+        {!live && detail?.answering && <p className="muted" data-testid="answering-elsewhere">这个会话正在回答一个问题，完成后显示。</p>}
+        {!live && messages.length === 0 && <p className="muted">提问后，AI 会查询代码索引（符号、调用关系、源码）来回答，回答里的符号和源码位置可以点击打开。</p>}
+      </div>
+      {!follow.atBottom && (
+        <button type="button" className="small chat-to-bottom" data-testid="chat-to-bottom" onClick={follow.jump}>回到底部</button>
+      )}
     </div>
   );
 }
@@ -74,7 +84,7 @@ function sendState(live: LiveAnswer | undefined, currentId: number | undefined, 
   return { answering: here && liveAnswering, blocked: !ready || (here && !liveAnswering) };
 }
 
-/** 问答页：左侧会话列表，右侧对话和输入框 */
+/** 问答页：左侧会话列表（可收起），右侧对话和输入框；整页高度固定，对话区自己滚动 */
 export function ChatPage({ status }: { status: StatusResponse | undefined }) {
   const nav = useNav();
   const links = useCurrentLinks(status?.snapshot?.id);
@@ -99,17 +109,26 @@ export function ChatPage({ status }: { status: StatusResponse | undefined }) {
     ask.forget(id);
     void s.remove(id);
   };
+  const follow = useFollowBottom(s.detail, live?.answer);
+  // 切换会话（包括发送时新建的会话）后从最新的消息看起
+  useEffect(follow.jump, [s.currentId]);
+  const [collapsed, setCollapsed] = useStoredFlag(SIDEBAR_KEY, false);
+  const onSend = (q: string) => {
+    follow.jump();
+    void ask.ask(q, s.detail?.messages.length ?? 0);
+  };
   return (
-    <div className="chat-page" data-testid="chat-page">
-      <SessionList sessions={s.list} currentId={s.currentId} isNew={s.isNew} onPick={s.pick} onDelete={remove} />
+    <div className={`chat-page${collapsed ? ' sidebar-collapsed' : ''}`} data-testid="chat-page">
+      <SessionList sessions={s.list} currentId={s.currentId} isNew={s.isNew} onPick={s.pick} onDelete={remove}
+        collapsed={collapsed} onCollapse={setCollapsed} />
       <section className="panel chat-main">
         <AskGate notice={notice} />
         {[s.error, s.detailError, ask.error].filter(Boolean).map((e) => <div key={e} className="error" data-testid="chat-error">{e}</div>)}
         {links.notice && <div className="notice" data-testid="link-notice">{links.notice}</div>}
-        <Conversation detail={s.detail} live={live} links={links} status={status} />
+        <Conversation detail={s.detail} live={live} links={links} status={status} follow={follow} />
         {send.busyNote && <p className="muted" data-testid="chat-busy">{send.busyNote}</p>}
         <Composer draft={ask.draft} onDraft={ask.setDraft} answering={send.answering} blocked={send.blocked}
-          onSend={(q) => void ask.ask(q, s.detail?.messages.length ?? 0)} onStop={ask.stop} />
+          onSend={onSend} onStop={ask.stop} writeScope={status?.writeScope} />
       </section>
     </div>
   );

@@ -1,6 +1,6 @@
 # CodeInsight 问答页布局优化与对话中写文件、建 PR 技术方案
 
-开发状态: TODO
+开发状态: DONE
 方案评审: 通过（2026-11-13）
 需求来源: 2026-11-13 东凯（经 Simon 转达）：问答页左侧会话列表固定并可收起、对话区改成聊天布局；问答对话里支持创建 PR、在本机工作空间或项目仓库中写文件，写操作要限定可写目录
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-13
@@ -285,7 +285,7 @@ interface PullRequestProposal {
 
 **生成时（问答结束保存时，在 serve 进程里）**
 
-1. 确认有 `origin`；默认分支用 `git ls-remote --symref origin HEAD` 取，取不到再用 `gh repo view --json defaultBranchRef`。
+1. 确认有 `origin`；默认分支先取本地 `refs/remotes/origin/HEAD`，取不到再用 `git ls-remote --symref origin HEAD`，再用 `gh repo view --json defaultBranchRef`；工具执行时不联网，只取本地，取不到时提示模型传 `base`。
 2. `git fetch origin --end-of-options <base>`，得到起点（会更新用户仓库里的 `origin/<base>`）。
 3. `edits` 来源：起点为 `origin/<base>`，按起点提交里的文件内容应用修改（`readFileAtCommit`），结果存进 payload。
 4. `working_tree` 来源：起点为 `HEAD`，用临时索引生成 tree：`GIT_INDEX_FILE=<临时文件> git read-tree HEAD`，再 `git add -A --literal-pathspecs -- <paths>`（`paths` 为空时用 `.`），`git write-tree`。`git add` 不跑钩子，跳过被忽略的文件，符号链接按链接本身记录（不会读出链接指向的仓库外文件），可执行位、删除、重命名都由 git 自己处理。用 `git update-ref refs/codeinsight/proposals/<id> <tree>` 防止 tree 被清理（保存事务提交后建立），用 `git diff --name-status --no-renames HEAD <tree>` 得到文件列表。同时用 `commitMessages` 列出 `origin/<base>..HEAD` 的提交。
@@ -396,50 +396,69 @@ interface PullRequestProposal {
 
 ## 8. 开发计划
 
-- [ ] 阶段1：问答页布局
+- [x] 阶段1：问答页布局
   - 涉及模块：packages/web（app/App.tsx、chat/ChatPage.tsx、chat/SessionList.tsx、chat/Composer.tsx、styles.css、e2e/chat.spec.ts）
   - 依赖：无
   - 内容：`--header-h` 变量（含 `.source-panel`）、聊天布局、自动滚到底和“回到底部”、会话列表收起并记住状态
   - 完成标准：`pnpm --filter @codeinsight/web test`、`pnpm --filter @codeinsight/web build`、`pnpm lint` 通过；`pnpm --filter @codeinsight/web exec playwright test e2e/chat.spec.ts e2e/serve.spec.ts` 通过，新增用例检查消息很多时输入框在视口底部、会话列表不随滚动移动、收起状态刷新后保留。`e2e/serve.spec.ts` 工作区里有别人未提交的改动，本阶段只运行、不修改它
 
-- [ ] 阶段2：写入范围、两个写工具和 `--add-dir`
+  - 验证：`pnpm --filter @codeinsight/web test` 141 通过；web build、`pnpm lint` 通过；`playwright test e2e/chat.spec.ts e2e/serve.spec.ts` 15 通过（新增布局、收起 2 条）；改动 `app/App.tsx`、`app/useHeaderHeight.ts`、`chat/ChatPage.tsx`、`chat/SessionList.tsx`、`chat/useFollowBottom.ts`、`stored-flag.ts`（`graph/show-models.tsx` 改用它，行为不变）、`styles.css`
+- [x] 阶段2：写入范围、两个写工具和 `--add-dir`
   - 涉及模块：packages/core（ask/write-scope.ts、ask/apply-edits.ts、ask/redact.ts、ask/tools.ts、ask/prompt.ts、ask/events.ts、ask/agent.ts、ask/cli-agent.ts、ask/write-roots.ts）、packages/server（mcp/ask-tools.ts、http/routes/status.ts、http/server.ts）、packages/cli（commands/mcp.ts、commands/serve.ts）
   - 依赖：无
   - 验证方式：独立
   - 内容：路径检查和可写目录校验；两个工具定义、参数检查、edits 预演；只在带 sessionId 时提供；提示补充；参数去掉内容；`write_not_allowed` 错误码；MCP 的 `--write-tools`、`--writable-dir`；Claude Code 白名单；`serve --add-dir` 参数和检查；`/api/status` 返回写入范围
   - 完成标准：`pnpm --filter @codeinsight/core exec vitest run test/write-scope.test.ts test/write-roots.test.ts test/ask-write-tools.test.ts`、`pnpm --filter @codeinsight/server exec vitest run test/ask-tools-mcp.test.ts test/write-scope-status.test.ts` 通过；`pnpm -r build`、`pnpm lint` 通过
 
-- [ ] 阶段3：待确认修改的保存和写文件
+  - 验证：core 阶段测试 56 通过、core 全量 492 通过/10 跳过；server 阶段测试 12 通过、全量 147/7 跳过；cli 40/1 跳过；`pnpm -r build`、`pnpm lint` 通过。独立验证提 8 个问题已全部修复（`--add-dir` 拒绝包含主目录的目录、参数去内容改白名单、悬空链接、CLI 跳过的调用算失败、分支名 `@`/`refs/`、不可见字符、换行匹配、抽出 `realDirOrUndefined`）；web `tool-labels.ts` 补 `write_not_allowed` 说明；改动 `core/ask/{write-scope,write-roots,apply-edits,build-proposal,redact,tools,prompt,agent,cli-agent}.ts`、`server/mcp/ask-tools.ts`、`server/http/{server,context}.ts`、`routes/{status,chat}.ts`、`cli/commands/{mcp,serve}.ts`
+- [x] 阶段3：待确认修改的保存和写文件
   - 涉及模块：packages/core（store/schema.ts、store/chats.ts、ask/agent.ts、ask/cli-agent.ts、git/write.ts、util/atomic-file.ts）、packages/server（jobs/ask-runs.ts、http/routes/chat.ts、proposals/）
   - 依赖：阶段2
   - 验证方式：独立
   - 内容：`chat_proposals` 表；core 记下写调用的原始参数；回答（done / limited）保存时重新生成修改并和回答同事务保存，发 `proposal` 事件；会话详情带卡片；diff、apply（files）、dismiss 接口；`applying` 状态和启动时恢复
   - 完成标准：`pnpm --filter @codeinsight/server exec vitest run test/chat-proposals.test.ts` 通过，覆盖 7 节 server 单测里除建 PR 以外的情况；`pnpm --filter @codeinsight/core test`、`pnpm -r build` 通过
 
-- [ ] 阶段4：写文件确认卡片和写入范围说明（网页）
+  - 验证：`vitest run test/chat-proposals.test.ts` 18 通过；core 492/10 跳过、server 165/7 跳过、cli 40/1 跳过；`pnpm -r build`、`pnpm lint` 通过。独立验证提 6 个问题和 3 处测试缺口已修复（部分写入后重试跳过已写入文件、建目录前逐级检查不往仓库外写、保存阶段可取消且同一 base 只 fetch 一次、fetch 失败原因去掉绝对路径、diff 单独错误码和 1MB 上限、applying 超过 10 分钟视为中断、apply/dismiss 必须带仓库头）。自行决定：`working_tree` 来源暂存为 failed(not_supported)，阶段5 补；重新生成失败的记录标 unbuilt 不可执行；改动 `core/store/proposals.ts`、`core/ask/save-proposals.ts`、`core/ask/agent.ts`、`core/util/atomic-file.ts`、`core/git/{index,write}.ts`、`server/proposals/{apply-files,diff,service}.ts`、`server/http/{context,server}.ts`、`routes/chat.ts`、`server/repo-context.ts`
+- [x] 阶段4：写文件确认卡片和写入范围说明（网页）
   - 涉及模块：packages/web（chat/ProposalCard.tsx、chat/DiffView.tsx、chat/answer.ts、chat/tool-labels.ts、chat/ToolSteps.tsx、chat/Composer.tsx、api/types.ts、e2e/chat-proposals.spec.ts）
   - 依赖：阶段1、阶段3
   - 内容：卡片（写文件）各状态、diff 展示、写入、忽略、“仍然写入”、失败重试；输入框上方的写入范围说明
   - 完成标准：`pnpm --filter @codeinsight/web test` 通过且覆盖卡片各状态；`pnpm --filter @codeinsight/web exec playwright test e2e/chat-proposals.spec.ts` 通过（假模型 → 卡片 → 写入临时仓库）；`pnpm --filter @codeinsight/web build`、`pnpm lint` 通过
 
-- [ ] 阶段5：建 PR
+  - 验证：与阶段5 合并后 `pnpm --filter @codeinsight/web test` 158 通过（新增 `test/proposals.test.tsx` 17 条覆盖卡片各状态）；`playwright test e2e/chat-proposals.spec.ts e2e/chat.spec.ts` 9 通过；`pnpm -r build`、`pnpm lint` 通过；改动 `api/{types,client}.ts`、`chat/{ProposalCard,DiffView,WriteScopeNote}.tsx`、`chat/{useProposal,proposal-text,answer,tool-labels}.ts`、`chat/{ToolSteps,MessageList,Composer,ChatPage}.tsx`、`styles.css`、`e2e/chat-proposals.spec.ts`
+- [x] 阶段5：建 PR
   - 涉及模块：packages/core（git/write.ts）、packages/server（proposals/pull-request.ts、http/routes/chat.ts）
   - 依赖：阶段3
   - 验证方式：独立
   - 内容：4.5 的生成（fetch、working_tree 临时索引生成 tree 和引用）和执行流程，两种来源；diff 接口的 PR 情况；断点重试；执行或忽略后删除引用
   - 完成标准：`pnpm --filter @codeinsight/server exec vitest run test/pull-request.test.ts` 通过，覆盖 7 节建 PR 的全部情况（含钩子未执行、工作区不变）
 
-- [ ] 阶段6：PR 确认卡片（网页）
+  - 验证：`vitest run test/pull-request.test.ts` 16 通过（本地 bare 仓库 + 假 gh，含钩子未执行、工作区和用户索引不变、符号链接、可执行位、删除、断点重试、分支冲突、未登录、引用清理）；core 495/10 跳过、server 181/7 跳过、cli 40/1；`pnpm -r build`、`pnpm lint` 通过。独立验证提 8 个问题已修复（已有 PR 只认 OPEN 且指向本次提交、推送仓库以 pushurl 为准并按需 `--head=<owner>:<branch>`、从用户索引复制起步保留 skip-worktree、类型变化 diff、关闭 fsmonitor 并拒绝 LFS 文件、拒绝嵌套仓库、删除会话时删引用且引用名带数据目录区分、plink 用 `-batch`）。自行决定：代为执行的 git 命令一律不跑钩子（`core.hooksPath` 指向空设备，含 fetch）；推送直接用展开后的推送地址；改动 `core/git/write.ts`、`core/ask/save-proposals.ts`、`server/proposals/{pull-request,diff,service}.ts`、`routes/chat.ts`、`http/server.ts`
+- [x] 阶段6：PR 确认卡片（网页）
   - 涉及模块：packages/web（chat/ProposalCard.tsx、e2e/chat-proposals.spec.ts）
   - 依赖：阶段4、阶段5
   - 内容：PR 卡片：目标分支、新分支、未推送提交提示、PR 链接和复制链接、失败重试
   - 完成标准：`pnpm --filter @codeinsight/web test` 覆盖 PR 卡片各状态并通过；`pnpm --filter @codeinsight/web build`、`pnpm lint` 通过
 
-- [ ] 阶段7：真实调用核实和收尾
+  - 验证：`pnpm --filter @codeinsight/web test` 165 通过（`test/proposals.test.tsx` 24 条，含 PR 卡片各状态、复制链接、pushed 说明、全部错误码中文）；`playwright test e2e/chat-proposals.spec.ts e2e/chat.spec.ts` 10 通过（新增 PR 卡片显示、看 diff、忽略）；`pnpm -r build`、`pnpm lint` 通过；改动 `chat/{ProposalCard,ProposalResult,DiffView}.tsx`、`chat/proposal-text.ts`、`api/types.ts`、`styles.css`
+- [x] 阶段7：真实调用核实和收尾
   - 涉及模块：packages/core、packages/server 的集成测试（`local-cli.integration.test.ts`）
   - 依赖：阶段6
   - 内容：本机 Claude Code 真实调用约 5 次，改文件和建 PR 各至少一次（推到本地 bare 仓库，gh 用假脚本）；全量测试
   - 完成标准：真实调用中助手调用新工具并生成待确认修改，执行结果正确；`pnpm -r build`、`pnpm lint`、`pnpm -r test`、`pnpm --filter @codeinsight/web exec playwright test` 全部通过
+  - 验证：`CODEINSIGHT_REAL_CLI=claude-code pnpm --filter @codeinsight/server exec vitest run test/local-cli.integration.test.ts` 7 通过 / 3 跳过（opencode）；真实调用本机 Claude Code 6 次，均一次通过：init 只有 9 个 codeinsight 工具且启动参数含 `--tools ''`，改文件 + 新建文件执行后内容正确，建 PR（edits、fromWorkingTree 两种来源，推到本地 bare 仓库、假 gh）成功且用户工作区不变；全量 `pnpm -r build`、`pnpm lint` 通过，core 495/10 跳过、server 181/10 跳过、web 165、cli 40/1 跳过，web e2e 29 通过 / 6 跳过（clauve）；无遗留进程
+
+- [x] 阶段8：代码审查修复（第 1 轮）
+  - 涉及模块：packages/core、packages/server、packages/web
+  - 内容：同一次问答里对同一文件、同一分支的多次写工具调用按顺序叠加（每个文件只保留在最后一条记录里，内容含全部修改；同一分支的 edits 来源合并成一个 PR，working_tree 来源或 base 不同时拒绝）；PR 卡片显示正文（纯文本）；`ProposalView` 增加 `body`、`unbuilt`；会被工具链自动执行的文件（`.github/workflows`、`.claude`、`package.json`、`Makefile` 等）标为需要特别注意；默认目标分支统一取法（本地 origin/HEAD → ls-remote → gh）；fetch 用明确 refspec；`..` 开头目录名；失败原因去掉绝对路径；执行中超过 10 分钟可重新执行；自动滚到底只在内容变化时跟随、往上滚即停止；冲突后 diff 重新读取；unbuilt 卡片不可执行；合并重复实现（写工具名、git/gh 子进程调用、失败原因转换、“不存在”错误码、文件大小检查、错误说明文字）
+  - 完成标准：core、server、cli、web 全量测试与 e2e 通过
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；core 504/10 跳过、server 184/10 跳过、cli 40/1 跳过、web 176；web e2e 29 通过 / 6 跳过（clauve）
+
+- [x] 阶段9：代码审查修复（第 2 轮）
+  - 涉及模块：packages/core、packages/server、packages/cli、packages/web
+  - 内容：叠加改为按卡片整条合并（后一次调用涉及前面卡片的任一文件或同一分支时，整张并入，文件取并集、内容按调用顺序叠加、说明用“；”拼接），一张卡片就是一组完整修改；同一会话里还在等待确认的旧卡片也参与合并，旧卡片改为“已并入后面的修改”，保存时旧卡片已被执行或忽略则新卡片记为失败（`merge_base_changed`）；本机 CLI 路径用 `mcp --session` 让 MCP 子进程读同一会话的待确认修改，写工具结果带执行序号 `(change #N)`，保存时按它排序；`ProposalView` 增加 `retryable`，执行中超过 10 分钟可在网页重试或忽略；diff 读取中途重新执行时会再读一次；工具步骤标题按实际卡片数
+  - 完成标准：core、server、cli、web 全量测试与 e2e 通过
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；core 509/10 跳过、server 187/10 跳过、cli 40/1 跳过、web 179；web e2e 29 通过 / 6 跳过（clauve）
 
 ## 9. 待确认问题
 

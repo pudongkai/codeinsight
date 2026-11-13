@@ -1,5 +1,5 @@
-import { ASK_TOOLS, currentOverview, log, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult } from '@codeinsight/core';
-import type { AskToolContext } from '@codeinsight/core';
+import { ASK_TOOLS, currentOverview, log, redactWriteArgs, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult, WRITE_TOOLS } from '@codeinsight/core';
+import type { AskToolContext, ToolSpec, WriteToolsContext } from '@codeinsight/core';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -11,13 +11,13 @@ import { textResult } from './tool-result.js';
 /** 指定的快照不存在或还没建好 */
 export class AskToolsSnapshotError extends Error {}
 
-/** 问答工具的执行环境：绑定指定快照和它对应的当前概览，不建索引 */
-export function askToolContext(ws: ServerWorkspace, snapshotId: number, sendSource: boolean): AskToolContext {
+/** 问答工具的执行环境：绑定指定快照和它对应的当前概览，不建索引；给了 write 时提供写工具 */
+export function askToolContext(ws: ServerWorkspace, snapshotId: number, sendSource: boolean, write?: WriteToolsContext): AskToolContext {
   const snapshot = ws.store.getSnapshot(snapshotId);
   if (!snapshot) throw new AskToolsSnapshotError(`snapshot ${snapshotId} does not exist`);
   if (snapshot.extractStatus !== 'ok') throw new AskToolsSnapshotError(`snapshot ${snapshotId} is not ready`);
   const overview = currentOverview(ws.store, snapshot);
-  return { repo: ws.repo, store: ws.store, layout: ws.layout, snapshot, sendSource, ...(overview ? { overview } : {}) };
+  return { repo: ws.repo, store: ws.store, layout: ws.layout, snapshot, sendSource, ...(overview ? { overview } : {}), ...(write ? { write } : {}) };
 }
 
 export interface AskToolsMcpOptions {
@@ -41,10 +41,13 @@ export interface AskToolsServer {
   pending: PendingSet;
 }
 
-const TOOLS = ASK_TOOLS.map((t) => ({
-  name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object'; [k: string]: unknown },
-  annotations: { readOnlyHint: true, openWorldHint: false },
-}));
+function mcpTool(t: ToolSpec, annotations: Record<string, boolean>) {
+  return { name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object'; [k: string]: unknown }, annotations };
+}
+
+const READ_TOOLS = ASK_TOOLS.map((t) => mcpTool(t, { readOnlyHint: true, openWorldHint: false }));
+/** 写工具只生成待确认的修改，但不标只读 */
+const ALL_TOOLS = [...READ_TOOLS, ...WRITE_TOOLS.map((t) => mcpTool(t, { openWorldHint: false }))];
 
 async function callTool(ctx: AskToolContext, opts: AskToolsMcpOptions, stats: AskToolsStats, name: string, args: unknown): Promise<CallToolResult> {
   stats.calls++;
@@ -57,16 +60,18 @@ async function callTool(ctx: AskToolContext, opts: AskToolsMcpOptions, stats: As
   const out = await runAskTool(ctx, name, args ?? {});
   const text = truncateToolResult(out.content);
   stats.toolChars += text.length;
-  log.info('ask_tool', { tool: name, args: JSON.stringify(args ?? {}).slice(0, 200), resultChars: text.length, ms: Date.now() - started, error: out.error });
+  const logged = args && typeof args === 'object' && !Array.isArray(args) ? redactWriteArgs(name, args as Record<string, unknown>) : args;
+  log.info('ask_tool', { tool: name, args: JSON.stringify(logged ?? {}).slice(0, 200), resultChars: text.length, ms: Date.now() - started, error: out.error });
   return textResult(text, out.error !== undefined);
 }
 
-/** 只含 7 个问答工具的 MCP 服务：名字、描述、参数 schema 直接用 ASK_TOOLS，执行用 runAskTool */
+/** 问答工具的 MCP 服务：7 个查询工具（ctx 带 write 时再加两个写工具），名字、描述、参数 schema 直接用 ASK_TOOLS / WRITE_TOOLS，执行用 runAskTool */
 export function createAskToolsServer(ctx: AskToolContext, opts: AskToolsMcpOptions): AskToolsServer {
   const server = new Server({ name: 'codeinsight', version: SERVER_VERSION }, { capabilities: { tools: {} } });
   const stats: AskToolsStats = { calls: 0, toolChars: 0, limited: 0 };
   const pending = new PendingSet();
-  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: TOOLS }));
+  const tools = ctx.write ? ALL_TOOLS : READ_TOOLS;
+  server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, (req) => pending.track(callTool(ctx, opts, stats, req.params.name, req.params.arguments)));
   return { server, stats, pending };
 }
@@ -79,7 +84,7 @@ export async function runAskToolsMcpStdio(ctx: AskToolContext, opts: AskToolsMcp
   });
   process.stdin.once('end', () => void server.close());
   await server.connect(new StdioServerTransport());
-  log.info('ask_tools_mcp_started', { snapshot: ctx.snapshot.id, sendSource: ctx.sendSource, overview: ctx.overview !== undefined, maxToolChars: opts.maxToolChars, maxCalls: opts.maxCalls });
+  log.info('ask_tools_mcp_started', { snapshot: ctx.snapshot.id, sendSource: ctx.sendSource, overview: ctx.overview !== undefined, writeTools: ctx.write !== undefined, writableDirs: ctx.write?.dirs.length, maxToolChars: opts.maxToolChars, maxCalls: opts.maxCalls });
   await closed;
   await pending.drain();
   log.info('ask_tools_mcp_closed', { ...stats });

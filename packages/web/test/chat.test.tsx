@@ -362,3 +362,24 @@ describe('ChatPage with several sessions', () => {
     expect(screen.getByTestId('chat-stop')).toBeTruthy();
   });
 });
+
+describe('ChatPage session list collapse', () => {
+  it('collapses to a narrow bar, remembers it across renders, and expands again', async () => {
+    mockSessions();
+    accept();
+    const first = renderChat();
+    await screen.findByTestId('session-item');
+    fireEvent.click(screen.getByTestId('session-collapse'));
+    expect(localStorage.getItem('codeinsight.chat.sidebarCollapsed')).toBe('true');
+    expect(screen.queryByTestId('session-item')).toBeNull();
+    expect(screen.getByTestId('chat-page').className).toContain('sidebar-collapsed');
+    first.unmount();
+
+    renderChat();
+    expect(screen.getByTestId('session-list').dataset.collapsed).toBe('true');
+    expect(screen.getByTestId('session-new')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('session-expand'));
+    expect(await screen.findByTestId('session-item')).toBeTruthy();
+    expect(localStorage.getItem('codeinsight.chat.sidebarCollapsed')).toBe('false');
+  });
+});

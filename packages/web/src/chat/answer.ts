@@ -1,4 +1,4 @@
-import type { AskEvent, AskLimitReason, AskMessageMeta, AskStatus, AskToolError } from '@codeinsight/core/ask/events';
+import type { AskEvent, AskLimitReason, AskMessageMeta, AskStatus, AskToolError, ProposalView } from '@codeinsight/core/ask/events';
 import type { SymbolRef } from '@codeinsight/core/report/types';
 import { LIMIT_LABELS } from './tool-labels';
 
@@ -19,14 +19,17 @@ export interface AnswerView {
   refs: Record<string, SymbolRef>;
   /** 回答所用快照的 content_key；正在接收的回答没有 */
   contentKey?: string;
+  /** 回答里助手提出的待确认修改 */
+  proposals: ProposalView[];
 }
 
-export const emptyAnswer = (): AnswerView => ({ text: '', tools: [], status: 'answering', refs: {} });
+export const emptyAnswer = (): AnswerView => ({ text: '', tools: [], status: 'answering', refs: {}, proposals: [] });
 
 /** 已保存的回答 */
-export function savedAnswer(content: string, meta: AskMessageMeta | null): AnswerView {
-  if (!meta) return { ...emptyAnswer(), text: content, status: 'done' };
+export function savedAnswer(content: string, meta: AskMessageMeta | null, proposals: ProposalView[] = []): AnswerView {
+  if (!meta) return { ...emptyAnswer(), text: content, status: 'done', proposals };
   return {
+    proposals,
     text: content,
     tools: meta.toolCalls.map((c) => ({ name: c.name, args: c.args, done: true, error: c.error })),
     status: meta.status,
@@ -44,6 +47,11 @@ function finishTool(tools: ToolStep[], name: string, error?: AskToolError): Tool
   return tools.map((t, j) => (j === i ? { ...t, done: true, error } : t));
 }
 
+/** 同一 id 的修改替换原有的那条，新的加在末尾 */
+function upsertProposal(list: ProposalView[], p: ProposalView): ProposalView[] {
+  return list.some((x) => x.id === p.id) ? list.map((x) => (x.id === p.id ? p : x)) : [...list, p];
+}
+
 /** 流式事件累积成回答；已经结束（如用户点了停止）的回答不再变化 */
 export function applyEvent(a: AnswerView, e: AskEvent): AnswerView {
   if (a.status !== 'answering') return a;
@@ -54,6 +62,8 @@ export function applyEvent(a: AnswerView, e: AskEvent): AnswerView {
       return { ...a, tools: finishTool(a.tools, e.name, e.error) };
     case 'text':
       return { ...a, text: a.text + e.delta };
+    case 'proposal':
+      return { ...a, proposals: upsertProposal(a.proposals, e.proposal) };
     case 'done':
       return { ...a, status: e.status, reason: e.reason, refs: e.refs };
     case 'error':
