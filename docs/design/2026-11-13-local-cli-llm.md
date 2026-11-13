@@ -1,6 +1,6 @@
 # CodeInsight 本机 CLI 模型服务技术方案：用本机的 Claude Code / opencode 跑 AI 功能
 
-开发状态: TODO
+开发状态: DONE
 方案评审: 通过（2026-11-13）
 需求来源: 2026-11-13 用户需求：“AI 功能可以直接使用本机的 Claude Code（`claude` CLI）或 opencode（`opencode` CLI），不需要 API Key；现有通过 API 调大模型的方式（anthropic、openai-compatible）保留”
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-13
@@ -233,7 +233,7 @@ export interface LlmConfig {
 ```
 
 - `command.resolved`：按 4.4.2 找到的绝对路径，找不到为 `null`；只在 provider 是 CLI 时计算。
-- `extraEnv.entries`：名字匹配 `/key|token|secret|passw|auth|cookie|credential/i` 的不返回值，只给 `set: true`；URL 形式的值里带用户名密码时，把 `user:pass@` 换成 `***@` 再返回。
+- `extraEnv.entries`：只有代理类变量（`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，不分大小写）和名字以 `_BASE_URL` 结尾的变量返回值；URL 用 `new URL` 解析，去掉用户名密码、query 和 fragment 后返回，解析失败（如不带协议）时只给 `set: true`；`NO_PROXY` 是主机列表，原样返回。其余变量一律只给 `set: true`，网页显示“已设置（值不显示）”，保存时留空表示沿用。
 - `model.value` 为 `null` 且 provider 是 CLI 时，界面显示“工具默认模型”。
 
 #### POST /api/settings/llm（改）
@@ -543,40 +543,52 @@ CLI provider：
 
 ## 8. 开发计划
 
-- [ ] 阶段1：配置与用户设置（CLI provider、命令路径、附加环境变量）
+- [x] 阶段1：配置与用户设置（CLI provider、命令路径、附加环境变量）
   - 涉及模块：packages/core/src/{settings/,config/index.ts,index.ts}、packages/core/test/{settings,config}.test.ts
   - 依赖：无
   - 验证方式：独立
   - 内容：4.2 的类型和字段（`LlmProvider` 四种、`isCliProvider`、`UserLlmSettings.command/extraEnv`、`LlmConfig` 新字段、CLI 时 model 可空）；`core/src/settings/validate.ts`（模型名、命令路径、附加环境变量校验）；`normalizeLlm`；4.4.1 的 `llmSources`、`ignoredLlmKeys`（含 `config_llm_provider_ignored`）、`CODEINSIGHT_LLM_COMMAND`、`shadowed`；`costLimits` 按 provider 定并发默认值；`AskUsage` 的 `estimated`、`costUsd`；core 导出新类型和函数
   - 完成标准：`pnpm -r build`、`pnpm lint` 通过；`pnpm --filter @codeinsight/core test` 通过，已有 config、settings 测试不改期望值；第 7 节“配置”各项有用例；`pnpm -r test` 通过（server、web 因类型扩大需要的最小改动只限穷尽分支）
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；`pnpm -r test` core 364 通过 6 跳过、server 119、web 125、cli 30 通过 1 跳过；独立验证提 2 条已修并补测试：阶段2 前 CLI provider 会建出 OpenAI 客户端（改为抛 LlmError 转 `llm_not_configured`，改了 `llm/index.ts` 一处），模型名规则过严拒绝 `@cf/...`（改为可打印、无空白和控制字符、不以 `-` 开头，server `parseModel` 共用 `modelProblem`）；与方案的差异：附加环境变量只拒绝 PATH（不分大小写），warning 沿用英文，仓库配置的非字符串 model 被忽略，`AskUsage` 的改动在 `ask/events.ts`，server `parseLlmForm` 在阶段4 前只接受两种 API provider；改动 `core/src/settings/{types,validate,index}.ts`、`config/index.ts`、`llm/index.ts`、`ask/events.ts`、`server/src/http/routes/settings.ts`
 
-- [ ] 阶段2：CLI 调用层与结构化输出（概览、审查可用）
+- [x] 阶段2：CLI 调用层与结构化输出（概览、审查可用）
   - 涉及模块：packages/core/src/llm/{cli/,index.ts,ask-json.ts,setup.ts,cache.ts}、packages/core/src/overview/{summarize-input.ts,summarize.ts}、packages/core/src/intent/、packages/core/test/（新增 llm-cli.test.ts、helpers/fake-claude.mjs、helpers/fake-opencode.mjs）
   - 依赖：阶段1
   - 验证方式：独立
   - 内容：第一步（真实调用，用户已同意消耗少量额度；阶段2 和阶段5 合计每个 CLI 约 20 次请求以内）：用真实 `claude`、`opencode` 各做几次最小调用，核实 Claude Code 的 `--tools ""` 下 `--json-schema` 是否返回 `structured_output`、`--system-prompt-file`、`--max-turns`、`stream-json` 各行格式、`dontAsk` + `--allowedTools` 下 MCP 工具可用、`~/.claude/settings.json` 的 `env` 由我们并入后能连通；opencode 的 stdin、`PWD` 决定的工作目录、权限写法、`steps`、`session delete`；结果写进本阶段验证记录，和方案不符的先改方案再开发。之后：4.4.2 找命令；4.4.3 `runCli`、`buildCliEnv`、临时目录、进程组结束、`killActiveCliProcesses`、日志；4.4.4 / 4.4.5 两个客户端的 `complete`、`OPENCODE_PERMISSIONS_VERIFIED` 和 opencode 的不可用处理、关闭用户全局 MCP、会话删除队列 `OpencodeSessionCleaner`、参数构造、输出解析、错误分类、`CliError`、`flattenMessages`；`LlmRequest.jsonSchema` 和 `askJson` 透传；概览各类请求和意图分析的 JSON Schema（与现有 `validate` 对应，放在请求定义旁边）；`createLlmClient` 按 provider 分派、找不到命令转 `llm_not_configured`；`llmIdentity` 空模型用 `default`；`notifyLlmOnce` 的提示文字带“本机 CLI”；假 CLI 脚本
   - 完成标准：`pnpm -r build`、`pnpm lint` 通过；`pnpm --filter @codeinsight/core test` 通过，已有 llm、ask-json、overview、intent 测试不改期望值；第 7 节 core 单测里“找命令”“参数”“输出”“错误分类”“超时和中止”“缓存身份”“概览、意图分析用假 CLI 跑通”各项有用例；中止用例结束后 `pgrep -f fake-claude` 无输出
+  - 验证：真实调用 claude 3 次、opencode 6 次。Claude Code：`--tools ""` 下 `--json-schema` 返回 `structured_output`，`--system-prompt-file` 生效，`--max-turns` 超限返回 `error_max_turns`，`dontAsk` 下 `--allowedTools` 列出的 MCP 工具可调用、未列出的被拒绝，并入 settings.json 的 env 后能连通，stream-json 另有 `rate_limit_event` 等行类型（忽略）。opencode：stdin 可读、PWD 决定工作目录、`session delete` 可用；关全局 MCP 需写完整条目；`"plugin": []` 关不掉全局插件（按方案保留）；错误格式为 `type/status`（与旧格式一起处理）；全局 AGENTS.md 和 skills 仍会被读取；6 次中 1 次成功，其余因免费额度用完、内网不可达、阿里云 403 失败，未能实测工具拒绝，`OPENCODE_PERMISSIONS_VERIFIED=false`，opencode 暂不开放。`pnpm -r build`、`pnpm lint` 通过；core 408 通过 6 跳过，server 119、web 125、cli 30 通过 1 跳过；无遗留进程，核实时创建的 opencode 会话已删除。独立验证提 2 条已修并补测试：启动前的等待期间中止或结束全部进程会漏掉（改为挂监听后再查中止，`killActiveCliProcesses` 后不再启动新进程，`resetCliShutdown` 复位），模型为空时缓存身份未计入 `ANTHROPIC_MODEL`。与方案的差异：`CliError` 放在 `llm/index.ts` 避免循环引用。改动 `core/src/llm/cli/`、`llm/{index,ask-json,cache,setup}.ts`、`overview/summarize{,-input}.ts`、`intent/`、假 CLI 脚本和 `test/llm-cli.test.ts`
 
-- [ ] 阶段3：问答走 MCP（ask-tools 服务、CLI 问答流式转 NDJSON）
+- [x] 阶段3：问答走 MCP（ask-tools 服务、CLI 问答流式转 NDJSON）
   - 涉及模块：packages/core/src/ask/{agent.ts,cli-agent.ts,tools.ts}、packages/server/src/mcp/ask-tools.ts、packages/server/src/{index.ts,http/server.ts,http/context.ts,http/routes/chat.ts}、packages/cli/src/commands/{mcp.ts,ask.ts,serve.ts}、packages/core/test/、packages/server/test/（新增 ask-tools-mcp.test.ts、helpers/ask-tools-mcp.mjs、helpers/fake-claude-mcp.mjs）、packages/cli/test/
   - 依赖：阶段2
   - 验证方式：独立
   - 内容：4.3 的 `codeinsight mcp --ask-tools`；4.4.8 `runAskToolsMcpStdio`（低层 Server、直接用 `ASK_TOOLS` 和 `runAskTool`、只读标注、调用计数和字符上限）；4.4.7 `runCliAsk`（两种 CLI 的事件转换、limited / failed / cancelled、refs 补查、用量）；`agent.ts` 拆出共用部分、`TOOL_LIMIT_RESULT` 移到 `tools.ts`；`AskOptions.toolServer`；serve 的 `askToolServer` 选项、`chat.ts` 传入；`codeinsight ask` 传入并在 SIGINT 时结束子进程；所有调用 `killActiveScipProcesses` 的关闭处同时调用 `killActiveCliProcesses`，serve 关闭和命令结束前调用 `flushOpencodeSessions`；`askClient` 对 CLI 客户端不再要求 `chat`
   - 完成标准：`pnpm -r build`、`pnpm lint` 通过；`pnpm --filter @codeinsight/core test`、`pnpm --filter @codeinsight/server test`、`pnpm --filter @codeinsight/cli test` 通过，已有 ask、chat-api、mcp 测试不改期望值；第 7 节 core“CLI 问答”、server“mcp --ask-tools 服务”“MCP 工具调用路径”、cli 各项有用例；跑完 `pgrep -f 'fake-claude|--ask-tools'` 无输出
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；`pnpm -r test` core 430 通过 6 跳过、server 127、cli 38 通过 1 跳过、web 125；`pgrep -fl 'fake-claude|fake-opencode|--ask-tools'` 无输出；独立验证提 4 条已修并补测试：工具服务未连上时模型无工具作答仍记完成（改为解析 init 行，`codeinsight` 不是 connected 时以 failed 结束，pending 也按失败处理，阶段5 用真实调用核实；opencode 输出无服务状态，未处理），工具出错只认结果前缀（改为同时看 `is_error` 并去掉 `<tool_use_error>`、`Error: ` 包装，真实格式阶段5 核实），serve 关闭期间概览仍可启动新子进程（关闭一开始即结束 CLI 子进程，之后只放行删会话命令），`codeinsight ask` 的中断处理（SIGINT/SIGTERM/SIGHUP 只中止回答）；与方案的差异：serve 关闭顺序为中止问答、删 opencode 会话、结束剩余 CLI 子进程，`llm/cli/{claude-code,opencode}.ts` 的 opts 改为公开只读，`cli.ts` 统一在命令结束前删会话，`mcp/server.ts` 的 `stopWork` 补调 `killActiveCliProcesses`，`maxCalls` 无命令行参数；改动 `core/src/ask/{agent,cli-agent,tools}.ts`、`llm/cli/process.ts`、`server/src/mcp/{ask-tools,server}.ts`、`http/{server,context}.ts`、`routes/chat.ts`、`cli/src/{cli.ts,commands/{mcp,ask,serve}.ts}`
 
-- [ ] 阶段4：设置接口、测试连接、status 与网页
+- [x] 阶段4：设置接口、测试连接、status 与网页
   - 涉及模块：packages/server/src/http/routes/{settings,status}.ts、packages/server/src/http/context.ts、packages/server/test/、packages/web/src/{settings/,api/types.ts,app/StatusBar.tsx,chat/notice.ts,chat/ChatPage.tsx,overview/GenerateDialog.tsx}、packages/web/test/、packages/web/e2e/{setup.spec.ts,helpers/cli.ts}
   - 依赖：阶段1、阶段2、阶段3（e2e 要走问答；两个阶段都改 `server/src/http/context.ts`）
   - 验证方式：独立
   - 内容：4.3 的 GET / POST `/api/settings`、`/api/settings/llm/test`、`/api/status` 改动（`parseLlmForm` 用阶段1的校验函数；CLI provider 按现有 `resolveUserLlm` 规则不沿用别的 provider 的 key；`extraEnv` 隐藏和沿用；`command.resolved`）；4.4.6 测试连接（版本、`auth status`、最小调用、新 reason、`cliTimeoutMs`）；4.4.9 网页（设置对话框（opencode 未验证时置灰并说明）、额度说明、`llmLabel`、新 reason 文字、类型）；e2e 用假 `claude` 走通“设置 → 测试连接 → 保存 → 问答”
   - 完成标准：`pnpm -r build`、`pnpm lint` 通过；`pnpm --filter @codeinsight/server test`、`pnpm --filter @codeinsight/web test` 通过，已有 settings-api、web 设置组件测试不改期望值；`pnpm --filter @codeinsight/web test:e2e` 通过（含新增的 CLI 设置用例）；第 7 节 server“设置接口”“测试连接”“status”、web 各项有用例；手工打开 `codeinsight serve`，选 Claude Code 时看不到服务地址和 API Key 输入框
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；`pnpm -r test` core 430 通过 6 跳过、server 142、web 132、cli 38 通过 1 跳过；`pnpm --filter @codeinsight/web test:e2e` 24 通过 6 跳过（含选 Claude Code 后服务地址和 API Key 输入框消失、测试连接、保存、问答走通）；无遗留进程；独立验证提 6 条已修并补测试：API 类与 CLI 类之间切换时模型值沿用（改为清空），附加环境变量的值回传过宽（改为白名单，见 4.3），浏览器断开后测试连接不停（改为中止并结束子进程），预检子进程在关闭时不结束（改由同一中止信号结束），status 的 source 推导不准（改用 `llmSources`），多余类型转换；与方案的差异：`server.ts` 加 `llmTestCliTimeoutMs`（默认 90 秒），core 的 `LlmRequest` 加可选 `signal` 并由两个 CLI 客户端传给 `runCli`，新增 `status.llmProblem`、`settings.unavailableProviders`，测试连接的模型取配置值或 `ANTHROPIC_MODEL`；API 的测试连接仍不能中止（最长 20 秒）；改动 `server/src/http/routes/{settings,status,llm-test-cli}.ts`、`http/{context,server}.ts`、`web/src/settings/`、`api/types.ts`、`app/StatusBar.tsx`、`chat/notice.ts`、`overview/GenerateDialog.tsx`、`e2e/setup.spec.ts`
 
-- [ ] 阶段5：真实 CLI 集成检查
+- [x] 阶段5：真实 CLI 集成检查
   - 涉及模块：packages/core/test/local-cli.integration.test.ts、packages/server/test/local-cli.integration.test.ts，以及按检查结果调整的 packages/core/src/llm/cli/
   - 依赖：阶段3、阶段4
   - 验证方式：独立
   - 内容：第 7 节“真实 CLI”1–6 项写成默认跳过的集成测试（`CODEINSIGHT_REAL_CLI=claude-code|opencode`）（日常 `pnpm -r test` 跳过，不消耗额度）；本阶段对两个 CLI 各真实跑一遍（用户已同意，每个 CLI 与阶段2 合计约 20 次请求以内）；结果与阶段2 第一步不一致时调整 `structuredOutput` 开关、opencode 权限写法、`OPENCODE_PERMISSIONS_VERIFIED` 等；把结论写进本阶段验证记录
   - 完成标准：不设环境变量时 `pnpm -r test` 里这两个文件全部跳过；`CODEINSIGHT_REAL_CLI=claude-code pnpm --filter @codeinsight/core test -- local-cli` 和 `CODEINSIGHT_REAL_CLI=claude-code pnpm --filter @codeinsight/server test -- local-cli` 通过（opencode 同样）；检查后 `pgrep -f 'claude -p|opencode run|--ask-tools'` 无输出；第 7 节“真实 CLI”1–6 项的结果写进验证记录
+  - 验证：真实调用 claude 13 次、opencode 2 次。Claude Code 2.1.318：第 1 项 `--tools ""` 加 `--json-schema` 返回 `structured_output`；第 2 项 init 行只有 7 个 `mcp__codeinsight__*` 工具，`mcp_servers` 只有 codeinsight（多一个 `source:"dynamic"` 字段），`slash_commands` 为空，回答里没有用户 CLAUDE.md 的内容，靠并入 settings.json 的代理设置连通；第 3 项问答出现 `list_entries` 步骤，回答中 5 个 `sym:` 链接都能打开；第 4 项配置目录为空时测试连接返回 `not_logged_in`，没有发模型请求；第 6 项问答中途断开后无残留进程。阶段3 留下的两点：init 前 Claude Code 会等 MCP 服务约 30 秒，仍未连上时报 `pending` 并不带工具继续作答，按失败处理正确（提示改为“没能及时启动，请重试”）；工具出错时 `tool_result` 的 content 是纯字符串 `error: <code>: …` 且 `is_error: true`。第 5 项（opencode 权限隔离）未执行：免费模型额度用完、另一个模型 90 秒超时，没有可用模型，`OPENCODE_PERMISSIONS_VERIFIED` 保持 false，opencode 按方案不开放；用例已写好，有可用模型后用 `CODEINSIGHT_REAL_CLI=opencode pnpm --filter @codeinsight/core exec vitest run test/local-cli.integration.test.ts`（server 同理）执行。独立验证提的超时设置、opencode 残留进程检查、变量值写错时报错、临时目录清理、重复 helper（移到 core `test/helpers/real-cli.ts`）等已修，修后未再真实调用。不设环境变量时 `pnpm -r test` core 432 通过 10 跳过、server 142 通过 7 跳过、web 132、cli 38 通过 1 跳过，两个集成测试文件全部跳过；`pnpm -r build`、`pnpm lint` 通过；web e2e 24 通过 6 跳过；无遗留进程；改动 `core/test/local-cli.integration.test.ts`、`server/test/local-cli.integration.test.ts`、`core/test/helpers/{real-cli.ts,fake-claude.mjs}`、`core/src/ask/cli-agent.ts`
+
+- [x] 阶段6：代码审查修复
+  - 涉及模块：packages/cli/src/{cli.ts,commands/}、packages/core/src/{llm/,ask/,overview/,review/,settings/types.ts}、packages/core/package.json、packages/server/src/{mcp/server.ts,http/routes/settings.ts}、packages/web/src/settings/
+  - 依赖：阶段5
+  - 内容：`cli.ts` 统一处理 SIGINT、SIGTERM、SIGHUP（ask、overview、review 先结束 CLI 子进程、删 opencode 会话，再以 128+信号编号退出；ask 被信号中断的退出码由 1 改为 130）；中止信号传到 overview 和 review 的模型请求，中止后 overview 记录为 failed、不保存半成品，review 不输出报告；core 新增 `llmLabel` 供 ask、review、overview 共用；问答模式复用 `ISOLATION_ARGS`；`runErrorOf` 和 opencode 运行上下文各保留一份；`stopWork` 放行删会话；API 客户端支持 signal，测试连接在浏览器断开时中止；`DEFAULT_CLI_COMMAND` 移到 `settings/types.ts` 并新增 `./settings/types` 子路径导出供 web 使用；设置接口新增 `commandEnv`；生效 provider 不可选时表单改为 anthropic 并提示重新选择
+  - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test`、web e2e 通过
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；`pnpm -r test` core 436 通过 10 跳过、server 143 通过 7 跳过、web 134、cli 39 通过 1 跳过；web e2e 24 通过 6 跳过；无遗留进程；代码审查第 1 轮 core/cli 高 1、中 2 及重复实现和注释若干，server/web 中 1、低 4，已修；第 2 轮 core/cli 中 1（overview 中止后保存半成品）、server/web 低 2，已修并补测试，未再审第 3 轮
 
 ## 9. 待确认问题
 
