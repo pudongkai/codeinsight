@@ -2,7 +2,7 @@ import { appendFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { startFakeLlm, type FakeLlm } from '../../core/test/helpers/fake-llm-server.mjs';
-import { fixtureRepo, shopRepo, startServe, startServeIn, tempDir, type Serve } from './helpers/cli';
+import { fakeClaudeCommand, fixtureRepo, shopRepo, startServe, startServeIn, tempDir, type Serve } from './helpers/cli';
 
 /** 网页里选择仓库、配置模型服务、多个标签页跟着切换仓库 */
 
@@ -86,6 +86,46 @@ test.describe('model service settings', () => {
     expect(fake.requests.length).toBeGreaterThan(0);
     expect(statSync(path.join(home, 'settings.json')).mode & 0o777).toBe(0o600);
     expect(await page.content()).not.toContain(API_KEY);
+  });
+});
+
+test.describe('local Claude Code', () => {
+  let serve: Serve;
+  const command = fakeClaudeCommand();
+  test.beforeAll(async () => {
+    serve = await startServe(shopRepo(), tempDir('ci-e2e-data-'), { CODEINSIGHT_LLM_COMMAND: command, CLAUDE_CONFIG_DIR: tempDir('ci-e2e-claude-') });
+  });
+  test.afterAll(async () => {
+    await serve?.stop();
+  });
+
+  test('choosing Claude Code hides the address and key; test, save and ask go through the local CLI and its tools', async ({ page }) => {
+    await page.goto(serve.opened);
+    await waitIndexed(page);
+    await page.getByTestId('tab-chat').click();
+    await page.getByTestId('chat-no-llm').getByTestId('open-settings').click();
+    const dialog = page.getByTestId('settings-dialog');
+    await dialog.getByTestId('settings-provider').selectOption('claude-code');
+    await expect(dialog.getByTestId('settings-baseUrl')).toHaveCount(0);
+    await expect(dialog.getByTestId('settings-apiKey')).toHaveCount(0);
+    await expect(dialog.getByTestId('settings-test-note')).toContainText('消耗少量额度');
+    await expect(dialog.getByRole('option', { name: 'opencode（本机）' })).toBeDisabled();
+
+    await dialog.getByTestId('settings-test').click();
+    await expect(dialog.getByTestId('settings-test-result')).toContainText('连接成功：Claude Code 2.1.318 (Claude Code)', { timeout: 60_000 });
+    await dialog.getByTestId('settings-save').click();
+    await expect(dialog.getByTestId('settings-message')).toHaveText('已保存');
+    await expect(dialog.getByTestId('settings-command')).toHaveAttribute('placeholder', command);
+    await dialog.getByTestId('settings-close').click();
+
+    await expect(page.getByTestId('llm-label')).toHaveText('Claude Code（默认模型）（本机 CLI，使用你的订阅/账号额度）');
+    await expect(page.getByTestId('ask-notice')).toContainText('Claude Code（默认模型）（本机 CLI');
+    await page.getByTestId('ask-notice-accept').click();
+    await page.getByTestId('chat-input').fill('退款在哪里处理');
+    await page.getByTestId('chat-send').click();
+    await expect(page.getByTestId('answer-text').last()).toContainText('退款由 orders 的 refund 处理。', { timeout: 60_000 });
+    await expect(page.locator('[data-testid="tool-step"][data-name="search_symbols"]').last()).toBeAttached();
+    await expect(page.locator('[data-testid="tool-step"][data-name="read_source"]').last()).toBeAttached();
   });
 });
 

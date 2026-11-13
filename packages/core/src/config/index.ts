@@ -7,15 +7,23 @@ import { DEFAULT_PARTITION_THRESHOLDS, type PartitionThresholds } from '../overv
 import { DEFAULT_SNIPPET_LIMITS, type SnippetLimits } from '../overview/snippets.js';
 import type { ExternalCategory } from '../overview/types.js';
 import type { Warning } from '../report/types.js';
-import { isLlmProvider, readUserSettings, userSettingsPath, type LlmProvider, type UserLlmSettings, type UserSettings } from '../settings/index.js';
+import {
+  commandProblem, isApiProvider, isCliProvider, isLlmProvider, modelProblem, readUserSettings, userSettingsPath,
+  type ApiLlmProvider, type LlmProvider, type UserLlmSettings, type UserSettings,
+} from '../settings/index.js';
 
 export type { LlmProvider };
 
 export interface LlmConfig {
   provider: LlmProvider;
+  /** CLI provider 可以为空串：用 CLI 自己的默认模型 */
   model: string;
   baseUrl?: string;
   apiKey?: string;
+  /** CLI provider 的可执行文件；undefined 表示按默认命令名查找 */
+  command?: string;
+  /** CLI provider 启动时附加的环境变量 */
+  extraEnv?: Record<string, string>;
 }
 
 export interface CodeInsightConfig {
@@ -65,6 +73,8 @@ export interface AskConfig {
 
 export const DEFAULT_OVERVIEW_LANGUAGE = 'zh';
 export const DEFAULT_OVERVIEW_CONCURRENCY = 4;
+/** 本机 CLI 每个请求是一个子进程，默认并发比 API 低 */
+export const DEFAULT_CLI_CONCURRENCY = 2;
 export const DEFAULT_CONFIRM_TOKENS = 200_000;
 export const DEFAULT_ASK_CONFIG: AskConfig = { maxRounds: 12, maxToolChars: 120_000 };
 
@@ -111,22 +121,41 @@ export const DEFAULT_DATA_DIR = '.codeinsight';
  * 不读仓库配置、只能从环境变量或用户设置读取的 LLM 配置项。仓库里的配置文件随被审查的代码一起来，不可信：
  * 能改请求地址或指定读取哪个环境变量，就能把用户的 API key 或其他环境变量发到任意地址。
  */
-const ENV_ONLY_LLM_KEYS: Record<string, string> = {
+const ENV_ONLY_LLM_KEYS: Record<string, string | null> = {
   baseUrl: 'CODEINSIGHT_LLM_BASE_URL',
   apiKey: 'CODEINSIGHT_LLM_API_KEY',
   apiKeyEnv: 'CODEINSIGHT_LLM_API_KEY',
+  /** 能指定命令路径就能让 CodeInsight 执行仓库里的任意程序 */
+  command: 'CODEINSIGHT_LLM_COMMAND',
+  /** 能指定附加环境变量就能改代理地址把请求转走；只能写在用户设置里 */
+  extraEnv: null,
 };
 
-/** 仓库配置里出现只能从环境变量读取的项时忽略，记日志并返回给报告的 warning */
+/** 仓库配置里出现只能从环境变量或用户设置读取的项时忽略，记日志并返回给报告的 warning */
 function ignoredLlmKeys(file: FileConfig): Warning[] {
   const llm = (file.llm ?? {}) as Record<string, unknown>;
   const keys = Object.keys(ENV_ONLY_LLM_KEYS).filter((k) => llm[k] !== undefined);
   if (keys.length === 0) return [];
   log.warn('config_llm_key_ignored', { keys: keys.join(',') });
-  const envs = [...new Set(keys.map((k) => ENV_ONLY_LLM_KEYS[k]))].join(', ');
+  const envs = [...new Set(keys.map((k) => ENV_ONLY_LLM_KEYS[k]).filter((e) => e !== null))];
+  const where = envs.length > 0 ? `environment variables (${envs.join(', ')}) or in the user settings` : 'the user settings';
   return [{
     code: 'config_llm_key_ignored', level: 'warning',
-    message: `ignored ${keys.map((k) => `llm.${k}`).join(', ')} in ${CONFIG_FILE}: for safety these can only be set by environment variables (${envs}) or in the user settings`,
+    message: `ignored ${keys.map((k) => `llm.${k}`).join(', ')} in ${CONFIG_FILE}: for safety these can only be set by ${where}`,
+  }];
+}
+
+/**
+ * 仓库配置不能选 CLI provider：那会在用户机器上启动本机程序、消耗用户的订阅额度。
+ * llmSources 里按仓库配置没写 provider 处理。
+ */
+function ignoredRepoProvider(file: FileConfig): Warning[] {
+  const provider = file.llm?.provider;
+  if (!isCliProvider(provider)) return [];
+  log.warn('config_llm_provider_ignored', { provider });
+  return [{
+    code: 'config_llm_provider_ignored', level: 'warning',
+    message: `ignored llm.provider=${provider} in ${CONFIG_FILE}: a local CLI can only be chosen in the user settings or by CODEINSIGHT_LLM_PROVIDER`,
   }];
 }
 
@@ -280,8 +309,11 @@ function repoSendSource(file: FileConfig, warnings: Warning[]): boolean {
   return false;
 }
 
-/** 费用和发送相关的配置：仓库配置只能调严，放宽只能用环境变量（或命令行参数） */
-function costLimits(file: FileConfig, env: NodeJS.ProcessEnv): CostLimits {
+/**
+ * 费用和发送相关的配置：仓库配置只能调严，放宽只能用环境变量（或命令行参数）。
+ * provider 是生效的 provider，决定并发的默认值。
+ */
+function costLimits(file: FileConfig, env: NodeJS.ProcessEnv, provider: LlmProvider | undefined): CostLimits {
   const ignored: IgnoredLimit[] = [];
   const warnings: Warning[] = [];
   const L = LIMIT_ENV;
@@ -289,7 +321,7 @@ function costLimits(file: FileConfig, env: NodeJS.ProcessEnv): CostLimits {
   return {
     sendSource: repoSendSource(file, warnings) && !envTurnsOff(env, L.sendSource),
     snippets: snippetLimits(file, env, ignored),
-    concurrency: singleLimit(env, { key: 'overview.concurrency', env: L.concurrency, def: DEFAULT_OVERVIEW_CONCURRENCY, repo: ov?.concurrency, min: 1 }, ignored),
+    concurrency: singleLimit(env, { key: 'overview.concurrency', env: L.concurrency, def: isCliProvider(provider) ? DEFAULT_CLI_CONCURRENCY : DEFAULT_OVERVIEW_CONCURRENCY, repo: ov?.concurrency, min: 1 }, ignored),
     confirmTokens: singleLimit(env, { key: 'overview.confirmTokens', env: L.confirmTokens, def: DEFAULT_CONFIRM_TOKENS, repo: ov?.confirmTokens, min: 0 }, ignored),
     ask: {
       maxRounds: singleLimit(env, { key: 'ask.maxRounds', env: L.maxRounds, def: DEFAULT_ASK_CONFIG.maxRounds, repo: file.ask?.maxRounds, min: 1 }, ignored),
@@ -312,21 +344,32 @@ function ignoredLimitWarnings(ignored: IgnoredLimit[]): Warning[] {
 }
 
 export type LlmSource = 'user' | 'env' | 'repo' | 'default' | 'none';
-export type LlmField = 'provider' | 'model' | 'baseUrl' | 'apiKey';
+export type LlmField = 'provider' | 'model' | 'baseUrl' | 'apiKey' | 'command';
 
 export interface LlmFieldSource {
-  /** 取到的值；baseUrl 用客户端内置默认值时为 undefined */
+  /** 取到的值；baseUrl 用客户端内置默认值、command 用默认命令名时为 undefined */
   value?: string;
   source: LlmSource;
   /** source 为 env 时的变量名 */
   env?: string;
 }
 
+export interface LlmExtraEnvSource {
+  /** 只来自用户设置 */
+  value?: Record<string, string>;
+  source: 'user' | 'none';
+}
+
 export interface LlmSources {
   provider: LlmFieldSource;
   model: LlmFieldSource;
+  /** CLI provider 时来源为 none */
   baseUrl: LlmFieldSource;
+  /** CLI provider 时来源为 none */
   apiKey: LlmFieldSource;
+  /** 只用于 CLI provider；API provider 时来源为 none */
+  command: LlmFieldSource;
+  extraEnv: LlmExtraEnvSource;
   /** 环境变量也设了值、但被用户设置盖住的项 */
   shadowed: { field: LlmField; by: 'user'; env: string }[];
   /** 生效的配置；provider 没有或有误时为 undefined */
@@ -337,19 +380,21 @@ export interface LlmSources {
 
 export interface LlmSourcesInput {
   user?: UserLlmSettings;
-  /** 仓库配置里的 llm 部分；没有仓库时不传。只取 provider、model */
+  /** 仓库配置里的 llm 部分；没有仓库时不传。只取 API provider 和 model */
   repo?: { provider?: unknown; model?: unknown };
   env: NodeJS.ProcessEnv;
 }
 
-const LLM_ENV = {
+/** 各 LLM 配置项对应的环境变量 */
+export const LLM_ENV = {
   provider: 'CODEINSIGHT_LLM_PROVIDER',
   model: 'CODEINSIGHT_LLM_MODEL',
   baseUrl: 'CODEINSIGHT_LLM_BASE_URL',
   apiKey: 'CODEINSIGHT_LLM_API_KEY',
+  command: 'CODEINSIGHT_LLM_COMMAND',
 } as const;
 
-const PROVIDER_KEY_ENV: Record<LlmProvider, string> = { anthropic: 'ANTHROPIC_API_KEY', 'openai-compatible': 'OPENAI_API_KEY' };
+const PROVIDER_KEY_ENV: Record<ApiLlmProvider, string> = { anthropic: 'ANTHROPIC_API_KEY', 'openai-compatible': 'OPENAI_API_KEY' };
 
 /** 用户设置 > 环境变量（按顺序取第一个有值的）> 仓库配置；空字符串按没设处理 */
 function pickField(user: string | undefined, env: NodeJS.ProcessEnv, envNames: string[], repo?: unknown): LlmFieldSource {
@@ -365,31 +410,107 @@ function shadowedBy(field: LlmField, user: string | undefined, env: NodeJS.Proce
   return user && name ? [{ field, by: 'user', env: name }] : [];
 }
 
+/** 不合格的值记日志后按没设处理；日志不记值 */
+function checked(v: unknown, key: string, problemOf: (v: unknown) => string | undefined): string | undefined {
+  if (v === undefined || v === null || v === '') return undefined;
+  const problem = problemOf(v);
+  if (problem === undefined) return v as string;
+  log.warn('config_value_ignored', { key, reason: problem });
+  return undefined;
+}
+
+/** 环境变量里不合格的值去掉，后续按没设处理 */
+function checkedEnv(env: NodeJS.ProcessEnv, name: string, problemOf: (v: unknown) => string | undefined): NodeJS.ProcessEnv {
+  const v = checked(env[name], name, problemOf);
+  return v === undefined ? {} : { [name]: v };
+}
+
+/** 仓库配置里的 CLI provider 不算来源（ignoredRepoProvider 给 warning） */
+function pickProvider(user: UserLlmSettings, repo: LlmSourcesInput['repo'], env: NodeJS.ProcessEnv): LlmFieldSource {
+  const repoProvider = isCliProvider(repo?.provider) ? undefined : repo?.provider;
+  return pickField(user.provider, env, [LLM_ENV.provider], repoProvider);
+}
+
 /**
- * LLM 各项的取值和来源。用户设置和环境变量都是用户自己给的，可以写请求地址和 API key；
- * 仓库配置随被分析的代码一起来，只取 provider 和 model。配置有误时不抛错，返回 problem。
+ * CLI provider 的 model 不读仓库配置；环境变量只在 provider 也来自环境变量时用，
+ * 避免给 API 用的模型名被传给 CLI，也不让仓库换用更贵的模型。
+ */
+function pickModel(input: LlmSourcesInput, provider: LlmFieldSource): { model: LlmFieldSource; invalidIgnored: boolean } {
+  const { user = {}, repo = {}, env } = input;
+  const cli = isCliProvider(provider.value);
+  const envUsable = !cli || provider.source === 'env';
+  const userModel = checked(user.model, 'llm.model', modelProblem);
+  const envModel = envUsable ? checkedEnv(env, LLM_ENV.model, modelProblem) : {};
+  const repoModel = cli ? undefined : checked(repo.model, `llm.model in ${CONFIG_FILE}`, modelProblem);
+  const model = pickField(userModel, envModel, [LLM_ENV.model], repoModel);
+  if (model.source === 'none' && provider.value === 'anthropic') Object.assign(model, { value: DEFAULT_ANTHROPIC_MODEL, source: 'default' });
+  const given = (v: unknown) => v !== undefined && v !== null && v !== '';
+  const invalidIgnored = (given(user.model) && !userModel) || (envUsable && given(env[LLM_ENV.model]) && !envModel[LLM_ENV.model])
+    || (!cli && given(repo.model) && !repoModel);
+  return { model, invalidIgnored };
+}
+
+/** 只用于 CLI provider：用户设置 > CODEINSIGHT_LLM_COMMAND > 默认命令名（value 为 undefined） */
+function pickCommand(user: UserLlmSettings, env: NodeJS.ProcessEnv, cli: boolean): LlmFieldSource {
+  if (!cli) return { source: 'none' };
+  const command = pickField(checked(user.command, 'llm.command', (v) => commandProblem(v)), checkedEnv(env, LLM_ENV.command, (v) => commandProblem(v)), [LLM_ENV.command]);
+  return command.source === 'none' ? { source: 'default' } : command;
+}
+
+interface ApiFields {
+  baseUrl: LlmFieldSource;
+  apiKey: LlmFieldSource;
+  shadowed: LlmSources['shadowed'];
+}
+
+/** 请求地址和 API key 只用于 API provider，CLI provider 时来源为 none */
+function apiFields(user: UserLlmSettings, env: NodeJS.ProcessEnv, provider: LlmProvider | undefined): ApiFields {
+  if (isCliProvider(provider)) return { baseUrl: { source: 'none' }, apiKey: { source: 'none' }, shadowed: [] };
+  const keyEnvs = [LLM_ENV.apiKey, ...(provider ? [PROVIDER_KEY_ENV[provider]] : [])];
+  const baseUrl = pickField(user.baseUrl, env, [LLM_ENV.baseUrl]);
+  if (baseUrl.source === 'none' && provider) baseUrl.source = 'default';
+  return {
+    baseUrl,
+    apiKey: pickField(user.apiKey, env, keyEnvs),
+    shadowed: [...shadowedBy('baseUrl', user.baseUrl, env, [LLM_ENV.baseUrl]), ...shadowedBy('apiKey', user.apiKey, env, keyEnvs)],
+  };
+}
+
+/** 生效的配置；provider 不支持、API provider 缺 model 时返回 problem */
+function effectiveLlm(s: Omit<LlmSources, 'llm' | 'problem'>, modelInvalidIgnored: boolean): Pick<LlmSources, 'llm' | 'problem'> {
+  const p = s.provider.value;
+  if (p === undefined) return {};
+  if (isCliProvider(p)) return { llm: { provider: p, model: s.model.value ?? '', command: s.command.value, extraEnv: s.extraEnv.value } };
+  if (!isApiProvider(p)) return { problem: `unsupported LLM provider: ${p} (expected anthropic, openai-compatible, claude-code or opencode)` };
+  if (!s.model.value) {
+    const note = modelInvalidIgnored ? '; a model value with an invalid format was ignored' : '';
+    return { problem: `LLM provider openai-compatible configured but model is missing (set CODEINSIGHT_LLM_MODEL or llm.model, or fill it in on the web settings page)${note}` };
+  }
+  return { llm: { provider: p, model: s.model.value, baseUrl: s.baseUrl.value, apiKey: s.apiKey.value } };
+}
+
+/**
+ * LLM 各项的取值和来源。用户设置和环境变量都是用户自己给的，可以写请求地址、API key、命令路径；
+ * 仓库配置随被分析的代码一起来，只取 API provider 和 model。配置有误时不抛错，返回 problem。
  */
 export function llmSources(input: LlmSourcesInput): LlmSources {
-  const { user = {}, repo = {}, env } = input;
-  const provider = pickField(user.provider, env, [LLM_ENV.provider], repo.provider);
+  const { user = {}, env } = input;
+  const provider = pickProvider(user, input.repo, env);
   const p = isLlmProvider(provider.value) ? provider.value : undefined;
-  const keyEnvs = [LLM_ENV.apiKey, ...(p ? [PROVIDER_KEY_ENV[p]] : [])];
-  const model = pickField(user.model, env, [LLM_ENV.model], repo.model);
-  if (model.source === 'none' && p === 'anthropic') Object.assign(model, { value: DEFAULT_ANTHROPIC_MODEL, source: 'default' });
-  const baseUrl = pickField(user.baseUrl, env, [LLM_ENV.baseUrl]);
-  if (baseUrl.source === 'none' && p) baseUrl.source = 'default';
-  const apiKey = pickField(user.apiKey, env, keyEnvs);
+  const cli = isCliProvider(p);
+  const { model, invalidIgnored } = pickModel(input, provider);
+  const command = pickCommand(user, env, cli);
+  const api = apiFields(user, env, p);
+  const extraEnv: LlmExtraEnvSource = user.extraEnv ? { value: user.extraEnv, source: 'user' } : { source: 'none' };
+  const modelShadowed = !cli || provider.source === 'env' ? shadowedBy('model', user.model, env, [LLM_ENV.model]) : [];
   const shadowed = [
     ...shadowedBy('provider', user.provider, env, [LLM_ENV.provider]),
-    ...shadowedBy('model', user.model, env, [LLM_ENV.model]),
-    ...shadowedBy('baseUrl', user.baseUrl, env, [LLM_ENV.baseUrl]),
-    ...shadowedBy('apiKey', user.apiKey, env, keyEnvs),
+    ...modelShadowed,
+    ...api.shadowed,
+    ...(cli ? shadowedBy('command', user.command, env, [LLM_ENV.command]) : []),
   ];
-  const out: LlmSources = { provider, model, baseUrl, apiKey, shadowed };
-  if (provider.value === undefined) return out;
-  if (!p) return { ...out, problem: `unsupported LLM provider: ${provider.value} (expected anthropic or openai-compatible)` };
-  if (!model.value) return { ...out, problem: 'LLM provider openai-compatible configured but model is missing (set CODEINSIGHT_LLM_MODEL or llm.model, or fill it in on the web settings page)' };
-  return { ...out, llm: { provider: p, model: model.value, baseUrl: baseUrl.value, apiKey: apiKey.value } };
+  const out = { provider, model, baseUrl: api.baseUrl, apiKey: api.apiKey, command, extraEnv, shadowed };
+  return { ...out, ...effectiveLlm(out, invalidIgnored) };
 }
 
 export interface LoadConfigOptions {
@@ -432,8 +553,8 @@ export async function loadConfig(repo: string, opts: LoadConfigOptions = {}): Pr
   const user = await userSettingsFor(opts);
   const llm = llmSources({ user: user?.llm, repo: file.llm, env });
   if (llm.problem) log.warn('config_llm_invalid', { reason: llm.problem });
-  const limits = costLimits(file, env);
-  const warnings = [...ignoredLlmKeys(file), ...ignoredLimitWarnings(limits.ignored), ...limits.warnings];
+  const limits = costLimits(file, env, llm.llm?.provider);
+  const warnings = [...ignoredLlmKeys(file), ...ignoredRepoProvider(file), ...ignoredLimitWarnings(limits.ignored), ...limits.warnings];
   return {
     repo,
     dataDir: path.resolve(repo, dataDirRaw),

@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -8,6 +8,16 @@ const ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..');
 export const CLI_MAIN = path.join(ROOT, 'packages', 'cli', 'dist', 'main.js');
 const FIXTURE = path.join(ROOT, 'packages', 'core', 'test', 'fixtures', 'py-basic');
 const SHOP_FIXTURE = path.join(ROOT, 'packages', 'core', 'test', 'fixtures', 'py-shop');
+
+/**
+ * 假的 claude 命令：应答测试连接（--version、auth status、单次调用），问答时连上 codeinsight 的工具服务调用工具后回答。
+ * serve 通过 CODEINSIGHT_LLM_COMMAND 使用它，不调用真实的 Claude Code。
+ */
+export function fakeClaudeCommand(): string {
+  const file = path.join(ROOT, 'packages', 'server', 'test', 'helpers', 'fake-claude-mcp.mjs');
+  chmodSync(file, 0o755);
+  return file;
+}
 
 export function tempDir(prefix: string): string {
   return mkdtempSync(path.join(tmpdir(), prefix));

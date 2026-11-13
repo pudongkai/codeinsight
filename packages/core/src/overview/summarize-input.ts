@@ -97,7 +97,33 @@ export interface AiRequest<T> {
   truncated: boolean;
   /** 校验 JSON 回复（也用于校验缓存里的值） */
   validate: (value: unknown) => JsonParseResult<T>;
+  /** 回复的 JSON Schema，和 validate 对应；支持结构化输出的客户端按它约束回复 */
+  jsonSchema: Record<string, unknown>;
 }
+
+const STRING = { type: 'string' };
+const KEY_SUMMARY_LIST = { type: 'array', items: { type: 'object', properties: { key: STRING, summary: STRING }, required: ['key', 'summary'] } };
+
+/** 各类回复的 JSON Schema，和 validateModule、validateFeatures、validateSystem 对应 */
+export const OVERVIEW_JSON_SCHEMAS: Record<AiKind, Record<string, unknown>> = {
+  module: {
+    type: 'object',
+    properties: { name: STRING, responsibility: STRING, interfaces: KEY_SUMMARY_LIST, models: KEY_SUMMARY_LIST },
+    required: ['name', 'responsibility', 'interfaces', 'models'],
+  },
+  features: {
+    type: 'object',
+    properties: {
+      features: {
+        type: 'array',
+        items: { type: 'object', properties: { name: STRING, description: STRING, entryKeys: { type: 'array', items: STRING } }, required: ['name', 'entryKeys'] },
+      },
+    },
+    required: ['features'],
+  },
+  system_group: { type: 'object', properties: { title: STRING, summary: STRING }, required: ['title', 'summary'] },
+  system: { type: 'object', properties: { title: STRING, summary: STRING }, required: ['title', 'summary'] },
+};
 
 const INSTRUCTIONS: Record<AiKind, string> = {
   module: `Describe this module. Shape:
@@ -219,7 +245,7 @@ function validateModule(input: ModuleSummaryInput): (value: unknown) => JsonPars
 export function moduleRequest(s: OverviewStructure, m: OverviewModule, sendSource: boolean): AiRequest<ModuleSummary> {
   const input = moduleInput(s, m, sendSource);
   const truncated = fitModuleInput(input);
-  return { kind: 'module', target: m.id, input: JSON.stringify(input), truncated, validate: validateModule(input) };
+  return { kind: 'module', target: m.id, input: JSON.stringify(input), truncated, validate: validateModule(input), jsonSchema: OVERVIEW_JSON_SCHEMAS.module };
 }
 
 // ---------- 功能命名 ----------
@@ -261,7 +287,7 @@ function validateFeatures(value: unknown): JsonParseResult<{ features: NamedFeat
 }
 
 export function featureRequest(g: OverviewGraph, calls: Map<string, string[]>, moduleId: string, features: Feature[]): AiRequest<{ features: NamedFeature[] }> {
-  return { kind: 'features', target: moduleId, input: JSON.stringify(featureInput(g, calls, moduleId, features)), truncated: false, validate: validateFeatures };
+  return { kind: 'features', target: moduleId, input: JSON.stringify(featureInput(g, calls, moduleId, features)), truncated: false, validate: validateFeatures, jsonSchema: OVERVIEW_JSON_SCHEMAS.features };
 }
 
 // ---------- 系统简介 ----------
@@ -287,7 +313,7 @@ export function systemEdges(s: OverviewStructure, ids?: Set<string>): SystemInpu
 }
 
 export function systemRequest(kind: 'system' | 'system_group', target: string, input: SystemInput): AiRequest<SystemSummary> {
-  return { kind, target, input: JSON.stringify(input), truncated: false, validate: validateSystem };
+  return { kind, target, input: JSON.stringify(input), truncated: false, validate: validateSystem, jsonSchema: OVERVIEW_JSON_SCHEMAS[kind] };
 }
 
 /** 回复先按 JSON 解析再交给 validate */

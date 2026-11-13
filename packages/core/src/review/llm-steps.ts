@@ -1,5 +1,5 @@
 import { runIntentCheck, docFirstLine, type IntentItem } from '../intent/index.js';
-import { llmClientFromConfig, notifyLlmOnce } from '../llm/setup.js';
+import { llmClientFromConfig, llmLabel, notifyLlmOnce } from '../llm/setup.js';
 import { log } from '../log.js';
 import type { SnapshotRow } from '../model/types.js';
 import type { DuplicateFinding, FileChange, IntentFinding, ReviewReport, SymbolRef, Warning } from '../report/types.js';
@@ -61,8 +61,8 @@ export async function checkIntent(opts: ReviewOptions, intent: ReviewReport['int
   const { items, refs } = intentItems(diffs, opts.config.moduleDepth);
   const addedFiles = files.filter((f) => f.status === 'added').map((f) => f.path);
   const r = await runIntentCheck({
-    intentText: intent.text, items, addedFiles, refs, client: c.client, cacheDir: opts.layout.llmCacheDir,
-    onBeforeSend: () => notifyLlmOnce(c.client, `sending a structural summary of the change (no function bodies) to ${c.client.provider} (${c.client.model})`, opts.onLlmNotice),
+    intentText: intent.text, items, addedFiles, refs, client: c.client, cacheDir: opts.layout.llmCacheDir, signal: opts.signal,
+    onBeforeSend: () => notifyLlmOnce(c.client, `sending a structural summary of the change (no function bodies) to ${llmLabel(c.client)}`, opts.onLlmNotice),
   });
   return { ...(r.findings ? { intentCheck: r.findings } : {}), warnings: r.warnings };
 }

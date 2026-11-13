@@ -1,8 +1,12 @@
 import type { LlmConfig, LlmProvider } from '../config/index.js';
+import { isCliProvider } from '../settings/types.js';
 import { log } from '../log.js';
 import { anthropicChat } from './anthropic-chat.js';
 import type { ChatRequest, ChatResult } from './chat.js';
 import { openAiChat } from './openai-chat.js';
+import { createCliClient } from './cli/index.js';
+
+export * from './cli/index.js';
 
 export interface LlmMessage {
   role: 'user' | 'assistant';
@@ -13,6 +17,13 @@ export interface LlmRequest {
   system: string;
   messages: LlmMessage[];
   maxTokens: number;
+  /**
+   * 回复应满足的 JSON Schema（根节点是 object）。支持结构化输出的客户端（Claude Code）按它约束回复；
+   * 其他客户端忽略，回复格式只靠提示词说明，由调用方校验
+   */
+  jsonSchema?: Record<string, unknown>;
+  /** 中止本次调用：本机 CLI 客户端结束子进程，API 客户端中止请求 */
+  signal?: AbortSignal;
 }
 
 /** LLM 客户端：发一轮对话，返回模型回复的文本。测试里注入假的实现 */
@@ -21,6 +32,8 @@ export interface LlmClient {
   readonly model: string;
   /** 请求的基础地址，用于缓存 key；日志里只记它的 origin */
   readonly baseUrl?: string;
+  /** 本机 CLI 不指定模型时，由环境变量（如 ANTHROPIC_MODEL）决定的模型；用于缓存 key */
+  readonly envModel?: string;
   /** 回复因达到 maxTokens 被截断时抛 LlmTruncatedError */
   complete(req: LlmRequest): Promise<string>;
   /**
@@ -47,10 +60,37 @@ export class LlmTruncatedError extends LlmError {
   }
 }
 
+/** 调用方中止了要发送 LLM 请求的任务（如命令行收到 Ctrl-C）；任务不保存、不输出部分结果 */
+export class LlmCancelledError extends Error {
+  constructor(what: string) {
+    super(`${what} was cancelled`);
+  }
+}
+
+/** signal 已中止时抛 LlmCancelledError */
+export function throwIfCancelled(signal: AbortSignal | undefined, what: string): void {
+  if (signal?.aborted) throw new LlmCancelledError(what);
+}
+
 /** 服务端返回 400 且错误里提到 tools / function：当前模型不支持工具调用 */
 export class ToolsUnsupportedError extends LlmError {
   constructor() {
     super('the model does not support tool calling; use a model that supports function calling', 400);
+  }
+}
+
+export type CliErrorKind =
+  | 'command_not_found' | 'not_executable' | 'not_logged_in' | 'quota' | 'rate_limited' | 'server_error'
+  | 'model_not_found' | 'invalid_request' | 'context_overflow' | 'content_filtered' | 'provider_unavailable'
+  | 'timeout' | 'cancelled' | 'cli_failed' | 'bad_response';
+
+/**
+ * 本机 CLI 调用失败。kind 是分类结果；status 只在限流、服务繁忙、未登录等能对应到 HTTP 状态的情况设置，
+ * askJson 按它决定是否等待后重试
+ */
+export class CliError extends LlmError {
+  constructor(readonly kind: CliErrorKind, message: string, status?: number) {
+    super(message, status);
   }
 }
 
@@ -123,8 +163,10 @@ export function httpError(res: Response, text: string): LlmError {
   return new LlmError(`HTTP ${res.status}${type ? ` (${type})` : ''}`, res.status, parseRetryAfter(res.headers.get('retry-after')));
 }
 
-export async function postJson(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number): Promise<JsonResponse> {
-  const res = await sendPost(url, headers, body, AbortSignal.timeout(timeoutMs));
+/** 发 JSON 请求并解析回复；超时或调用方的 signal 中止时抛 LlmError */
+export async function postJson(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<JsonResponse> {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const res = await sendPost(url, headers, body, signal ? AbortSignal.any([timeout, signal]) : timeout);
   const text = await res.text();
   if (!res.ok) throw httpError(res, text);
   try {
@@ -154,7 +196,7 @@ class AnthropicClient implements LlmClient {
 
   async complete(req: LlmRequest): Promise<string> {
     const body = { model: this.model, max_tokens: req.maxTokens, system: req.system, messages: req.messages };
-    const json = (await postJson(`${this.baseUrl}/v1/messages`, this.headers(), body, this.timeoutMs)).json as AnthropicResponse;
+    const json = (await postJson(`${this.baseUrl}/v1/messages`, this.headers(), body, this.timeoutMs, req.signal)).json as AnthropicResponse;
     if (json.stop_reason === 'max_tokens') throw new LlmTruncatedError(req.maxTokens);
     const text = (json.content ?? []).filter((c) => c.type === 'text').map((c) => c.text ?? '').join('');
     if (!text) throw new LlmError('response has no text content');
@@ -184,7 +226,7 @@ class OpenAiCompatibleClient implements LlmClient {
   async complete(req: LlmRequest): Promise<string> {
     const messages = [{ role: 'system', content: req.system }, ...req.messages];
     const body = { model: this.model, max_tokens: req.maxTokens, temperature: 0, messages };
-    const json = (await postJson(`${this.baseUrl}/chat/completions`, this.headers(), body, this.timeoutMs)).json as OpenAiResponse;
+    const json = (await postJson(`${this.baseUrl}/chat/completions`, this.headers(), body, this.timeoutMs, req.signal)).json as OpenAiResponse;
     if (json.choices?.[0]?.finish_reason === 'length') throw new LlmTruncatedError(req.maxTokens);
     const text = json.choices?.[0]?.message?.content;
     if (!text) throw new LlmError('response has no message content');
@@ -197,11 +239,12 @@ class OpenAiCompatibleClient implements LlmClient {
 }
 
 /**
- * 按配置创建客户端。anthropic 必须有 API key；openai-compatible 的本地服务（如 Ollama）可以不带 key。
- * 缺少 key 时抛错，调用方转成 warning。
+ * 按配置创建客户端。anthropic 必须有 API key；openai-compatible 的本地服务（如 Ollama）可以不带 key；
+ * CLI provider 要能找到命令。缺少 key、找不到命令时抛错，调用方转成 warning。
  */
 export function createLlmClient(cfg: LlmConfig, opts: { timeoutMs?: number; idleTimeoutMs?: number } = {}): LlmClient {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (isCliProvider(cfg.provider)) return createCliClient({ ...cfg, provider: cfg.provider }, { timeoutMs, idleTimeoutMs: opts.idleTimeoutMs });
   if (cfg.provider === 'anthropic') {
     if (!cfg.apiKey) throw new LlmError('anthropic API key is missing (set CODEINSIGHT_LLM_API_KEY or ANTHROPIC_API_KEY)');
     return new AnthropicClient(cfg.model, cfg, timeoutMs, opts.idleTimeoutMs);

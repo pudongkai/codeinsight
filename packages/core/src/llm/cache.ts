@@ -12,10 +12,12 @@ export function llmCacheKey(parts: readonly string[]): string {
 
 /**
  * LLM 身份 = sha256(provider + 请求地址 + 模型)：同名模型在不同服务上的结果不混用。
- * 只存这个 hash，不存请求地址原文（地址里可能带内网主机名）。
+ * 只存这个 hash，不存请求地址原文（地址里可能带内网主机名）。CLI 不指定模型时记为环境变量决定的模型，
+ * 没有时记为 default（用工具的默认模型）。
  */
-export function llmIdentity(client: Pick<LlmClient, 'provider' | 'model' | 'baseUrl'>): string {
-  return llmCacheKey([client.provider, client.baseUrl ?? '', client.model]);
+export function llmIdentity(client: Pick<LlmClient, 'provider' | 'model' | 'baseUrl' | 'envModel'>): string {
+  const model = client.model || (client.envModel ? `env:${client.envModel}` : 'default');
+  return llmCacheKey([client.provider, client.baseUrl ?? '', model]);
 }
 
 /** `<cacheDir>/<key>.json` */

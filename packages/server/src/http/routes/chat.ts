@@ -70,7 +70,7 @@ async function streamAnswer(ctx: RequestContext, input: AnswerInput, signal: Abo
     if (!res.destroyed && !res.writableEnded) res.write(JSON.stringify(e) + '\n');
   };
   try {
-    await runAsk({ repo, store, layout, config, ...input, signal, onEvent: write });
+    await runAsk({ repo, store, layout, config, ...input, signal, onEvent: write, ...(ctx.app.askToolServer ? { toolServer: ctx.app.askToolServer } : {}) });
   } finally {
     res.off('close', onClose);
     if (!res.writableEnded) res.end();

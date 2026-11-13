@@ -1,12 +1,30 @@
 import { stat } from 'node:fs/promises';
-import { envTurnsOff, LIMIT_ENV, loadLlmSources, log, readUserSettings, userSettingsPath, workingKeyHasChanges } from '@codeinsight/core';
-import type { SnapshotRow, UserSettings } from '@codeinsight/core';
+import { envTurnsOff, isCliProvider, LIMIT_ENV, llmSources, loadLlmSources, log, readUserSettings, userSettingsPath, workingKeyHasChanges } from '@codeinsight/core';
+import type { LlmConfig, LlmSource, SnapshotRow, UserSettings } from '@codeinsight/core';
 import { jobView } from '../../jobs/index-jobs.js';
 import { overviewStale } from '../../jobs/overview-jobs.js';
 import type { RepoContext } from '../../repo-context.js';
 import type { AppContext, Route, RequestContext } from '../context.js';
 import { sendJson } from '../respond.js';
-import { refreshRepoConfig } from './settings.js';
+import { providerUnavailable, refreshRepoConfig } from './settings.js';
+
+/**
+ * 生效的模型服务：kind 区分 API 和本机 CLI，source 是 provider 的来源。provider 暂不可用时按未配置处理并给出原因。
+ */
+function llmFields(llm: LlmConfig | undefined, problem: string | undefined, source: LlmSource) {
+  const unavailable = providerUnavailable(llm?.provider);
+  if (!llm || unavailable) return { llmConfigured: false, llm: null, llmProblem: unavailable ?? problem ?? null };
+  return { llmConfigured: true, llm: { provider: llm.provider, model: llm.model, kind: isCliProvider(llm.provider) ? 'cli' : 'api', source }, llmProblem: null };
+}
+
+/**
+ * 当前仓库生效的 provider 的来源：按 llmSources 的规则取，只给它 provider 相关的输入（仓库配置一项用生效的 provider），
+ * 不重读仓库配置文件，也不会因为别的项不合格在每次轮询时记日志。
+ */
+function repoProviderSource(llm: LlmConfig | undefined, settings: UserSettings, env: NodeJS.ProcessEnv): LlmSource {
+  const providerEnv = env.CODEINSIGHT_LLM_PROVIDER === undefined ? {} : { CODEINSIGHT_LLM_PROVIDER: env.CODEINSIGHT_LLM_PROVIDER };
+  return llmSources({ user: { provider: settings.llm?.provider }, repo: { provider: llm?.provider }, env: providerEnv }).provider.source;
+}
 
 /** 当前概览的摘要（不含报告正文） */
 function overviewSummary(repo: RepoContext, snap: SnapshotRow | undefined): { id: number; createdAt: number; stale: boolean } | null {
@@ -24,7 +42,7 @@ function snapshotView(snap: SnapshotRow | undefined) {
 }
 
 /** 和仓库有关的字段；顺带在后台发起一次代码变化检测（有节流） */
-function repoFields(repo: RepoContext, autoReindex: boolean) {
+function repoFields(repo: RepoContext, settings: UserSettings, env: NodeJS.ProcessEnv, autoReindex: boolean) {
   repo.changes.maybeCheck(autoReindex);
   const { ws, indexJobs } = repo;
   // 当前快照已被清理时这里会发起重建，下面的 latest 反映正在重建的任务
@@ -33,8 +51,7 @@ function repoFields(repo: RepoContext, autoReindex: boolean) {
   return {
     repo: ws.repo,
     repoGen: repo.gen,
-    llmConfigured: ws.config.llm !== undefined,
-    llm: ws.config.llm ? { provider: ws.config.llm.provider, model: ws.config.llm.model } : null,
+    ...llmFields(ws.config.llm, ws.config.llmProblem, repoProviderSource(ws.config.llm, settings, env)),
     sendSource: ws.config.overview.sendSource,
     index: { job: jobView(latest), lastDoneAt: lastDone?.finishedAt ?? null },
     snapshot: snapshotView(snap),
@@ -46,11 +63,10 @@ function repoFields(repo: RepoContext, autoReindex: boolean) {
 
 /** 没有仓库时：LLM 按用户设置和环境变量，源码发送只看环境变量；仓库相关的字段为 null 或空 */
 async function noRepoFields(app: AppContext, settings: UserSettings, autoReindex: boolean) {
-  const llm = (await loadLlmSources(undefined, { env: app.env, userSettings: settings })).llm;
+  const sources = await loadLlmSources(undefined, { env: app.env, userSettings: settings });
   return {
     repo: null, repoGen: null,
-    llmConfigured: llm !== undefined,
-    llm: llm ? { provider: llm.provider, model: llm.model } : null,
+    ...llmFields(sources.llm, sources.problem, sources.provider.source),
     sendSource: !envTurnsOff(app.env, LIMIT_ENV.sendSource),
     index: { job: null, lastDoneAt: null }, snapshot: null, reviews: [], overview: null,
     changes: { checkedAt: null, codeChanged: false, autoReindex, autoReindexFailed: false },
@@ -107,7 +123,7 @@ async function status(ctx: RequestContext): Promise<void> {
   const autoReindex = settings.autoReindex ?? false;
   // 本接口不计入仓库的 inflight，等待之后取当前仓库，之后同步读它的 Store，不会读到已关闭的旧仓库
   const repo = app.repo;
-  const fields = repo ? repoFields(repo, autoReindex) : await noRepoFields(app, settings, autoReindex);
+  const fields = repo ? repoFields(repo, settings, app.env, autoReindex) : await noRepoFields(app, settings, autoReindex);
   sendJson(ctx.res, 200, { ...fields, node: process.version, repoLocked: app.locked, dirPickerAvailable: app.dirPicker.tool !== undefined && !app.locked });
 }
 

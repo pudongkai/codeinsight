@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AskToolServer } from '@codeinsight/core';
 import type { DirPicker } from '../dir-picker.js';
 import type { RepoContext } from '../repo-context.js';
 import type { ServerWorkspace } from '../workspace.js';
@@ -34,8 +35,10 @@ export interface AppContext {
   dirPicker: DirPicker;
   /** 代码变化检测的最小间隔 */
   changeCheckIntervalMs: number;
-  /** 测试连接：超时和是否有测试在进行 */
-  llmTest: { timeoutMs: number; running: boolean };
+  /** 测试连接：API 和本机 CLI 各自的超时，是否有测试在进行；controller 用于服务关闭时中止进行中的测试 */
+  llmTest: { timeoutMs: number; cliTimeoutMs: number; running: boolean; controller?: AbortController };
+  /** 本机 CLI 问答用的工具服务启动命令；没有时 CLI 问答以 internal_error 结束 */
+  askToolServer?: AskToolServer;
 }
 
 export interface RequestContext {

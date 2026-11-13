@@ -1,4 +1,5 @@
 import { commitMessages } from '../git/index.js';
+import { throwIfCancelled } from '../llm/index.js';
 import { log } from '../log.js';
 import type { ReviewReport, SymbolChange, Warning } from '../report/types.js';
 import type { Store } from '../store/db.js';
@@ -110,6 +111,7 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewReport> {
   progress('intent');
   const intent = await intentText(opts, v);
   const intentStep = await checkIntent(opts, intent, analysis.diffs, files);
+  throwIfCancelled(opts.signal, 'review');
   const warnings = [...(opts.config.warnings ?? []), ...snapshotWarnings(snaps), ...unsupportedWarnings(files), ...intentStep.warnings];
   logWarnings(warnings);
   const totalMs = Date.now() - started;

@@ -18,6 +18,10 @@ export interface AskJsonRequest<T> {
   transientRetries?: number;
   /** 回复不合格时的日志事件名 */
   invalidEvent?: string;
+  /** 回复的 JSON Schema，透传给客户端（支持结构化输出的客户端按它约束回复，其他客户端忽略） */
+  jsonSchema?: Record<string, unknown>;
+  /** 中止请求和重试前的等待 */
+  signal?: AbortSignal;
 }
 
 /** 去掉模型可能加上的 ```json 代码块包裹后按 JSON 解析 */
@@ -58,6 +62,19 @@ function transientWait(err: unknown, used: number, allowed: number): number | un
   return Math.min(err.retryAfterMs ?? BASE_BACKOFF_MS * 2 ** used, MAX_RETRY_WAIT_MS);
 }
 
+/** 等 ms 毫秒，signal 中止时提前结束 */
+function abortableWait(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 interface SendState {
   attempt: number;
   transientUsed: number;
@@ -69,13 +86,14 @@ async function sendWithRetries<T>(req: AskJsonRequest<T>, messages: LlmMessage[]
   for (;;) {
     state.attempt++;
     try {
-      return await completeWithLog(client, { system: req.system, messages, maxTokens: req.maxTokens }, { items: req.items, attempt: state.attempt });
+      const extra = { ...(req.jsonSchema ? { jsonSchema: req.jsonSchema } : {}), ...(req.signal ? { signal: req.signal } : {}) };
+      return await completeWithLog(client, { system: req.system, messages, maxTokens: req.maxTokens, ...extra }, { items: req.items, attempt: state.attempt });
     } catch (err) {
-      const waitMs = transientWait(err, state.transientUsed, req.transientRetries ?? 0);
+      const waitMs = req.signal?.aborted ? undefined : transientWait(err, state.transientUsed, req.transientRetries ?? 0);
       if (waitMs === undefined) throw err;
       state.transientUsed++;
       log.warn('llm_retry', { provider: client.provider, model: client.model, attempt: state.attempt, status: (err as LlmError).status, waitMs });
-      await new Promise((r) => setTimeout(r, waitMs));
+      await abortableWait(waitMs, req.signal);
     }
   }
 }

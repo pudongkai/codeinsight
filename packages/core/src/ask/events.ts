@@ -23,6 +23,10 @@ export type AskLimitReason = 'max_rounds' | 'max_tool_chars' | 'max_tokens';
 export interface AskUsage {
   inputTokens: number;
   outputTokens: number;
+  /** 用量是按字符数估算的（本机 CLI 没有返回用量时） */
+  estimated?: true;
+  /** 本机 CLI 返回的费用（美元） */
+  costUsd?: number;
 }
 
 export type AskEvent =

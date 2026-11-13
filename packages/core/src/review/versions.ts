@@ -32,6 +32,8 @@ export interface ReviewOptions {
   llmClient?: LlmClient;
   /** 第一次实际发送请求前的提示（每个进程每个模型一次）；不传时只写日志 */
   onLlmNotice?: (message: string) => void;
+  /** 中止时抛 LlmCancelledError，不返回报告 */
+  signal?: AbortSignal;
 }
 
 export interface Versions {

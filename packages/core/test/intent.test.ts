@@ -5,6 +5,7 @@ import {
   buildStructureSummary,
   initDataDir,
   intentCacheKey,
+  LlmCancelledError,
   LlmTruncatedError,
   loadConfig,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -266,6 +267,19 @@ async function reviewRepo(extra: ReviewExtra = {}): Promise<{ report: ReviewRepo
 }
 
 describe('review step 9: intent check', () => {
+  it('throws LlmCancelledError instead of returning a report when the signal fires during the LLM call', async () => {
+    const ac = new AbortController();
+    const client: LlmClient = {
+      provider: 'fake', model: 'fake-model',
+      complete: (req) => {
+        expect(req.signal).toBe(ac.signal);
+        ac.abort();
+        return Promise.reject(new Error('aborted'));
+      },
+    };
+    await expect(reviewRepo({ llmClient: client, signal: ac.signal })).rejects.toBeInstanceOf(LlmCancelledError);
+  }, 60_000);
+
   it('completes without an LLM and adds llm_not_configured', async () => {
     const { report } = await reviewRepo();
     expect(report.intentCheck).toBeUndefined();

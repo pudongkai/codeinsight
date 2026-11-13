@@ -3,11 +3,11 @@ import { llmCacheKey, readLlmCache, writeLlmCache } from '../llm/cache.js';
 import type { LlmClient } from '../llm/index.js';
 import { log } from '../log.js';
 import type { IntentFinding, SymbolRef, Warning } from '../report/types.js';
-import { parseIntentResponse, PROMPT_VERSION, retryPrompt, SYSTEM_PROMPT, userPrompt, type RawGroup } from './prompt.js';
+import { INTENT_JSON_SCHEMA, parseIntentResponse, PROMPT_VERSION, retryPrompt, SYSTEM_PROMPT, userPrompt, type RawGroup } from './prompt.js';
 import { buildStructureSummary, estimateTokens, type IntentItem } from './summary.js';
 
 export { buildStructureSummary, docFirstLine, estimateTokens, SUMMARY_TOKEN_BUDGET, type IntentItem, type StructureSummary } from './summary.js';
-export { parseIntentResponse, PROMPT_VERSION, SYSTEM_PROMPT, type RawGroup } from './prompt.js';
+export { INTENT_JSON_SCHEMA, parseIntentResponse, PROMPT_VERSION, SYSTEM_PROMPT, type RawGroup } from './prompt.js';
 
 /** 输出上限的下限；上限默认值见 DEFAULT_MAX_OUTPUT_TOKENS，中间按摘要里的符号数估算 */
 export const MIN_RESPONSE_TOKENS = 1024;
@@ -45,6 +45,7 @@ export interface IntentCheckInput {
   cacheDir: string;
   /** 实际发送请求前调用一次（缓存命中时不调用），CLI 用它提示将发送结构摘要 */
   onBeforeSend?: () => void;
+  signal?: AbortSignal;
 }
 
 export interface IntentCheckResult {
@@ -85,14 +86,14 @@ function failureWarning(client: LlmClient, r: Exclude<AskJsonResult<RawGroup[]>,
 }
 
 /** 发送请求并校验输出；不合格时把原因告诉模型重试 1 次，仍不合格就放弃。请求失败（含 429）和回复被截断都不重试 */
-async function askModel(client: LlmClient, prompt: string, keys: Set<string>): Promise<AskResult> {
+async function askModel(client: LlmClient, prompt: string, keys: Set<string>, signal?: AbortSignal): Promise<AskResult> {
   const r = await askJson({
     client, system: SYSTEM_PROMPT, prompt, maxTokens: responseTokenLimit(keys), items: keys.size,
     parse: (reply) => {
       const p = parseIntentResponse(reply);
       return p.ok ? { ok: true, value: p.groups } : p;
     },
-    retryPrompt, invalidEvent: 'intent_response_invalid',
+    retryPrompt, invalidEvent: 'intent_response_invalid', jsonSchema: INTENT_JSON_SCHEMA, signal,
   });
   return r.ok ? { ok: true, groups: r.value } : { ok: false, warning: failureWarning(client, r) };
 }
@@ -146,7 +147,7 @@ async function cachedOrAsk(input: IntentCheckInput, summaryText: string, keys: S
   const hit = await readLlmCache(input.cacheDir, key, cachedGroups, { provider: client.provider, model: client.model, items });
   if (hit) return { ok: true, groups: hit, cached: true };
   input.onBeforeSend?.();
-  const asked = await askModel(client, userPrompt(input.intentText, summaryText), keys);
+  const asked = await askModel(client, userPrompt(input.intentText, summaryText), keys, input.signal);
   if (!asked.ok) return asked;
   const entry: CacheEntry = { model: client.model, promptVersion: PROMPT_VERSION, createdAt: Date.now(), groups: asked.groups };
   await writeLlmCache(input.cacheDir, key, entry);

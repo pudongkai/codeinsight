@@ -75,7 +75,7 @@ describe('overview api', () => {
   it('reports the LLM, the source switch and no overview in /api/status', async () => {
     await indexReady(api);
     const s = (await api<Status>('/api/status')).body;
-    expect(s.llm).toEqual({ provider: 'anthropic', model: expect.any(String) });
+    expect(s.llm).toEqual({ provider: 'anthropic', model: expect.any(String), kind: 'api', source: expect.any(String) });
     expect(s.sendSource).toBe(true);
     expect(s.overview).toBeNull();
   });

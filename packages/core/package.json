@@ -34,6 +34,10 @@
     "./ask/links": {
       "types": "./dist/ask/links.d.ts",
       "default": "./dist/ask/links.js"
+    },
+    "./settings/types": {
+      "types": "./dist/settings/types.d.ts",
+      "default": "./dist/settings/types.js"
     }
   },
   "scripts": {

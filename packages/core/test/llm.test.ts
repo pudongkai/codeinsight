@@ -1,7 +1,7 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { completeWithLog, createLlmClient, DEFAULT_ANTHROPIC_MODEL, LlmError, LlmTruncatedError, loadConfig, setLogSink } from '../src/index.js';
+import { completeWithLog, createLlmClient, DEFAULT_ANTHROPIC_MODEL, llmClientFromConfig, llmLabel, LlmError, LlmTruncatedError, loadConfig, notifyLlmOnce, setLogSink } from '../src/index.js';
 import { tempDir } from './helpers/git-repo.js';
 
 interface Captured {
@@ -16,6 +16,7 @@ let baseUrl: string;
 const captured: Captured[] = [];
 let failNext = false;
 let truncateNext = false;
+let hangNext = false;
 /** 错误响应体里的内容，不能出现在错误信息里 */
 const ECHOED = 'echoed-prompt-text';
 
@@ -26,6 +27,10 @@ beforeAll(async () => {
     req.on('end', () => {
       captured.push({ url: req.url!, headers: req.headers, body: JSON.parse(raw) as Record<string, unknown> });
       res.setHeader('content-type', 'application/json');
+      if (hangNext) {
+        hangNext = false;
+        return;
+      }
       if (failNext) {
         failNext = false;
         res.statusCode = 529;
@@ -100,6 +105,19 @@ describe('LLM clients against a local fake server', () => {
     await expect(openai.complete(REQ)).rejects.toThrow('max_tokens=100');
   });
 
+  it('aborts the request when the caller signal fires', async () => {
+    for (const provider of ['anthropic', 'openai-compatible'] as const) {
+      const client = createLlmClient({ provider, model: 'm', apiKey: 'k', baseUrl }, { timeoutMs: 60_000 });
+      hangNext = true;
+      const ac = new AbortController();
+      const started = Date.now();
+      const pending = client.complete({ ...REQ, signal: ac.signal });
+      setTimeout(() => ac.abort(), 50);
+      await expect(pending).rejects.toBeInstanceOf(LlmError);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    }
+  });
+
   it('requires an API key for anthropic', () => {
     expect(() => createLlmClient({ provider: 'anthropic', model: 'm' })).toThrow('API key');
   });
@@ -115,5 +133,26 @@ describe('LLM config', () => {
     const missing = await loadConfig(repo, { env: { CODEINSIGHT_LLM_PROVIDER: 'openai-compatible' } });
     expect(missing.llm).toBeUndefined();
     expect(missing.llmProblem).toContain('model is missing');
+  });
+});
+
+describe('local CLI providers', () => {
+  it('never fall back to the OpenAI client; a missing command becomes llm_not_configured', () => {
+    for (const provider of ['claude-code', 'opencode'] as const) {
+      expect(() => createLlmClient({ provider, model: '', command: '/nonexistent/cli' })).toThrow(LlmError);
+      const r = llmClientFromConfig({ llm: { provider, model: '', command: '/nonexistent/cli' } }, { skipped: 'skipped' });
+      expect(r).toEqual({ warning: expect.objectContaining({ code: 'llm_not_configured' }) });
+    }
+  });
+  it('llmLabel names the default model when the model is empty', () => {
+    expect(llmLabel({ provider: 'claude-code', model: '' })).toBe('claude-code (default model)');
+    expect(llmLabel({ provider: 'anthropic', model: 'claude-x' })).toBe('anthropic (claude-x)');
+  });
+
+  it('notifyLlmOnce puts the local CLI note before the trailing newline', () => {
+    const seen: string[] = [];
+    notifyLlmOnce({ provider: 'claude-code', model: 'label-test' }, 'sending x\n', (m) => seen.push(m));
+    notifyLlmOnce({ provider: 'anthropic', model: 'label-test' }, 'sending y\n', (m) => seen.push(m));
+    expect(seen).toEqual(['sending x via the local claude-code CLI (uses your own account quota)\n', 'sending y\n']);
   });
 });

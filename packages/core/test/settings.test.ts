@@ -191,6 +191,48 @@ describe('user settings read and write', () => {
   });
 });
 
+describe('user settings for local CLI providers', () => {
+  it('keeps the CLI provider, command and extraEnv and writes them back', async () => {
+    const file = settingsFile();
+    const llm = { provider: 'claude-code' as const, command: '/opt/homebrew/bin/claude', extraEnv: { https_proxy: 'http://p:3128', MY_TOKEN: 'secret-value' } };
+    await updateUserSettings((s) => ({ ...s, llm }), { path: file });
+    expect(await readUserSettings({ path: file })).toEqual({ llm, recentRepos: [] });
+    expect(JSON.parse(readFileSync(file, 'utf8')).llm).toEqual(llm);
+  });
+
+  it('ignores invalid command, model and extraEnv items without logging their values', async () => {
+    const file = settingsFile();
+    mkdirSync(path.dirname(file), { recursive: true });
+    const many = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`V${i}`, 'v']));
+    writeFileSync(file, JSON.stringify({
+      version: 1,
+      llm: {
+        provider: 'opencode', model: '--dangerous', command: '/bin/x\nrm',
+        extraEnv: { https_proxy: 'http://p:3128', PATH: '/evil', '1BAD': 'secret-1', NUL: 'a\u0000b', NUM: 5, ...many },
+      },
+    }));
+    const lines = captureLog();
+    const llm = (await readUserSettings({ path: file })).llm;
+    expect(llm?.provider).toBe('opencode');
+    expect(llm?.model).toBeUndefined();
+    expect(llm?.command).toBeUndefined();
+    expect(Object.keys(llm?.extraEnv ?? {})).toHaveLength(32);
+    expect(llm?.extraEnv).toMatchObject({ https_proxy: 'http://p:3128', V0: 'v' });
+    expect(llm?.extraEnv?.PATH).toBeUndefined();
+    const ignoredKeys = lines.filter((l) => l.includes('user_settings_value_ignored')).map((l) => /key=(\S+)/.exec(l)?.[1]);
+    expect(ignoredKeys).toEqual(expect.arrayContaining(['llm.model', 'llm.command', 'llm.extraEnv.PATH', 'llm.extraEnv.1BAD', 'llm.extraEnv.NUL', 'llm.extraEnv.NUM', 'llm.extraEnv.V31']));
+    const text = lines.join('\n');
+    for (const secret of ['secret-1', '/evil', '/bin/x', 'p:3128']) expect(text).not.toContain(secret);
+  });
+
+  it('ignores extraEnv that is not an object', async () => {
+    const file = settingsFile();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, llm: { provider: 'claude-code', extraEnv: ['A=b'] } }));
+    expect((await readUserSettings({ path: file })).llm).toEqual({ provider: 'claude-code' });
+  });
+});
+
 describe('writeFileAtomic mode', () => {
   it.skipIf(!posix)('creates a new file and overwrites an existing one with the given mode', async () => {
     const file = path.join(tempDir('ci-atomic-'), 'f.json');

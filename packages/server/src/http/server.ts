@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { log, realPathOr } from '@codeinsight/core';
-import type { Resolver } from '@codeinsight/core';
+import type { AskToolServer, Resolver } from '@codeinsight/core';
 import { CHANGE_CHECK_INTERVAL_MS } from '../changes.js';
 import { detectPickerTool, execPicker, PICKER_TIMEOUT_MS, type PickerTool, type RunPicker } from '../dir-picker.js';
 import { closeRepoContext, createRepoContext, rememberRepo, type RepoContext } from '../repo-context.js';
@@ -55,9 +55,14 @@ export interface HttpServerOptions {
   changeCheckIntervalMs?: number;
   /** 测试连接的超时，默认 20 秒 */
   llmTestTimeoutMs?: number;
+  /** 本机 CLI 测试连接的超时，默认 90 秒 */
+  llmTestCliTimeoutMs?: number;
+  /** 本机 CLI 问答用的工具服务启动命令（`codeinsight mcp --ask-tools`） */
+  askToolServer?: AskToolServer;
 }
 
 const LLM_TEST_TIMEOUT_MS = 20_000;
+const LLM_TEST_CLI_TIMEOUT_MS = 90_000;
 
 const DEFAULT_KEEP_ALIVE_MS = 5 * 60 * 1000;
 
@@ -220,7 +225,8 @@ async function newAppContext(opts: HttpServerOptions): Promise<AppContext> {
     env: opts.env ?? process.env,
     dirPicker: { tool: await pickerTool(opts), runPicker: dp?.runPicker ?? execPicker, timeoutMs: dp?.timeoutMs ?? PICKER_TIMEOUT_MS, busy: false },
     changeCheckIntervalMs: opts.changeCheckIntervalMs ?? CHANGE_CHECK_INTERVAL_MS,
-    llmTest: { timeoutMs: opts.llmTestTimeoutMs ?? LLM_TEST_TIMEOUT_MS, running: false },
+    llmTest: { timeoutMs: opts.llmTestTimeoutMs ?? LLM_TEST_TIMEOUT_MS, cliTimeoutMs: opts.llmTestCliTimeoutMs ?? LLM_TEST_CLI_TIMEOUT_MS, running: false },
+    ...(opts.askToolServer ? { askToolServer: opts.askToolServer } : {}),
   };
 }
 
@@ -261,6 +267,7 @@ export async function startHttpServer(opts: HttpServerOptions): Promise<RunningH
     close: async ({ drain = true } = {}) => {
       clearInterval(keepAlive);
       app.shuttingDown = true;
+      app.llmTest.controller?.abort();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await closeRepos(app, drain);

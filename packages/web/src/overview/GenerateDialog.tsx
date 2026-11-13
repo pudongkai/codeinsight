@@ -4,6 +4,7 @@ import type { OverviewEstimate, OverviewParams, StatusResponse } from '../api/ty
 import { useApi } from '../browse/useApi';
 import { LlmSetupHint } from '../settings/LlmSetupHint';
 import { Modal } from '../settings/Modal';
+import { llmLabel } from '../settings/model-label';
 import type { StartResult } from './useOverviewJob';
 
 interface Props {
@@ -13,7 +14,7 @@ interface Props {
 }
 
 function estimateText(e: OverviewEstimate): string {
-  const to = `${e.provider ?? ''}（${e.model ?? ''}）`;
+  const to = llmLabel(e.provider, e.model);
   if (e.llmCalls === 0) return `AI 说明全部命中缓存（${e.cachedCalls} 次），不会发送请求到 ${to}。`;
   return `将发送结构信息（${e.sendSource ? '含' : '不含'}源码片段）到 ${to}，预计 ${e.llmCalls} 次请求，约 ${e.inputTokens} 输入 token（${e.cachedCalls} 次命中缓存）。`;
 }

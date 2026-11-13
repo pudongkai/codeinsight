@@ -84,8 +84,10 @@ export interface StatusResponse {
   changes: ChangesView;
   node: string;
   llmConfigured: boolean;
-  /** 当前的 LLM 配置，未配置时为 null */
-  llm: { provider: string; model: string } | null;
+  /** 当前的 LLM 配置，未配置时为 null；model 为空串时用本机 CLI 的默认模型 */
+  llm: { provider: string; model: string; kind?: 'api' | 'cli'; source?: 'user' | 'env' | 'repo' } | null;
+  /** 未配置时的原因（配置有误、provider 暂不可用） */
+  llmProblem?: string | null;
   /** 是否发送源码片段（仓库配置或环境变量关闭时为 false） */
   sendSource: boolean;
   index: { job: IndexJobView | null; lastDoneAt: number | null };
@@ -242,7 +244,7 @@ export interface RepoTask {
 /** POST /api/repo/pick-dir */
 export type PickDirResult = { status: 'selected'; path: string } | { status: 'cancelled' } | { status: 'timeout' };
 
-export type LlmProvider = 'anthropic' | 'openai-compatible';
+export type LlmProvider = 'anthropic' | 'openai-compatible' | 'claude-code' | 'opencode';
 export type LlmSourceKind = 'user' | 'env' | 'repo' | 'default' | 'none';
 
 export interface LlmFieldView {
@@ -261,11 +263,28 @@ export interface SettingsResponse {
     model: LlmFieldView;
     /** 不含 key 原文；足够长时给末 4 位 */
     apiKey: { set: boolean; last4?: string; source: LlmSourceKind; env?: string };
+    /** 本机 CLI 的命令路径；resolved 是实际找到的可执行文件（只在 provider 是 CLI 时查找） */
+    command?: LlmFieldView & { resolved: string | null };
+    /** 环境变量 CODEINSIGHT_LLM_COMMAND 指定的命令路径，没有为 null；当前生效的是 API provider 时也返回 */
+    commandEnv?: string | null;
+    /** 附加环境变量；多数变量不返回值，只给 set */
+    extraEnv?: { source: 'user' | 'none'; entries: ExtraEnvView[] };
     /** 环境变量也设了值、但被用户设置盖住的项 */
-    shadowed: { field: 'provider' | 'model' | 'baseUrl' | 'apiKey'; by: 'user'; env: string }[];
+    shadowed: { field: 'provider' | 'model' | 'baseUrl' | 'apiKey' | 'command'; by: 'user'; env: string }[];
   };
-  effective: { configured: boolean; provider: string | null; model: string | null; problem: string | null };
+  effective: { configured: boolean; kind?: 'api' | 'cli' | null; provider: string | null; model: string | null; problem: string | null };
+  /** 暂不能选择的 provider（如权限隔离还没确认的 opencode） */
+  unavailableProviders?: LlmProvider[];
   autoReindex: boolean;
+}
+
+/** 附加环境变量的一项：只有代理变量和 *_BASE_URL 回传值；masked 表示值去掉了账号密码等，不是原值 */
+export type ExtraEnvView = { name: string; value: string; masked?: true } | { name: string; set: true };
+
+/** 保存时的附加环境变量；没有 value 表示沿用已保存的值 */
+export interface ExtraEnvEntry {
+  name: string;
+  value?: string;
 }
 
 /** 保存和测试连接的表单：空字符串表示不保存（apiKey 为空表示不修改） */
@@ -275,9 +294,14 @@ export interface LlmForm {
   model: string;
   apiKey: string;
   clearApiKey: boolean;
+  /** 只用于本机 CLI */
+  command?: string;
+  /** 只用于本机 CLI；完整列表，整体替换 */
+  extraEnv?: ExtraEnvEntry[];
 }
 
-/** POST /api/settings/llm/test */
+/** POST /api/settings/llm/test；本机 CLI 成功时给命令路径和版本，model 为空串表示工具默认模型 */
 export type LlmTestResult =
   | { ok: true; provider: string; model: string; origin: string; ms: number }
+  | { ok: true; provider: string; model: string; command: string; version: string; ms: number }
   | { ok: false; reason: string; message: string; ms: number };

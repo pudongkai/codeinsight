@@ -13,6 +13,9 @@ export type { AskToolContext, ToolOutput } from './tool-context.js';
 /** 单个工具结果回给模型前截到这么多字符 */
 export const MAX_TOOL_RESULT_CHARS = 8000;
 
+/** 工具结果累计超过上限后，剩下的调用不执行，回给模型这句话 */
+export const TOOL_LIMIT_RESULT = 'error: skipped: the tool result limit for this question was reached; answer with what you already have';
+
 const str = (description: string) => ({ type: 'string', description });
 const int = (description: string) => ({ type: 'integer', description });
 const schema = (properties: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });

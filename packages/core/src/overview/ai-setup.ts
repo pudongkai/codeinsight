@@ -25,6 +25,8 @@ export interface OverviewOptions {
   /** 测试注入，替代按配置创建的客户端 */
   llmClient?: LlmClient;
   onLlmNotice?: (message: string) => void;
+  /** 中止生成：不再发送请求，记录标为 failed，不保存概览 */
+  signal?: AbortSignal;
 }
 
 /** 本次生成用的 LLM 身份和发送设置 */
@@ -71,5 +73,6 @@ export function summarizeOptions(opts: OverviewOptions, setup: OverviewAiSetup):
     ...(setup.previous ? { previous: setup.previous } : {}),
     readFile: (p) => readSnapshotFile({ repo, store, layout }, snapshot, p),
     ...(opts.onLlmNotice ? { onLlmNotice: opts.onLlmNotice } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
   };
 }

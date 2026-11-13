@@ -99,7 +99,7 @@ async function estimateOrGenerate(opts: OverviewOptions, args: OverviewArgs): Pr
 }
 
 /** codeinsight overview：生成系统概览，输出 JSON 或 Markdown 到 stdout 或 --out */
-export async function runOverviewCommand(argv: string[]): Promise<number> {
+export async function runOverviewCommand(argv: string[], signal?: AbortSignal): Promise<number> {
   const args = parseOverviewArgs(argv);
   if (args.help) {
     process.stdout.write(OVERVIEW_USAGE);
@@ -109,7 +109,7 @@ export async function runOverviewCommand(argv: string[]): Promise<number> {
   try {
     const { snapshot } = await buildSnapshot({ repo, store, layout, config, ref: args.ref });
     const opts: OverviewOptions = {
-      repo, store, layout, config, snapshot, ref: args.ref ?? 'working', noLlm: args['no-llm'], noSource: args['no-source'],
+      repo, store, layout, config, snapshot, ref: args.ref ?? 'working', noLlm: args['no-llm'], noSource: args['no-source'], signal,
     };
     return await estimateOrGenerate(opts, args);
   } finally {

@@ -1,4 +1,5 @@
 import type { CodeInsightConfig } from '../config/index.js';
+import { throwIfCancelled } from '../llm/index.js';
 import { log } from '../log.js';
 import { overviewAiSetup, summarizeOptions, type OverviewAiSetup, type OverviewOptions } from './ai-setup.js';
 import { estimateOverview, type OverviewEstimate } from './estimate.js';
@@ -53,7 +54,10 @@ export interface OverviewResult {
   hasLlm: boolean;
 }
 
-/** 在已开始的记录上生成：结构部分 → AI 部分 → 写 overviews 表 → 写回划分记录；出错时记录改为 failed 并抛出 */
+/**
+ * 在已开始的记录上生成：结构部分 → AI 部分 → 写 overviews 表 → 写回划分记录；出错或被中止（LlmCancelledError）时
+ * 记录改为 failed 并抛出，缺 AI 描述的结果不保存
+ */
 export async function generateOverview(id: number, opts: OverviewOptions, setup: OverviewAiSetup): Promise<OverviewResult> {
   const { store, config } = opts;
   const started = Date.now();
@@ -62,6 +66,7 @@ export async function generateOverview(id: number, opts: OverviewOptions, setup:
     const s = await computeStructure(opts);
     const report = structureReport(s, { repo: opts.repo, ref: opts.ref });
     const ai = await summarize(s, report.modules, { ...summarizeOptions(opts, setup), onProgress: (p) => store.overviews.setProgress(id, p) });
+    throwIfCancelled(opts.signal, 'overview generation');
     assemble(report, ai, setup, config);
     store.overviews.finish(id, report, ai.hasLlm);
     await savePartitionRecord(config.dataDir, s);

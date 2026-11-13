@@ -2,7 +2,7 @@ import { estimateTokens } from '../intent/summary.js';
 import { askJson, jsonRetryPrompt } from '../llm/ask-json.js';
 import { llmCacheKey, readLlmCache, writeLlmCache } from '../llm/cache.js';
 import type { LlmClient } from '../llm/index.js';
-import { notifyLlmOnce } from '../llm/setup.js';
+import { llmLabel, notifyLlmOnce } from '../llm/setup.js';
 import { log } from '../log.js';
 import type { Warning } from '../report/types.js';
 import type { OverviewProgress } from '../store/overviews.js';
@@ -36,6 +36,8 @@ export interface SummarizeOptions {
   readFile: (path: string) => Promise<string>;
   onLlmNotice?: (message: string) => void;
   onProgress?: (p: OverviewProgress) => void;
+  /** 中止后不再发送请求，已发出的请求随之中止 */
+  signal?: AbortSignal;
 }
 
 /** 估算时未命中缓存、需要发送的请求 */
@@ -81,7 +83,7 @@ function cacheKeyOf(opts: SummarizeOptions, req: AiRequest<unknown>): string {
 }
 
 function noticeText(client: LlmClient, sendSource: boolean): string {
-  return `sending structural information${sendSource ? ' and source snippets' : ' (no source code)'} to ${client.provider} (${client.model}) to generate the overview`;
+  return `sending structural information${sendSource ? ' and source snippets' : ' (no source code)'} to ${llmLabel(client)} to generate the overview`;
 }
 
 /** 缓存命中直接用；未命中时按模式计数（估算）、不发（没有客户端）、跳过（已停止）或发送 */
@@ -107,7 +109,7 @@ async function runRequest<T>(run: Run, req: AiRequest<T>, previous?: string): Pr
     run.pending.outputTokens += OUTPUT_TOKENS[req.kind];
     return { status: 'none' };
   }
-  if (run.aborted) return { status: 'skipped' };
+  if (run.aborted || opts.signal?.aborted) return { status: 'skipped' };
   return send(run, opts.client, req, prompt, key);
 }
 
@@ -115,7 +117,7 @@ async function send<T>(run: Run, client: LlmClient, req: AiRequest<T>, prompt: s
   notifyLlmOnce(client, noticeText(client, run.opts.sendSource), run.opts.onLlmNotice);
   const r = await askJson({
     client, system: OVERVIEW_SYSTEM_PROMPT, prompt, maxTokens: OUTPUT_TOKENS[req.kind], items: 1,
-    parse: (reply) => parseReply(req, reply), retryPrompt: jsonRetryPrompt, transientRetries: 2, invalidEvent: 'overview_response_invalid',
+    parse: (reply) => parseReply(req, reply), retryPrompt: jsonRetryPrompt, transientRetries: 2, invalidEvent: 'overview_response_invalid', jsonSchema: req.jsonSchema, signal: run.opts.signal,
   });
   run.ai.calls++;
   run.ai.inputTokens += promptTokens(prompt);

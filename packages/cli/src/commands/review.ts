@@ -71,6 +71,8 @@ export interface ReviewDeps {
   openUrl?: (url: string) => void;
   /** HTML 报告模板，默认为 cli 发布目录里的 web/report.html */
   templatePath?: string;
+  /** runCli 收到退出信号时中止：不输出报告 */
+  signal?: AbortSignal;
 }
 
 type ReviewArgs = ReturnType<typeof parseReviewArgs>;
@@ -106,7 +108,7 @@ export async function runReviewCommand(argv: string[], deps: ReviewDeps = {}): P
   try {
     const report = await runReview({
       repo, store, layout, config, base: args.base, head: args.head, working: args.working, intent, noLlm: args['no-llm'],
-      onLlmNotice: (message) => process.stderr.write(`codeinsight: ${message}\n`),
+      onLlmNotice: (message) => process.stderr.write(`codeinsight: ${message}\n`), signal: deps.signal,
     });
     await writeOutput(renderReport(report, args.format, template), args, deps);
     return 0;

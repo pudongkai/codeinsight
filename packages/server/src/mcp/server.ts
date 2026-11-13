@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { killActiveScipProcesses, log } from '@codeinsight/core';
+import { killActiveCliProcesses, killActiveScipProcesses, log } from '@codeinsight/core';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { IndexJobs } from '../jobs/index-jobs.js';
@@ -37,7 +37,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
 
 /**
  * 在 stdio 上运行 MCP 服务，客户端断开（stdin 结束）后返回。stdout 只用于协议消息，日志写 stderr。
- * 断开时结束正在跑的 scip-python，并等建索引和工具调用结束（被中断的快照标为解析失败，下次按重试逻辑恢复），
+ * 断开时结束正在跑的 scip-python 和本机 CLI 子进程，并等建索引和工具调用结束（被中断的快照标为解析失败，下次按重试逻辑恢复），
  * 返回后调用方才能安全关库。
  */
 export async function runMcpStdio(opts: McpOptions): Promise<void> {
@@ -52,7 +52,10 @@ export async function runMcpStdio(opts: McpOptions): Promise<void> {
   log.info('mcp_closed', { killedScip: await stopWork(ctx) });
 }
 
-/** 结束 scip-python 并等进行中的工作结束；工具调用可能在这期间又启动 scip-python，所以反复结束直到全部完成 */
+/**
+ * 结束 scip-python 和 CLI 子进程并等进行中的工作结束；工具调用可能在这期间又启动子进程，所以反复结束直到全部完成。
+ * 删 opencode 会话的命令照常放行，命令退出前还要删会话。
+ */
 async function stopWork(ctx: McpContext): Promise<number> {
   let finished = false;
   const settled = Promise.allSettled([ctx.indexJobs.drain(), ctx.pending.drain()]).then(() => {
@@ -60,7 +63,8 @@ async function stopWork(ctx: McpContext): Promise<number> {
   });
   let killed = 0;
   while (!finished) {
-    killed += await killActiveScipProcesses();
+    const [scip] = await Promise.all([killActiveScipProcesses(), killActiveCliProcesses({ keepSessionDelete: true })]);
+    killed += scip;
     await Promise.race([settled, sleep(200)]);
   }
   return killed;

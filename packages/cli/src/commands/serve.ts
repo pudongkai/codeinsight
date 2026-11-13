@@ -1,11 +1,12 @@
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { GitError, killActiveScipProcesses, log, repoRoot, ReviewArgsError } from '@codeinsight/core';
+import { flushOpencodeSessions, GitError, killActiveCliProcesses, killActiveScipProcesses, log, repoRoot, ReviewArgsError } from '@codeinsight/core';
 import type { Resolver } from '@codeinsight/core';
 import { startHttpServer, type RunningHttpServer } from '@codeinsight/server';
 import { openBrowser } from '../open-browser.js';
 import { DEFAULT_STATIC_DIR } from '../web-assets.js';
+import { askToolServer } from './mcp.js';
 import { openWorkspace, type Workspace } from './workspace.js';
 
 export const SERVE_USAGE = `Usage: codeinsight serve [--repo DIR] [--port 0] [--open] [--data-dir DIR] [--lock-repo] [--exit-on-stdin-close]
@@ -84,6 +85,7 @@ export async function startServe(argv: string[], deps: ServeDeps = {}): Promise<
   const ws = opened && { ...opened, resolver: deps.resolver };
   const server = await startHttpServer({
     workspace: ws, lockRepo: args['lock-repo'] === true, resolver: deps.resolver, port: args.port, staticDir: deps.staticDir ?? DEFAULT_STATIC_DIR,
+    askToolServer: askToolServer(),
   });
   const line = {
     port: server.port, token: server.token, url: server.url,
@@ -133,8 +135,10 @@ function waitForStop(watchStdin: boolean): Promise<StopReason> {
 const SHUTDOWN_GRACE_MS = 3000;
 
 /**
- * codeinsight serve：运行到收到 SIGINT / SIGTERM（或 --exit-on-stdin-close 时 stdin 关闭）。退出时先结束正在跑的 scip-python 子进程（不留孤儿进程和临时文件），
- * 中止进行中的问答（已收到的文字保存为 cancelled），最多等 SHUTDOWN_GRACE_MS 让被中断的任务写回状态（解析标为失败）、概览任务结束，然后结束进程；
+ * codeinsight serve：运行到收到 SIGINT / SIGTERM（或 --exit-on-stdin-close 时 stdin 关闭）。退出时先结束正在跑的 scip-python 和本机 CLI 子进程
+ * （不留孤儿进程和临时文件；之后只允许删 opencode 会话的命令启动），中止进行中的问答（已收到的文字保存为 cancelled），
+ * 最多等 SHUTDOWN_GRACE_MS 让被中断的任务写回状态（解析标为失败）、概览任务结束，再等 opencode 会话删除队列（最多 5 秒），
+ * 最后结束剩下的全部 CLI 子进程，然后结束进程；
  * 到时仍在跑的审查和概览留在 running，下次 serve 启动时标为 failed。
  */
 export async function runServeCommand(argv: string[], deps: ServeDeps = {}): Promise<number> {
@@ -142,8 +146,10 @@ export async function runServeCommand(argv: string[], deps: ServeDeps = {}): Pro
   if (!started) return 0;
   const reason = await waitForStop(started.exitOnStdinClose);
   log.info('serve_stopping', { signal: reason });
-  const killed = await killActiveScipProcesses();
+  const [killed, killedCli] = await Promise.all([killActiveScipProcesses(), killActiveCliProcesses({ keepSessionDelete: true })]);
   await Promise.race([started.server.close({ drain: true }), sleep(SHUTDOWN_GRACE_MS)]);
-  log.info('serve_stopped', { killedScip: killed });
+  const sessionsLeft = await flushOpencodeSessions();
+  const killedLater = await killActiveCliProcesses();
+  log.info('serve_stopped', { killedScip: killed, killedCli: killedCli + killedLater, sessionsLeft });
   process.exit(0);
 }

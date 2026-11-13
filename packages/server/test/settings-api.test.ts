@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_MODEL, setLogSink, userSettingsPath } from '@codeinsight/core';
@@ -16,6 +17,7 @@ interface SettingsView {
     provider: FieldView; baseUrl: FieldView; model: FieldView;
     apiKey: { set: boolean; last4?: string; source: string; env?: string };
     shadowed: { field: string; by: string; env: string }[];
+    commandEnv?: string | null;
   };
   effective: { configured: boolean; provider: string | null; model: string | null; problem: string | null };
   autoReindex: boolean;
@@ -87,14 +89,15 @@ afterAll(async () => {
 
 describe('settings api without a repository', () => {
   it('reports env sources and defaults, and status follows user settings and env', async () => {
-    const { api } = await start({ env: { CODEINSIGHT_LLM_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: ENV_KEY, CODEINSIGHT_SEND_SOURCE: '0' } });
+    const { api } = await start({ env: { CODEINSIGHT_LLM_PROVIDER: 'anthropic', ANTHROPIC_API_KEY: ENV_KEY, CODEINSIGHT_SEND_SOURCE: '0', CODEINSIGHT_LLM_COMMAND: '/opt/tools/claude' } });
     const s = (await api<SettingsView>('/api/settings')).body;
+    expect(s.llm.commandEnv).toBe('/opt/tools/claude');
     expect(s.path).toBe(userSettingsPath());
     expect(s.llm.provider).toEqual({ value: 'anthropic', source: 'env', env: 'CODEINSIGHT_LLM_PROVIDER' });
     expect(s.llm.model).toEqual({ value: DEFAULT_ANTHROPIC_MODEL, source: 'default' });
     expect(s.llm.baseUrl).toEqual({ value: ANTHROPIC_BASE_URL, source: 'default' });
     expect(s.llm.apiKey).toEqual({ set: true, last4: ENV_KEY.slice(-4), source: 'env', env: 'ANTHROPIC_API_KEY' });
-    expect(s.effective).toEqual({ configured: true, provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL, problem: null });
+    expect(s.effective).toEqual({ configured: true, kind: 'api', provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL, problem: null });
     expect(s.autoReindex).toBe(false);
     const st = (await api<Status>('/api/status')).body;
     expect(st).toMatchObject({ repo: null, llmConfigured: true, llm: { provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL }, sendSource: false });
@@ -102,7 +105,7 @@ describe('settings api without a repository', () => {
 
     const saved = await saveLlm(api, { provider: 'anthropic', model: 'user-model' });
     expect(saved.body.llm.model).toEqual({ value: 'user-model', source: 'user' });
-    expect((await api<Status>('/api/status')).body.llm).toEqual({ provider: 'anthropic', model: 'user-model' });
+    expect((await api<Status>('/api/status')).body.llm).toEqual({ provider: 'anthropic', model: 'user-model', kind: 'api', source: 'user' });
     clearUserLlm();
     expect((await api<SettingsView>('/api/settings')).body).toMatchObject({ llm: { model: { source: 'default' } } });
   });
@@ -138,7 +141,7 @@ describe('settings api with a repository', () => {
     expect(r.body.llm.model).toEqual({ value: 'user-model', source: 'user' });
     expect(r.body.llm.apiKey).toEqual({ set: true, last4: KEY.slice(-4), source: 'user' });
     expect(r.body.llm.shadowed).toEqual([{ field: 'model', by: 'user', env: 'CODEINSIGHT_LLM_MODEL' }]);
-    expect((await api<Status>('/api/status')).body.llm).toEqual({ provider: 'openai-compatible', model: 'user-model' });
+    expect((await api<Status>('/api/status')).body.llm).toEqual({ provider: 'openai-compatible', model: 'user-model', kind: 'api', source: 'user' });
     expect(ws.config.llm).toMatchObject({ baseUrl: fake.url, apiKey: KEY });
     expect(ws.config.dataDir).toContain('ci-settings-data-');
   });
@@ -153,6 +156,15 @@ describe('settings api with a repository', () => {
     await saveLlm(api, { provider: 'openai-compatible', baseUrl: fake.url, model: 'user-model-2', apiKey: KEY });
   });
 
+  it('accepts model names with @, /, . and :', async () => {
+    const model = '@cf/meta/llama-3.1-8b-instruct:free';
+    const r = await saveLlm(api, { provider: 'openai-compatible', baseUrl: fake.url, model, apiKey: '' });
+    expect(r.status).toBe(200);
+    expect(r.body.llm.model).toEqual({ value: model, source: 'user' });
+    expect(JSON.parse(readFileSync(userSettingsPath(), 'utf8')).llm.model).toBe(model);
+    await saveLlm(api, { provider: 'openai-compatible', baseUrl: fake.url, model: 'user-model-2', apiKey: '' });
+  });
+
   it('rejects invalid parameters without echoing the key', async () => {
     const bad: [Record<string, unknown>, string][] = [
       [{ provider: 'other' }, 'provider'],
@@ -162,6 +174,8 @@ describe('settings api with a repository', () => {
       [{ provider: 'anthropic', baseUrl: `https://x.example/${'a'.repeat(2048)}` }, 'baseUrl'],
       [{ provider: 'anthropic', model: 'a\nb' }, 'model'],
       [{ provider: 'anthropic', model: 'm'.repeat(201) }, 'model'],
+      [{ provider: 'anthropic', model: '-m' }, 'model'],
+      [{ provider: 'anthropic', model: 'a b' }, 'model'],
       [{ provider: 'anthropic', apiKey: `${KEY} x` }, 'apiKey'],
       [{ provider: 'anthropic', apiKey: 'k'.repeat(4097) }, 'apiKey'],
       [{ provider: 'anthropic', apiKey: KEY, clearApiKey: true }, 'apiKey'],
@@ -203,6 +217,27 @@ describe('settings api with a repository', () => {
     release();
     expect((await first).body.ok).toBe(true);
     gate = undefined;
+  });
+
+  it('aborts the API request when the browser disconnects, so the next test is not 409', async () => {
+    const { server, api: own } = await start({ env: {} });
+    gate = new Promise<void>(() => undefined);
+    const body = JSON.stringify({ provider: 'openai-compatible', baseUrl: fake.url, apiKey: KEY, model: 'hold' });
+    const req = httpRequest({
+      host: '127.0.0.1', port: server.port, path: '/api/settings/llm/test', method: 'POST',
+      headers: { Authorization: `Bearer ${server.token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    });
+    req.on('error', () => undefined);
+    req.end(body);
+    const held = () => fake.requests.filter((r) => r.body.model === 'hold');
+    const before = held().length;
+    await waitFor(async () => (held().length > before ? true : undefined));
+    req.destroy();
+    await waitFor(async () => (held().at(-1)!.aborted ? true : undefined));
+    gate = undefined;
+    const next = await testLlm(own, { provider: 'openai-compatible', baseUrl: fake.url, apiKey: KEY, model: 'ok' });
+    expect(next.status).toBe(200);
+    expect(next.body.ok).toBe(true);
   });
 
   it('reports invalid configurations', async () => {
@@ -303,7 +338,7 @@ describe('settings saved by another serve process', () => {
     // 保证 mtime 不同
     await sleep(20);
     expect((await saveLlm(b.api, { provider: 'openai-compatible', baseUrl: fake.url, model: 'other-proc', apiKey: KEY })).status).toBe(200);
-    expect((await a.api<Status>('/api/status')).body.llm).toEqual({ provider: 'openai-compatible', model: 'other-proc' });
+    expect((await a.api<Status>('/api/status')).body.llm).toEqual({ provider: 'openai-compatible', model: 'other-proc', kind: 'api', source: 'user' });
     expect(wsA.config.llm).toMatchObject({ model: 'other-proc' });
     clearUserLlm();
   });

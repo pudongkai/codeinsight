@@ -19,6 +19,24 @@ Reply with JSON only, no prose and no code fences, in exactly this shape:
 Rules: copy symbol keys and module names exactly as listed; put every listed symbol in exactly one group;
 write "summary" in the language of the task description.`;
 
+const STRING_LIST = { type: 'array', items: { type: 'string' } };
+
+/** 回复的 JSON Schema，和 parseIntentResponse 对应 */
+export const INTENT_JSON_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    groups: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { verdict: { type: 'string', enum: ['mentioned', 'unmentioned', 'unclear'] }, summary: { type: 'string' }, symbols: STRING_LIST, modules: STRING_LIST },
+        required: ['verdict', 'summary', 'symbols'],
+      },
+    },
+  },
+  required: ['groups'],
+};
+
 export function userPrompt(intentText: string, summary: string): string {
   return `# Task description\n\n${intentText.trim()}\n\n# Structural summary of the change\n\n${summary}\n`;
 }

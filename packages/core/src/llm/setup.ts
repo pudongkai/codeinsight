@@ -1,5 +1,6 @@
 import type { CodeInsightConfig } from '../config/index.js';
 import { log } from '../log.js';
+import { isCliProvider } from '../settings/types.js';
 import type { Warning } from '../report/types.js';
 import { createLlmClient, type LlmClient } from './index.js';
 
@@ -22,17 +23,24 @@ export function llmClientFromConfig(config: Pick<CodeInsightConfig, 'llm' | 'llm
   }
 }
 
+/** 提示和日志里的模型服务文字，如 `anthropic (claude-x)`；模型为空时写 default model（与网页的“默认模型”对应） */
+export function llmLabel(client: Pick<LlmClient, 'provider' | 'model'>): string {
+  return `${client.provider} (${client.model || 'default model'})`;
+}
+
 /** 已提示过的 provider + 模型 + 提示文字；发送内容不同的功能（审查只发结构摘要、概览可能带源码）各提示一次 */
 const noticed = new Set<string>();
 
 /**
  * 第一次实际发送前提示一次，写明会发到哪个 provider 和模型。message 由调用方给出（发送的内容各功能不同）；
- * 没有 onNotice 时只记日志。
+ * 本机 CLI 另外说明用的是用户自己的账号额度，插在 message 末尾的换行之前。没有 onNotice 时只记日志。
  */
 export function notifyLlmOnce(client: Pick<LlmClient, 'provider' | 'model'>, message: string, onNotice?: (message: string) => void): void {
   const id = [client.provider, client.model, message].join('\0');
   if (noticed.has(id)) return;
   noticed.add(id);
-  if (onNotice) onNotice(message);
+  const body = message.replace(/\n+$/, '');
+  const text = isCliProvider(client.provider) ? `${body} via the local ${client.provider} CLI (uses your own account quota)${message.slice(body.length)}` : message;
+  if (onNotice) onNotice(text);
   else log.info('llm_notice', { provider: client.provider, model: client.model });
 }

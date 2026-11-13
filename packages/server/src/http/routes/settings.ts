@@ -1,17 +1,25 @@
+import path from 'node:path';
 import {
-  ANTHROPIC_BASE_URL, createLlmClient, isLlmProvider, LlmError, LlmTruncatedError, loadConfig, loadLlmSources, log, OPENAI_BASE_URL, originOf,
-  readUserSettings, updateUserSettings, userSettingsPath,
+  ANTHROPIC_BASE_URL, commandProblem, createLlmClient, envNameProblem, envValueProblem, isCliProvider, isLlmProvider, LlmError, LlmTruncatedError, loadConfig,
+  LLM_ENV, loadLlmSources, log, MAX_EXTRA_ENV_ENTRIES, modelProblem, OPENAI_BASE_URL, OPENCODE_PERMISSIONS_VERIFIED, originOf, readUserSettings, resolveCliCommand,
+  updateUserSettings, userSettingsPath,
 } from '@codeinsight/core';
-import type { LlmClient, LlmConfig, LlmFieldSource, LlmProvider, LlmSources, UserLlmSettings, UserSettings } from '@codeinsight/core';
+import type { LlmClient, LlmConfig, LlmExtraEnvSource, LlmFieldSource, LlmProvider, LlmSources, UserLlmSettings, UserSettings } from '@codeinsight/core';
 import type { RepoContext } from '../../repo-context.js';
 import type { AppContext, Route, RequestContext } from '../context.js';
 import { HttpError, optBool, readJsonBody, sendJson } from '../respond.js';
+import { testCliConnection, type CliTestResult } from './llm-test-cli.js';
 
 const MAX_BASE_URL_CHARS = 2048;
-const MAX_MODEL_CHARS = 200;
 const MAX_API_KEY_CHARS = 4096;
 /** 显示末 4 位的最短 key 长度，太短的 key 不显示任何部分 */
 const LAST4_MIN_CHARS = 12;
+
+/** 附加环境变量的一项；没有 value 表示沿用已保存的同名值（网页上看不到值的项） */
+export interface ExtraEnvEntry {
+  name: string;
+  value?: string;
+}
 
 /** 保存和测试连接的请求体；空字符串的项为 undefined */
 export interface LlmForm {
@@ -20,6 +28,24 @@ export interface LlmForm {
   model?: string;
   apiKey?: string;
   clearApiKey: boolean;
+  /** 只用于 CLI provider */
+  command?: string;
+  /** 只用于 CLI provider；完整列表，整体替换；不传时沿用已保存的 */
+  extraEnv?: ExtraEnvEntry[];
+}
+
+/** 回传值的代理变量（不分大小写），值按 URL 处理；NO_PROXY 是主机列表，原样回传 */
+const PROXY_ENV = new Set(['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']);
+
+/** 权限隔离还没有在真实 CLI 上确认生效的 provider 不能选择 */
+export function unavailableProviders(): LlmProvider[] {
+  return OPENCODE_PERMISSIONS_VERIFIED ? [] : ['opencode'];
+}
+
+/** provider 暂不可用时的原因，可用时为 undefined */
+export function providerUnavailable(provider: string | undefined): string | undefined {
+  if (!unavailableProviders().includes(provider as LlmProvider)) return undefined;
+  return `${provider} is not available yet: its permission isolation has not been verified for this version`;
 }
 
 type ApiKeyChange = 'set' | 'unchanged' | 'cleared';
@@ -52,8 +78,8 @@ function parseBaseUrl(raw: string | undefined): string | undefined {
 
 function parseModel(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  if (raw.length > MAX_MODEL_CHARS) throw invalid(`model must be at most ${MAX_MODEL_CHARS} characters`);
-  if (/[\r\n]/.test(raw)) throw invalid('model must not contain line breaks');
+  const problem = modelProblem(raw);
+  if (problem) throw invalid(`model: ${problem}`);
   return raw;
 }
 
@@ -66,9 +92,52 @@ function parseApiKey(raw: string | undefined, clear: boolean): string | undefine
   return raw;
 }
 
+function parseCommand(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const problem = commandProblem(raw, { pathOrName: true });
+  if (problem) throw invalid(`command: ${problem}`);
+  return raw;
+}
+
+function parseExtraEnvEntry(raw: unknown, seen: Set<string>): ExtraEnvEntry {
+  const item = raw as { name?: unknown; value?: unknown } | null;
+  if (typeof item !== 'object' || item === null || typeof item.name !== 'string') throw invalid('extraEnv items must be objects with a name');
+  const name = item.name.trim();
+  const nameProblem = envNameProblem(name);
+  if (nameProblem) throw invalid(`extraEnv name ${JSON.stringify(name.slice(0, 64))}: ${nameProblem}`);
+  if (seen.has(name)) throw invalid(`extraEnv name ${name} appears more than once`);
+  seen.add(name);
+  if (item.value === undefined || item.value === null) return { name };
+  const valueProblem = envValueProblem(item.value);
+  if (valueProblem) throw invalid(`extraEnv value of ${name}: ${valueProblem}`);
+  return { name, value: item.value as string };
+}
+
+/** 附加环境变量：不传为 undefined（沿用已保存的）；错误信息只带名字，不带值 */
+function parseExtraEnv(raw: unknown): ExtraEnvEntry[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw invalid('extraEnv must be an array');
+  if (raw.length > MAX_EXTRA_ENV_ENTRIES) throw invalid(`extraEnv must have at most ${MAX_EXTRA_ENV_ENTRIES} items`);
+  const seen = new Set<string>();
+  return raw.map((item) => parseExtraEnvEntry(item, seen));
+}
+
+/** CLI provider 用本机登录状态，不接受服务地址和 API key */
+function parseCliForm(body: Record<string, unknown>, provider: LlmProvider): LlmForm {
+  if (optText(body, 'baseUrl') !== undefined) throw invalid(`baseUrl must be empty for ${provider}`);
+  if (optText(body, 'apiKey') !== undefined) throw invalid(`apiKey must be empty for ${provider}`);
+  return {
+    provider, model: parseModel(optText(body, 'model')), clearApiKey: optBool(body, 'clearApiKey') ?? false,
+    command: parseCommand(optText(body, 'command')), extraEnv: parseExtraEnv(body.extraEnv),
+  };
+}
+
 export function parseLlmForm(body: Record<string, unknown>): LlmForm {
   const provider = body.provider;
-  if (!isLlmProvider(provider)) throw invalid('provider must be anthropic or openai-compatible');
+  if (!isLlmProvider(provider)) throw invalid('provider must be anthropic, openai-compatible, claude-code or opencode');
+  const unavailable = providerUnavailable(provider);
+  if (unavailable) throw new HttpError(400, 'provider_unavailable', unavailable);
+  if (isCliProvider(provider)) return parseCliForm(body, provider);
   const clearApiKey = optBool(body, 'clearApiKey') ?? false;
   return {
     provider,
@@ -84,9 +153,29 @@ function apiKeyChange(form: LlmForm): ApiKeyChange {
   return form.apiKey ? 'set' : 'unchanged';
 }
 
-/** 请求日志里的参数：apiKey 只记怎么改，baseUrl 只记 origin */
+/** 请求日志里的参数：apiKey 只记怎么改，baseUrl 只记 origin，command 只记文件名，附加环境变量只记名字 */
 function formLogFields(form: LlmForm): Record<string, unknown> {
+  if (isCliProvider(form.provider)) {
+    return { provider: form.provider, model: form.model, command: form.command ? path.basename(form.command) : undefined, extraEnv: form.extraEnv?.map((e) => e.name) };
+  }
   return { provider: form.provider, baseUrlOrigin: form.baseUrl ? originOf(form.baseUrl) : undefined, model: form.model, apiKey: apiKeyChange(form) };
+}
+
+/** 表单里的附加环境变量换成要保存的值：没有 value 的项沿用已保存的同名值，已保存里没有时 400 */
+function resolveExtraEnv(entries: ExtraEnvEntry[] | undefined, saved: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (entries === undefined) return saved;
+  const out: Record<string, string> = {};
+  for (const e of entries) {
+    const value = e.value ?? saved?.[e.name];
+    if (value === undefined) throw invalid(`extraEnv ${e.name} has no value and no saved value to keep`);
+    out[e.name] = value;
+  }
+  return entries.length > 0 ? out : undefined;
+}
+
+/** CLI provider：不保存服务地址和 API key（已保存的 key 属于 API provider，不沿用），命令路径为空表示用默认查找 */
+function cliUserLlm(settings: UserSettings, form: LlmForm): UserLlmSettings {
+  return { provider: form.provider, model: form.model, command: form.command, extraEnv: resolveExtraEnv(form.extraEnv, settings.llm?.extraEnv) };
 }
 
 /** 已保存的 key 属于哪个 provider：用户设置里的，没有时为当时生效的 */
@@ -99,11 +188,17 @@ async function savedKeyProvider(ctx: RequestContext, settings: UserSettings): Pr
  * 但 provider 变了时不沿用（避免把一家的 key 发给另一家、盖住该 provider 的环境变量），这时要有该 provider 的环境变量 key，否则 400。
  */
 async function resolveUserLlm(ctx: RequestContext, settings: UserSettings, form: LlmForm): Promise<{ llm: UserLlmSettings; sources: LlmSources }> {
+  if (isCliProvider(form.provider)) {
+    const llm = cliUserLlm(settings, form);
+    if (settings.llm?.apiKey !== undefined) log.info('user_settings_key_not_reused', { provider: form.provider, keySource: 'none' });
+    return { llm, sources: await sourcesFor(ctx.app, ctx.repo, { ...settings, llm }) };
+  }
   const saved = settings.llm?.apiKey;
   let apiKey = form.clearApiKey ? undefined : (form.apiKey ?? saved);
   const dropped = !form.apiKey && !form.clearApiKey && saved !== undefined && (await savedKeyProvider(ctx, settings)) !== form.provider;
   if (dropped) apiKey = undefined;
-  const llm: UserLlmSettings = { provider: form.provider, baseUrl: form.baseUrl, model: form.model, apiKey };
+  // 命令路径和附加环境变量保留，切回 CLI provider 时还在
+  const llm: UserLlmSettings = { provider: form.provider, baseUrl: form.baseUrl, model: form.model, apiKey, command: settings.llm?.command, extraEnv: settings.llm?.extraEnv };
   const sources = await sourcesFor(ctx.app, ctx.repo, { ...settings, llm });
   if (dropped && sources.apiKey.value === undefined) {
     throw invalid('apiKey is required: the saved key belongs to another provider');
@@ -127,14 +222,66 @@ function apiKeyView(f: LlmFieldSource) {
   return { set: key !== '', ...(key.length >= LAST4_MIN_CHARS ? { last4: key.slice(-4) } : {}), source: f.source, ...(f.env ? { env: f.env } : {}) };
 }
 
-function llmView(s: LlmSources) {
+/** URL 只留协议、主机和路径（去掉用户名密码、query、fragment）；不是带协议和主机的 URL 时返回 undefined */
+function urlWithoutSecrets(value: string): string | undefined {
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (!url.host) return undefined;
+  return `${url.protocol}//${url.host}${url.pathname === '/' ? '' : url.pathname}`;
+}
+
+type ExtraEnvItemView = { name: string; value: string; masked?: true } | { name: string; set: true };
+
+/**
+ * 附加环境变量的一项：只有代理变量和名字以 _BASE_URL 结尾的变量回传值（URL 去掉敏感部分，和原值不同时标 masked，
+ * 网页不会把它当原值发回），NO_PROXY 原样回传，其余只说明已设置。
+ */
+function extraEnvItemView(name: string, value: string): ExtraEnvItemView {
+  const upper = name.toUpperCase();
+  if (upper === 'NO_PROXY') return { name, value };
+  if (!PROXY_ENV.has(upper) && !upper.endsWith('_BASE_URL')) return { name, set: true };
+  const shown = urlWithoutSecrets(value);
+  if (shown === undefined) return { name, set: true };
+  return shown === value ? { name, value } : { name, value: shown, masked: true };
+}
+
+function extraEnvView(f: LlmExtraEnvSource) {
+  return { source: f.source, entries: Object.entries(f.value ?? {}).map(([name, value]) => extraEnvItemView(name, value)) };
+}
+
+/** 命令路径和实际找到的可执行文件（只在 provider 是 CLI 时查找，找不到为 null） */
+function commandView(s: LlmSources, env: NodeJS.ProcessEnv) {
+  const p = s.provider.value;
+  const resolved = isCliProvider(p) ? resolveCliCommand(p, s.command.value, env) : undefined;
+  return { ...sourceView(s.command), resolved: resolved?.ok ? resolved.path : null };
+}
+
+/** 环境变量指定的命令路径（不合法的不算），和当前生效的 provider 无关：网页切到 CLI provider 时据此提示 */
+function commandEnvView(env: NodeJS.ProcessEnv): string | null {
+  const v = env[LLM_ENV.command];
+  return v && !commandProblem(v) ? v : null;
+}
+
+function effectiveView(s: LlmSources) {
+  const unavailable = providerUnavailable(s.llm?.provider);
+  const kind = s.llm ? (isCliProvider(s.llm.provider) ? 'cli' : 'api') : null;
+  return { configured: s.llm !== undefined && !unavailable, kind, provider: s.llm?.provider ?? null, model: s.llm?.model ?? null, problem: unavailable ?? s.problem ?? null };
+}
+
+function llmView(s: LlmSources, env: NodeJS.ProcessEnv) {
   const baseUrl = s.baseUrl.source === 'default' ? defaultBaseUrl(s.provider.value) : s.baseUrl.value;
   return {
     llm: {
       provider: sourceView(s.provider), baseUrl: sourceView(s.baseUrl, baseUrl), model: sourceView(s.model), apiKey: apiKeyView(s.apiKey),
-      shadowed: s.shadowed,
+      command: commandView(s, env), commandEnv: commandEnvView(env), extraEnv: extraEnvView(s.extraEnv), shadowed: s.shadowed,
     },
-    effective: { configured: s.llm !== undefined, provider: s.llm?.provider ?? null, model: s.llm?.model ?? null, problem: s.problem ?? null },
+    effective: effectiveView(s),
+    unavailableProviders: unavailableProviders(),
   };
 }
 
@@ -147,7 +294,7 @@ function sourcesFor(app: AppContext, repo: RepoContext | undefined, settings: Us
 async function settingsView(ctx: RequestContext, settings?: UserSettings) {
   const s = settings ?? (await readUserSettings());
   const sources = await sourcesFor(ctx.app, ctx.repo, s);
-  return { path: userSettingsPath(), ...llmView(sources), autoReindex: s.autoReindex ?? false };
+  return { path: userSettingsPath(), ...llmView(sources, ctx.app.env), autoReindex: s.autoReindex ?? false };
 }
 
 /** 用新的用户设置重新读当前仓库的配置并替换（数据目录不变）；已开始的任务继续用旧配置 */
@@ -191,6 +338,7 @@ async function saveGeneral(ctx: RequestContext): Promise<void> {
 
 export type LlmTestResult =
   | { ok: true; provider: string; model: string; origin: string; ms: number }
+  | CliTestResult
   | { ok: false; reason: string; message: string; ms: number };
 
 const PING = { system: '', messages: [{ role: 'user' as const, content: 'ping' }], maxTokens: 16 };
@@ -212,7 +360,7 @@ function cfgOrigin(cfg: LlmConfig): string {
 }
 
 /** 发一个最小请求；收到回复（包括被截断）就算成功 */
-async function pingLlm(cfg: LlmConfig, timeoutMs: number): Promise<LlmTestResult> {
+async function pingLlm(cfg: LlmConfig, timeoutMs: number, signal: AbortSignal): Promise<LlmTestResult> {
   let client: LlmClient;
   try {
     client = createLlmClient(cfg, { timeoutMs });
@@ -221,7 +369,7 @@ async function pingLlm(cfg: LlmConfig, timeoutMs: number): Promise<LlmTestResult
   }
   const started = Date.now();
   try {
-    await client.complete(PING);
+    await client.complete({ ...PING, signal });
   } catch (err) {
     const ms = Date.now() - started;
     if (!(err instanceof LlmTruncatedError)) return { ok: false, reason: failureReason(err, ms, timeoutMs), message: (err as Error).message.slice(0, 300), ms };
@@ -230,26 +378,44 @@ async function pingLlm(cfg: LlmConfig, timeoutMs: number): Promise<LlmTestResult
 }
 
 /** 按“保存后会生效的配置”测试：表单没填的项按用户设置、环境变量、仓库配置、默认值补齐 */
-async function runLlmTest(ctx: RequestContext, form: LlmForm): Promise<{ result: LlmTestResult; cfg?: LlmConfig }> {
+async function runLlmTest(ctx: RequestContext, form: LlmForm, signal: AbortSignal): Promise<{ result: LlmTestResult; cfg?: LlmConfig }> {
   const { sources } = await resolveUserLlm(ctx, await readUserSettings(), form);
   if (!sources.llm) return { result: { ok: false, reason: 'invalid_config', message: sources.problem ?? 'LLM is not configured', ms: 0 } };
-  return { result: await pingLlm(sources.llm, ctx.app.llmTest.timeoutMs), cfg: sources.llm };
+  const cfg = sources.llm;
+  if (isCliProvider(cfg.provider)) return { result: await testCliConnection({ ...cfg, provider: cfg.provider }, ctx.app.env, ctx.app.llmTest.cliTimeoutMs, signal), cfg };
+  return { result: await pingLlm(cfg, ctx.app.llmTest.timeoutMs, signal), cfg };
 }
 
-/** POST /api/settings/llm/test：不写文件；同一时间只允许一个测试 */
+/** 测试结果日志：API 记 origin，CLI 记命令文件名和版本 */
+function testLogFields(form: LlmForm, cfg: LlmConfig | undefined, result: LlmTestResult): Record<string, unknown> {
+  const cli = cfg !== undefined && isCliProvider(cfg.provider);
+  const where = cli ? { command: 'command' in result ? path.basename(result.command) : undefined, version: 'version' in result ? result.version : undefined } : { origin: cfg ? cfgOrigin(cfg) : undefined };
+  return { provider: cfg?.provider ?? form.provider, ...where, model: result.ok ? result.model : cfg?.model, ok: result.ok, reason: result.ok ? undefined : result.reason, ms: result.ms };
+}
+
+/**
+ * POST /api/settings/llm/test：不写文件；同一时间只允许一个测试。
+ * 浏览器断开或服务关闭时中止（本机 CLI 的子进程随之结束），不再占着测试位置。
+ */
 async function testLlm(ctx: RequestContext): Promise<void> {
   const form = parseLlmForm(await readJsonBody(ctx.req));
   Object.assign(ctx.logFields, formLogFields(form));
   const state = ctx.app.llmTest;
   if (state.running) throw new HttpError(409, 'test_running', 'a connection test is already running');
-  state.running = true;
+  const controller = new AbortController();
+  const onClose = () => {
+    if (!ctx.res.writableFinished) controller.abort();
+  };
+  ctx.res.on('close', onClose);
+  Object.assign(state, { running: true, controller });
   try {
-    const { result, cfg } = await runLlmTest(ctx, form);
-    log.info('llm_test', { provider: cfg?.provider ?? form.provider, origin: cfg ? cfgOrigin(cfg) : undefined, model: cfg?.model, ok: result.ok, reason: result.ok ? undefined : result.reason, ms: result.ms });
+    const { result, cfg } = await runLlmTest(ctx, form, controller.signal);
+    log.info('llm_test', { ...testLogFields(form, cfg, result), cancelled: controller.signal.aborted || undefined });
     Object.assign(ctx.logFields, { ok: result.ok, reason: result.ok ? undefined : result.reason });
-    sendJson(ctx.res, 200, result);
+    if (!controller.signal.aborted) sendJson(ctx.res, 200, result);
   } finally {
-    state.running = false;
+    ctx.res.off('close', onClose);
+    Object.assign(state, { running: false, controller: undefined });
   }
 }
 

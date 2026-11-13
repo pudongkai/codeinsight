@@ -2,6 +2,7 @@ import type { StatusResponse } from '../api/types';
 import { basedOn, formatShortTime } from '../format';
 import { RepoSwitcher } from '../repo/RepoSwitcher';
 import { useOpenSettings } from '../settings/context';
+import { llmLabel } from '../settings/model-label';
 
 interface Props {
   status: StatusResponse | undefined;
@@ -56,7 +57,7 @@ function RepoName({ status, onSwitched }: { status: StatusResponse; onSwitched()
   return <RepoSwitcher status={status} onSwitched={onSwitched} />;
 }
 
-/** 顶部状态：仓库（可切换）、索引来源、代码变化提示、建索引进度、"重新建索引"和设置入口；没有仓库时只显示设置入口 */
+/** 顶部状态：仓库（可切换）、索引来源、代码变化提示、建索引进度、当前模型服务、"重新建索引"和设置入口；没有仓库时只显示模型服务和设置入口 */
 export function StatusBar({ status, error, onReindex, onRepoSwitched }: Props) {
   const running = status?.index.job?.status === 'running';
   const openSettings = useOpenSettings();
@@ -69,6 +70,7 @@ export function StatusBar({ status, error, onReindex, onRepoSwitched }: Props) {
       {status?.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn">调用关系解析失败，邻居图不可用</span>}
       {status?.repo && <IndexState status={status} />}
       {status?.repo && <CodeChanged status={status} onReindex={onReindex} />}
+      {status?.llm && <span className="muted" data-testid="llm-label" title="当前的模型服务">{llmLabel(status.llm.provider, status.llm.model)}</span>}
       {!noRepo && <button type="button" className="small" disabled={!status || running} onClick={onReindex} data-testid="reindex">重新建索引</button>}
       {error && <span className="error-inline">{error}</span>}
       {openSettings && <button type="button" className="small settings-button" data-testid="settings-button" onClick={openSettings}>⚙ 设置</button>}

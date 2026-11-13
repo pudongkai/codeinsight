@@ -1,7 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { dataDirInRepo, DEFAULT_ANTHROPIC_MODEL, DEFAULT_LAYER_NAMES, llmSources, loadConfig, loadLlmSources, userSettingsPath } from '../src/index.js';
+import {
+  commandProblem, dataDirInRepo, DEFAULT_ANTHROPIC_MODEL, DEFAULT_CLI_CONCURRENCY, DEFAULT_LAYER_NAMES, DEFAULT_OVERVIEW_CONCURRENCY, envNameProblem,
+  envValueProblem, llmSources, loadConfig, loadLlmSources, modelProblem, setLogSink, userSettingsPath,
+} from '../src/index.js';
 import type { UserSettings } from '../src/index.js';
 import { tempDir } from './helpers/git-repo.js';
 
@@ -270,5 +273,151 @@ describe('config merged with user settings', () => {
     const repo = repoWith({ provider: 'anthropic', model: 'repo-m' });
     expect((await loadLlmSources(repo, { env: {}, userSettings: null })).model).toEqual({ value: 'repo-m', source: 'repo' });
     expect((await loadLlmSources(undefined, { env: {}, userSettings: null })).model).toEqual({ source: 'none' });
+  });
+});
+
+describe('local CLI providers', () => {
+  const user = (llm: UserSettings['llm']): UserSettings => ({ llm, recentRepos: [] });
+
+  function repoWith(llm: Record<string, unknown>): string {
+    const repo = tempDir();
+    writeFileSync(path.join(repo, 'codeinsight.config.json'), JSON.stringify({ llm }));
+    return repo;
+  }
+
+  it('accepts all four providers from user settings and the environment', () => {
+    for (const provider of ['anthropic', 'openai-compatible', 'claude-code', 'opencode'] as const) {
+      const fromUser = llmSources({ user: { provider, model: 'm' }, env: {} });
+      expect(fromUser.llm?.provider).toBe(provider);
+      const fromEnv = llmSources({ env: { CODEINSIGHT_LLM_PROVIDER: provider, CODEINSIGHT_LLM_MODEL: 'm' } });
+      expect(fromEnv.provider).toEqual({ value: provider, source: 'env', env: 'CODEINSIGHT_LLM_PROVIDER' });
+      expect(fromEnv.llm?.provider).toBe(provider);
+    }
+    expect(llmSources({ user: { provider: 'opencode' }, env: { CODEINSIGHT_LLM_PROVIDER: 'claude-code' } }).llm?.provider).toBe('opencode');
+  });
+
+  it('allows an empty model for a CLI provider and leaves the API fields out', () => {
+    const env = { ANTHROPIC_API_KEY: 'a-key', CODEINSIGHT_LLM_BASE_URL: 'http://env.example' };
+    const s = llmSources({ user: { provider: 'claude-code', apiKey: 'u-key', baseUrl: 'http://user.example' }, env });
+    expect(s.problem).toBeUndefined();
+    expect(s.model).toEqual({ source: 'none' });
+    expect(s.baseUrl).toEqual({ source: 'none' });
+    expect(s.apiKey).toEqual({ source: 'none' });
+    expect(s.command).toEqual({ source: 'default' });
+    expect(s.extraEnv).toEqual({ source: 'none' });
+    expect(s.shadowed).toEqual([]);
+    expect(s.llm).toEqual({ provider: 'claude-code', model: '' });
+    expect(JSON.stringify(s.llm)).not.toContain('key');
+  });
+
+  it('takes the command from user settings > CODEINSIGHT_LLM_COMMAND > default, only for CLI providers', () => {
+    const env = { CODEINSIGHT_LLM_COMMAND: '/env/bin/claude' };
+    const fromEnv = llmSources({ user: { provider: 'claude-code' }, env });
+    expect(fromEnv.command).toEqual({ value: '/env/bin/claude', source: 'env', env: 'CODEINSIGHT_LLM_COMMAND' });
+    expect(fromEnv.llm?.command).toBe('/env/bin/claude');
+    const fromUser = llmSources({ user: { provider: 'claude-code', command: '/opt/homebrew/bin/claude' }, env });
+    expect(fromUser.command).toEqual({ value: '/opt/homebrew/bin/claude', source: 'user' });
+    expect(fromUser.shadowed).toEqual([{ field: 'command', by: 'user', env: 'CODEINSIGHT_LLM_COMMAND' }]);
+    const api = llmSources({ user: { provider: 'anthropic', command: '/x/claude' }, env: { ...env, ANTHROPIC_API_KEY: 'k' } });
+    expect(api.command).toEqual({ source: 'none' });
+    expect(api.llm).toEqual({ provider: 'anthropic', model: DEFAULT_ANTHROPIC_MODEL, apiKey: 'k' });
+    const bad = llmSources({ user: { provider: 'opencode' }, env: { CODEINSIGHT_LLM_COMMAND: 'a\nb' } });
+    expect(bad.command).toEqual({ source: 'default' });
+  });
+
+  it('takes extraEnv only from user settings', () => {
+    const s = llmSources({ user: { provider: 'opencode', extraEnv: { https_proxy: 'http://p:3128' } }, env: {} });
+    expect(s.extraEnv).toEqual({ value: { https_proxy: 'http://p:3128' }, source: 'user' });
+    expect(s.llm).toEqual({ provider: 'opencode', model: '', extraEnv: { https_proxy: 'http://p:3128' } });
+  });
+
+  it('uses CODEINSIGHT_LLM_MODEL for a CLI provider only when the provider also comes from the environment', () => {
+    const env = { CODEINSIGHT_LLM_MODEL: 'gpt-4o' };
+    const fromUserProvider = llmSources({ user: { provider: 'claude-code' }, env });
+    expect(fromUserProvider.model).toEqual({ source: 'none' });
+    expect(fromUserProvider.llm?.model).toBe('');
+    expect(llmSources({ user: { provider: 'claude-code', model: 'opus' }, env }).shadowed).toEqual([]);
+    const fromEnvProvider = llmSources({ env: { ...env, CODEINSIGHT_LLM_PROVIDER: 'claude-code' } });
+    expect(fromEnvProvider.model).toEqual({ value: 'gpt-4o', source: 'env', env: 'CODEINSIGHT_LLM_MODEL' });
+    expect(fromEnvProvider.llm?.model).toBe('gpt-4o');
+  });
+
+  it('does not use the repository model for a CLI provider', async () => {
+    const repo = repoWith({ provider: 'anthropic', model: 'repo-m' });
+    const cfg = await loadConfig(repo, { env: {}, userSettings: user({ provider: 'claude-code' }) });
+    expect(cfg.llm).toEqual({ provider: 'claude-code', model: '' });
+    expect((await loadLlmSources(repo, { env: {}, userSettings: user({ provider: 'opencode' }) })).model).toEqual({ source: 'none' });
+  });
+
+  it('ignores a CLI provider, command and extraEnv in the repository config with warnings', async () => {
+    const lines: string[] = [];
+    const prev = setLogSink((l) => lines.push(l));
+    try {
+      const repo = repoWith({ provider: 'claude-code', model: 'repo-m', command: '/repo/evil', extraEnv: { https_proxy: 'http://evil.example' } });
+      const cfg = await loadConfig(repo, { env: {}, userSettings: null });
+      expect(cfg.llm).toBeUndefined();
+      expect(cfg.llmProblem).toBeUndefined();
+      expect(cfg.warnings).toEqual([
+        expect.objectContaining({ code: 'config_llm_key_ignored', message: expect.stringContaining('llm.command, llm.extraEnv') }),
+        expect.objectContaining({ code: 'config_llm_provider_ignored', message: expect.stringContaining('llm.provider=claude-code') }),
+      ]);
+      expect(cfg.warnings?.[0].message).toContain('CODEINSIGHT_LLM_COMMAND');
+      const sources = await loadLlmSources(repo, { env: {}, userSettings: user({ provider: 'claude-code' }) });
+      expect(sources.command).toEqual({ source: 'default' });
+      expect(JSON.stringify(sources)).not.toContain('evil');
+      expect(lines.join('\n')).not.toContain('evil.example');
+      const extraOnly = await loadConfig(repoWith({ extraEnv: { A: 'b' } }), { env: {}, userSettings: null });
+      expect(extraOnly.warnings?.[0].message).toContain('can only be set by the user settings');
+    } finally {
+      setLogSink(prev);
+    }
+  });
+
+  it('defaults the overview concurrency to 2 for CLI providers, still honouring the environment and the repository', async () => {
+    const cli = user({ provider: 'claude-code' });
+    expect((await loadConfig(tempDir(), { env: {}, userSettings: cli })).overview.concurrency).toBe(DEFAULT_CLI_CONCURRENCY);
+    expect((await loadConfig(tempDir(), { env: { ANTHROPIC_API_KEY: 'k' }, userSettings: user({ provider: 'anthropic' }) })).overview.concurrency).toBe(DEFAULT_OVERVIEW_CONCURRENCY);
+    expect((await loadConfig(tempDir(), { env: { CODEINSIGHT_OVERVIEW_CONCURRENCY: '6' }, userSettings: cli })).overview.concurrency).toBe(6);
+    const repo = tempDir();
+    writeFileSync(path.join(repo, 'codeinsight.config.json'), JSON.stringify({ overview: { concurrency: 1 } }));
+    expect((await loadConfig(repo, { env: {}, userSettings: cli })).overview.concurrency).toBe(1);
+  });
+
+  it('ignores invalid model names from every source', () => {
+    for (const bad of ['-x', 'a b', 'a\nb', 'x'.repeat(201)]) {
+      expect(modelProblem(bad)).toBeDefined();
+      const s = llmSources({ repo: { provider: 'openai-compatible', model: bad }, env: { CODEINSIGHT_LLM_MODEL: bad } });
+      expect(s.model).toEqual({ source: 'none' });
+      expect(s.llm).toBeUndefined();
+      expect(llmSources({ user: { provider: 'claude-code', model: bad }, env: {} }).llm?.model).toBe('');
+    }
+    for (const ok of ['claude-sonnet-5-5', 'deepseek/deepseek-chat', 'anthropic/claude@2#high', 'm[1m]', 'a.b:c', '@cf/meta/llama-3.1-8b-instruct', 'qwen2.5:7b', 'a_b+c']) {
+      expect(modelProblem(ok)).toBeUndefined();
+    }
+    for (const bad of ['a\tb', 'a\u0007b', 'a\u00a0b']) expect(modelProblem(bad)).toBeDefined();
+    const kept = llmSources({ user: { provider: 'openai-compatible', model: '@cf/meta/llama-3.1-8b-instruct' }, env: {} });
+    expect(kept.llm?.model).toBe('@cf/meta/llama-3.1-8b-instruct');
+  });
+
+  it('notes an ignored invalid model in the missing-model problem', () => {
+    const ignored = llmSources({ user: { provider: 'openai-compatible', model: '-x' }, env: {} });
+    expect(ignored.problem).toContain('model is missing');
+    expect(ignored.problem).toContain('invalid format was ignored');
+    const missing = llmSources({ user: { provider: 'openai-compatible' }, env: {} });
+    expect(missing.problem).toContain('model is missing');
+    expect(missing.problem).not.toContain('invalid format');
+  });
+
+  it('validates commands and extra environment variables', () => {
+    expect(commandProblem('/opt/homebrew/bin/claude')).toBeUndefined();
+    expect(commandProblem('claude')).toBeUndefined();
+    expect(commandProblem('bin/claude')).toBeUndefined();
+    expect(commandProblem('bin/claude', { pathOrName: true })).toBeDefined();
+    expect(commandProblem('claude', { pathOrName: true })).toBeUndefined();
+    for (const bad of ['', ' ', 'a\nb', 'a\0b', 'x'.repeat(1025), 3]) expect(commandProblem(bad)).toBeDefined();
+    expect(envNameProblem('https_proxy')).toBeUndefined();
+    for (const bad of ['1A', 'A-B', 'A B', '', 'PATH', 'Path']) expect(envNameProblem(bad)).toBeDefined();
+    expect(envValueProblem('')).toBeUndefined();
+    for (const bad of [1, 'a\0b', 'x'.repeat(4097)]) expect(envValueProblem(bad)).toBeDefined();
   });
 });

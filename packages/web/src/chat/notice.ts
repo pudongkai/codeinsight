@@ -1,3 +1,5 @@
+import { llmLabel } from '../settings/model-label';
+
 /**
  * 问答首次使用提示：确认后在 localStorage 记下当时的 provider、模型和源码发送开关（不含地址和 key），
  * 任一项变化时重新提示；记录读不出或格式不对时按未确认处理。
@@ -34,7 +36,7 @@ export function acceptNotice(scope: NoticeScope): void {
 }
 
 export function noticeText(scope: NoticeScope): string {
-  const to = `${scope.provider}（${scope.model}）`;
+  const to = llmLabel(scope.provider, scope.model);
   return scope.sendSource
     ? `问答会把问题和相关代码发送到 ${to}。`
     : `问答会把问题和函数签名、位置发送到 ${to}，不发送函数体（源码发送已关闭）。`;

@@ -4,8 +4,10 @@ import path from 'node:path';
 import { log } from '../log.js';
 import { writeFileAtomic } from '../util/atomic-file.js';
 import { isLlmProvider, type RecentRepo, type UserLlmSettings, type UserSettings, type UserSettingsOptions } from './types.js';
+import { commandProblem, envNameProblem, envValueProblem, MAX_EXTRA_ENV_ENTRIES, modelProblem } from './validate.js';
 
 export * from './types.js';
+export * from './validate.js';
 
 export const USER_SETTINGS_VERSION = 1;
 export const MAX_RECENT_REPOS = 10;
@@ -33,7 +35,34 @@ function ignored(key: string, reason: string): void {
   log.warn('user_settings_value_ignored', { key, reason });
 }
 
-const LLM_STRING_KEYS = ['baseUrl', 'model', 'apiKey'] as const;
+const LLM_STRING_KEYS = ['baseUrl', 'model', 'apiKey', 'command'] as const;
+
+/** 各字符串项的校验；没列出的只要求非空字符串 */
+const LLM_STRING_CHECKS: Partial<Record<(typeof LLM_STRING_KEYS)[number], (v: unknown) => string | undefined>> = {
+  model: modelProblem,
+  command: (v) => commandProblem(v),
+};
+
+const nonEmptyString = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? undefined : 'expected a non-empty string');
+
+/** 不合格的名字可能是任意文本，只在它像变量名时写进日志 */
+const ENV_NAME_LOG = /^[\w.-]{1,64}$/;
+
+/** 不合格的变量逐个忽略，超过上限的只保留前面的；日志只记变量名，不记值 */
+function normalizeExtraEnv(raw: unknown): Record<string, string> | undefined {
+  if (!isObject(raw)) {
+    ignored('llm.extraEnv', 'expected an object');
+    return undefined;
+  }
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    const problem = envNameProblem(name) ?? envValueProblem(value);
+    if (problem) ignored(`llm.extraEnv.${ENV_NAME_LOG.test(name) ? name : '?'}`, problem);
+    else if (Object.keys(out).length >= MAX_EXTRA_ENV_ENTRIES) ignored(`llm.extraEnv.${name}`, `expected at most ${MAX_EXTRA_ENV_ENTRIES} entries`);
+    else out[name] = value as string;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /** 单项格式不对时只忽略这一项；日志只记键名，不记值（可能是 API key） */
 function normalizeLlm(raw: unknown): UserLlmSettings | undefined {
@@ -45,13 +74,18 @@ function normalizeLlm(raw: unknown): UserLlmSettings | undefined {
   const out: UserLlmSettings = {};
   if (raw.provider !== undefined) {
     if (isLlmProvider(raw.provider)) out.provider = raw.provider;
-    else ignored('llm.provider', 'expected anthropic or openai-compatible');
+    else ignored('llm.provider', 'expected anthropic, openai-compatible, claude-code or opencode');
   }
   for (const key of LLM_STRING_KEYS) {
     const v = raw[key];
     if (v === undefined) continue;
-    if (typeof v === 'string' && v !== '') out[key] = v;
-    else ignored(`llm.${key}`, 'expected a non-empty string');
+    const problem = (LLM_STRING_CHECKS[key] ?? nonEmptyString)(v);
+    if (problem) ignored(`llm.${key}`, problem);
+    else out[key] = v as string;
+  }
+  if (raw.extraEnv !== undefined) {
+    const extraEnv = normalizeExtraEnv(raw.extraEnv);
+    if (extraEnv) out.extraEnv = extraEnv;
   }
   return out;
 }

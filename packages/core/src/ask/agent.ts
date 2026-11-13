@@ -1,25 +1,25 @@
 import { effectiveSendSource, type CodeInsightConfig } from '../config/index.js';
 import { chatWithLog, type ChatMessage, type ChatResult, type ToolCall } from '../llm/chat.js';
-import { LlmError, ToolsUnsupportedError, type LlmClient } from '../llm/index.js';
+import { isCliClient, LlmError, ToolsUnsupportedError, type LlmClient } from '../llm/index.js';
 import { llmClientFromConfig } from '../llm/setup.js';
 import { log } from '../log.js';
 import type { SnapshotRow } from '../model/types.js';
+import type { OverviewReport } from '../overview/types.js';
 import type { SymbolRef } from '../report/types.js';
 import { symbolRef } from '../review/impact.js';
 import type { DataDirLayout } from '../store/data-dir.js';
+import type { ChatTurn } from '../store/chats.js';
 import type { Store } from '../store/db.js';
 import type {
   AskErrorCode, AskEvent, AskLimitReason, AskMessageMeta, AskStatus, AskToolCallRecord, AskUsage,
 } from './events.js';
+import { runCliAsk } from './cli-agent.js';
 import { symbolLinkIds } from './links.js';
 import {
   askSystemPrompt, initialMessages, LIMIT_EMPTY_ANSWER, LIMIT_PROMPT, TRUNCATED_ANSWER_NOTE, TRUNCATED_ARGS_PROMPT, trimHistory,
 } from './prompt.js';
 import { entriesOf, type AskToolContext } from './tool-context.js';
-import { ASK_TOOLS, invalidArgsRun, runAskTool, truncateToolResult } from './tools.js';
-
-/** 工具结果累计超过上限后，本轮剩下的调用不执行，回给模型这句话 */
-const TOOL_LIMIT_RESULT = 'error: skipped: the tool result limit for this question was reached; answer with what you already have';
+import { ASK_TOOLS, invalidArgsRun, runAskTool, TOOL_LIMIT_RESULT, truncateToolResult } from './tools.js';
 
 /** 每轮的输出上限 */
 export const ASK_MAX_TOKENS = 4096;
@@ -43,6 +43,13 @@ export interface AskOptions {
   signal?: AbortSignal;
   onEvent?: (e: AskEvent) => void;
   timeoutMs?: number;
+  /** 问答工具 MCP 服务的启动命令（`codeinsight mcp --ask-tools`）；本机 CLI 问答必须有 */
+  toolServer?: AskToolServer;
+}
+
+export interface AskToolServer {
+  command: string;
+  args: string[];
 }
 
 export interface AskResult {
@@ -61,35 +68,41 @@ export function askClient(config: Pick<CodeInsightConfig, 'llm' | 'llmProblem'>,
   const c = llmClientFromConfig(config, { ...opts, skipped: 'question answering unavailable' });
   if (!c) return { code: 'llm_not_configured', message: `question answering needs an LLM: ${how}` };
   if ('warning' in c) return { code: 'llm_not_configured', message: `${c.warning.message}; ${how}` };
-  if (!c.client.chat) return { code: 'llm_not_configured', message: 'the configured LLM client does not support tool calling' };
+  if (!c.client.chat && !isCliClient(c.client)) return { code: 'llm_not_configured', message: 'the configured LLM client does not support tool calling' };
   return { client: c.client };
 }
 
-type LoopEnd = { status: 'done' | 'limited'; reason?: AskLimitReason } | { status: 'failed' | 'cancelled'; code: AskErrorCode; message: string };
+export type LoopEnd = { status: 'done' | 'limited'; reason?: AskLimitReason } | { status: 'failed' | 'cancelled'; code: AskErrorCode; message: string };
 
-interface Run {
+/** API 工具循环和本机 CLI 问答共用的状态 */
+export interface AskRun {
   opts: AskOptions;
   ctx: AskToolContext;
   system: string;
+  /** 已按条数和字符数截过的历史 */
+  history: ChatTurn[];
   signal: AbortSignal;
   userSignal?: AbortSignal;
   timeout: AbortSignal;
-  messages: ChatMessage[];
   answer: string;
   rounds: number;
   toolChars: number;
-  truncatedArgs: number;
   toolCalls: AskToolCallRecord[];
   refs: Map<string, SymbolRef>;
   /** 任一轮没有 usage 时为 null */
   usage: AskUsage | null;
 }
 
-function emit(run: Run, e: AskEvent): void {
+interface Run extends AskRun {
+  messages: ChatMessage[];
+  truncatedArgs: number;
+}
+
+export function emit(run: AskRun, e: AskEvent): void {
   run.opts.onEvent?.(e);
 }
 
-function appendText(run: Run, delta: string): void {
+export function appendText(run: AskRun, delta: string): void {
   run.answer += delta;
   emit(run, { type: 'text', delta });
 }
@@ -193,8 +206,8 @@ async function loop(run: Run): Promise<LoopEnd> {
   }
 }
 
-/** 循环里抛出的错误转成结束原因：用户中止、超时、模型不支持工具、请求失败、其他内部错误 */
-function failure(run: Run, err: unknown): LoopEnd {
+/** 抛出的错误转成结束原因：用户中止、超时、模型不支持工具、请求失败、其他内部错误 */
+export function failure(run: AskRun, err: unknown): LoopEnd {
   if (run.userSignal?.aborted) return { status: 'cancelled', code: 'cancelled', message: 'the question was cancelled' };
   if (run.timeout.aborted) return { status: 'failed', code: 'timeout', message: `no answer within ${Math.round((run.opts.timeoutMs ?? ASK_TIMEOUT_MS) / 1000)}s` };
   if (err instanceof ToolsUnsupportedError) return { status: 'failed', code: 'tools_unsupported', message: '当前模型不支持工具调用，请换用支持 function calling 的模型' };
@@ -203,9 +216,9 @@ function failure(run: Run, err: unknown): LoopEnd {
   return { status: 'failed', code: 'internal_error', message: 'internal error while answering' };
 }
 
-/** 回答里 sym: 链接引用、但工具结果里没出现过的符号，到当前快照查一次；查不到的不加 */
-function addLinkedRefs(run: Run): void {
-  const missing = symbolLinkIds(run.answer).filter((id) => !run.refs.has(id));
+/** 到当前快照查这些符号并加进 refs；已有的和查不到的跳过 */
+export function addRefsByIds(run: AskRun, ids: string[]): void {
+  const missing = [...new Set(ids)].filter((id) => !run.refs.has(id));
   if (missing.length === 0) return;
   const { store, snapshot } = run.ctx;
   const found = store.getSymbolsByIds(snapshot.id, missing);
@@ -213,7 +226,12 @@ function addLinkedRefs(run: Run): void {
   for (const s of found) run.refs.set(s.id, symbolRef(s, entries));
 }
 
-function messageMeta(run: Run, end: LoopEnd): AskMessageMeta {
+/** 回答里 sym: 链接引用、但工具结果里没出现过的符号 */
+function addLinkedRefs(run: AskRun): void {
+  addRefsByIds(run, symbolLinkIds(run.answer));
+}
+
+function messageMeta(run: AskRun, end: LoopEnd): AskMessageMeta {
   return {
     status: end.status, ...('reason' in end && end.reason ? { reason: end.reason } : {}),
     contentKey: run.ctx.snapshot.contentKey, sendSource: run.ctx.sendSource, toolCalls: run.toolCalls,
@@ -223,7 +241,7 @@ function messageMeta(run: Run, end: LoopEnd): AskMessageMeta {
 }
 
 /** 存回答；会话在回答过程中被删除（外键不存在）时只记日志 */
-function saveAnswer(run: Run, meta: AskMessageMeta): number | undefined {
+function saveAnswer(run: AskRun, meta: AskMessageMeta): number | undefined {
   const { sessionId } = run.opts;
   if (sessionId === undefined) return undefined;
   try {
@@ -234,7 +252,7 @@ function saveAnswer(run: Run, meta: AskMessageMeta): number | undefined {
   }
 }
 
-function finish(run: Run, end: LoopEnd, started: number): AskResult {
+function finish(run: AskRun, end: LoopEnd, started: number): AskResult {
   addLinkedRefs(run);
   const meta = messageMeta(run, end);
   const messageId = saveAnswer(run, meta);
@@ -247,20 +265,35 @@ function finish(run: Run, end: LoopEnd, started: number): AskResult {
   return { status: end.status, answer: run.answer, meta, ...id };
 }
 
-function startRun(opts: AskOptions): Run {
+/** 快照对应的当前概览（问答的系统提示和 get_module 用），没有时为 undefined */
+export function currentOverview(store: Store, snapshot: SnapshotRow): OverviewReport | undefined {
+  return store.overviews.current(snapshot.kind).overview?.result ?? undefined;
+}
+
+/** 取发送源码设置、概览、历史，建超时信号和工具环境 */
+function startRun(opts: AskOptions): AskRun {
   const { store, snapshot, config } = opts;
   const sendSource = effectiveSendSource(config, opts.noSource);
-  const overview = store.overviews.current(snapshot.kind).overview?.result ?? undefined;
-    const history = opts.sessionId !== undefined ? trimHistory(store.chats.turns(opts.sessionId)) : [];
+  const overview = currentOverview(store, snapshot);
+  const history = opts.sessionId !== undefined ? trimHistory(store.chats.turns(opts.sessionId)) : [];
   const timeout = AbortSignal.timeout(opts.timeoutMs ?? ASK_TIMEOUT_MS);
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
   const ctx: AskToolContext = { repo: opts.repo, store, layout: opts.layout, snapshot, sendSource, signal, ...(overview ? { overview } : {}) };
   return {
-    opts, ctx, system: askSystemPrompt({ sendSource, ...(overview ? { overview } : {}) }),
+    opts, ctx, system: askSystemPrompt({ sendSource, ...(overview ? { overview } : {}) }), history,
     signal, ...(opts.signal ? { userSignal: opts.signal } : {}), timeout,
-    messages: initialMessages(history, opts.question), answer: '', rounds: 0, toolChars: 0, truncatedArgs: 0, toolCalls: [], refs: new Map(),
-    usage: { inputTokens: 0, outputTokens: 0 },
+    answer: '', rounds: 0, toolChars: 0, toolCalls: [], refs: new Map(), usage: { inputTokens: 0, outputTokens: 0 },
   };
+}
+
+/** API 客户端的工具循环 */
+async function runApiAsk(base: AskRun): Promise<LoopEnd> {
+  const run: Run = Object.assign(base, { messages: initialMessages(base.history, base.opts.question), truncatedArgs: 0 });
+  try {
+    return await loop(run);
+  } catch (err) {
+    return failure(run, err);
+  }
 }
 
 /**
@@ -275,14 +308,9 @@ export async function runAsk(opts: AskOptions): Promise<AskResult> {
   emit(run, { type: 'start', ...(userMessageId !== undefined ? { messageId: userMessageId } : {}) });
   log.info('ask_started', {
     provider: opts.client.provider, model: opts.client.model, sessionId: opts.sessionId, questionChars: opts.question.length,
-    sendSource: run.ctx.sendSource, overview: run.ctx.overview !== undefined, historyTurns: (run.messages.length - 1) / 2,
+    sendSource: run.ctx.sendSource, overview: run.ctx.overview !== undefined, historyTurns: run.history.length,
     maxRounds: opts.config.ask.maxRounds, maxToolChars: opts.config.ask.maxToolChars,
   });
-  let end: LoopEnd;
-  try {
-    end = await loop(run);
-  } catch (err) {
-    end = failure(run, err);
-  }
+  const end = isCliClient(opts.client) ? await runCliAsk(run, opts.client) : await runApiAsk(run);
   return finish(run, end, started);
 }
