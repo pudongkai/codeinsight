@@ -30,7 +30,7 @@ function CommandField({ s }: { s: SettingsForm }) {
 
 function EnvRowEdit({ row, onChange, onRemove }: { row: EnvRow; onChange(patch: Partial<EnvRow>): void; onRemove(): void }) {
   return (
-    <div className="field-note" data-testid="settings-env-row">
+    <div className="field-note env-row" data-testid="settings-env-row">
       <input data-testid="settings-env-name" aria-label="变量名" placeholder="名字" value={row.name} readOnly={row.hidden} onChange={(e) => onChange({ name: e.target.value })} />
       <span>=</span>
       <input data-testid="settings-env-value" aria-label="值" value={row.value}

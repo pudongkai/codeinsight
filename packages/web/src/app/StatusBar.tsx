@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { StatusResponse } from '../api/types';
 import { basedOn, formatShortTime } from '../format';
 import { RepoSwitcher } from '../repo/RepoSwitcher';
@@ -57,23 +58,55 @@ function RepoName({ status, onSwitched }: { status: StatusResponse; onSwitched()
   return <RepoSwitcher status={status} onSwitched={onSwitched} />;
 }
 
-/** 顶部状态：仓库（可切换）、索引来源、代码变化提示、建索引进度、当前模型服务、"重新建索引"和设置入口；没有仓库时只显示模型服务和设置入口 */
-export function StatusBar({ status, error, onReindex, onRepoSwitched }: Props) {
+/** 品牌标识：内联 SVG，不加载外部资源 */
+function Brand() {
+  return (
+    <span className="brand">
+      <svg className="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <rect width="24" height="24" rx="6" fill="currentColor" />
+        <circle cx="10.5" cy="10.5" r="4.5" fill="none" stroke="#fff" strokeWidth="2" />
+        <path d="M14 14l4.5 4.5" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" />
+      </svg>
+      <strong>CodeInsight</strong>
+    </span>
+  );
+}
+
+/** 第二行的索引状态：来源、解析失败、建索引进度、代码变化；都没有时不显示 */
+function IndexBar({ status, onReindex }: { status: StatusResponse | undefined; onReindex(): void }) {
+  if (!status?.repo) return null;
+  return (
+    <div className="indexbar">
+      {status.snapshot && <IndexSource status={status} />}
+      {status.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn">调用关系解析失败，邻居图不可用</span>}
+      <IndexState status={status} />
+      <CodeChanged status={status} onReindex={onReindex} />
+    </div>
+  );
+}
+
+/**
+ * 顶部状态：第一行是品牌、仓库（可切换）、标签页（children）、当前模型服务、"重新建索引"和设置入口；
+ * 第二行是索引来源、代码变化提示和建索引进度。没有仓库时只显示模型服务和设置入口
+ */
+export function StatusBar({ status, error, onReindex, onRepoSwitched, children }: Props & { children?: ReactNode }) {
   const running = status?.index.job?.status === 'running';
   const openSettings = useOpenSettings();
   const noRepo = status !== undefined && status.repo === null;
   return (
     <div className="statusbar" data-testid="status-bar">
-      <strong>CodeInsight</strong>
-      {status?.repo && <RepoName status={status} onSwitched={onRepoSwitched} />}
-      {status?.snapshot && <IndexSource status={status} />}
-      {status?.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn">调用关系解析失败，邻居图不可用</span>}
-      {status?.repo && <IndexState status={status} />}
-      {status?.repo && <CodeChanged status={status} onReindex={onReindex} />}
-      {status?.llm && <span className="muted" data-testid="llm-label" title="当前的模型服务">{llmLabel(status.llm.provider, status.llm.model)}</span>}
-      {!noRepo && <button type="button" className="small" disabled={!status || running} onClick={onReindex} data-testid="reindex">重新建索引</button>}
-      {error && <span className="error-inline">{error}</span>}
-      {openSettings && <button type="button" className="small settings-button" data-testid="settings-button" onClick={openSettings}>⚙ 设置</button>}
+      <div className="topbar">
+        <Brand />
+        {status?.repo && <RepoName status={status} onSwitched={onRepoSwitched} />}
+        {children}
+        <span className="topbar-right">
+          {status?.llm && <span className="llm-chip" data-testid="llm-label" title="当前的模型服务">{llmLabel(status.llm.provider, status.llm.model)}</span>}
+          {!noRepo && <button type="button" className="small" disabled={!status || running} onClick={onReindex} data-testid="reindex">重新建索引</button>}
+          {openSettings && <button type="button" className="small settings-button" data-testid="settings-button" onClick={openSettings}>⚙ 设置</button>}
+        </span>
+      </div>
+      <IndexBar status={status} onReindex={onReindex} />
+      {error && <div className="indexbar"><span className="error-inline">{error}</span></div>}
     </div>
   );
 }

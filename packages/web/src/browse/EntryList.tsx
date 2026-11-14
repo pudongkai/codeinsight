@@ -13,7 +13,7 @@ export function EntryList({ snapshotId }: { snapshotId: number | undefined }) {
   if (error) return <div className="error">读取入口列表失败：{error}</div>;
   if (!data) return <p className="muted">加载入口列表…</p>;
   return (
-    <section className="panel" data-testid="entry-list">
+    <section className="panel entry-list" data-testid="entry-list">
       <h3>入口（{data.entries.length}）</h3>
       {data.entries.length === 0 && <p className="muted">没有识别到入口函数。</p>}
       {[...groupBy(data.entries, (e) => `${e.kind} · ${e.framework}`)].map(([group, list]) => (

@@ -24,19 +24,22 @@ export function Composer({ draft, onDraft, answering, blocked, onSend, onStop, w
   return (
     <div className="chat-composer">
       <WriteScopeNote scope={writeScope} />
-      <textarea data-testid="chat-input" rows={3} value={draft} placeholder="问一个关于这份代码的问题，如“退款流程怎么走”"
-        onChange={(e) => onDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            send();
-          }
-        }} />
-      <div className="actions">
-        {tooLong && <span className="warn">问题不能超过 {MAX_QUESTION_CHARS} 个字符</span>}
-        {answering
-          ? <button type="button" className="small" data-testid="chat-stop" onClick={onStop}>停止</button>
-          : <button type="button" className="primary" data-testid="chat-send" disabled={!canSend} onClick={send}>发送</button>}
+      <div className="composer-box">
+        <textarea data-testid="chat-input" rows={3} value={draft} placeholder="问一个关于这份代码的问题，如“退款流程怎么走”"
+          onChange={(e) => onDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              send();
+            }
+          }} />
+        <div className="actions">
+          <span className="composer-hint muted">Enter 发送，Shift+Enter 换行</span>
+          {tooLong && <span className="warn">问题不能超过 {MAX_QUESTION_CHARS} 个字符</span>}
+          {answering
+            ? <button type="button" className="small" data-testid="chat-stop" onClick={onStop}>停止</button>
+            : <button type="button" className="primary" data-testid="chat-send" disabled={!canSend} onClick={send}>发送</button>}
+        </div>
       </div>
     </div>
   );

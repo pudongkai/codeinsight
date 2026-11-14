@@ -48,12 +48,13 @@ function RepoView({ s, switched }: { s: StatusState; switched: ReturnType<typeof
   return (
     <NavContext.Provider value={n.nav}>
       <header ref={layout.header}>
-        <StatusBar status={status} error={s.error} onReindex={() => void s.reindex()} onRepoSwitched={refresh} />
-        <nav className="tabs">
-          {TABS.map(([t, label]) => (
-            <button key={t} type="button" className={n.tab === t ? 'active' : ''} onClick={() => n.switchTab(t)} data-testid={`tab-${t}`}>{label}</button>
-          ))}
-        </nav>
+        <StatusBar status={status} error={s.error} onReindex={() => void s.reindex()} onRepoSwitched={refresh}>
+          <nav className="tabs">
+            {TABS.map(([t, label]) => (
+              <button key={t} type="button" className={n.tab === t ? 'active' : ''} onClick={() => n.switchTab(t)} data-testid={`tab-${t}`}>{label}</button>
+            ))}
+          </nav>
+        </StatusBar>
       </header>
       <div ref={layout.notices}>
         {switched.notice && <Notice text={switched.notice} onDismiss={switched.dismiss} />}

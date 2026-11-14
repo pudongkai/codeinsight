@@ -112,7 +112,7 @@ export function ReviewPage({ status, refreshStatus, goneNotice, resetGone, onHos
         {job?.status === 'running' && <div className="panel" data-testid="review-progress">审查 #{job.id} 进行中：{STEPS[job.progress ?? ''] ?? '确定版本和改动文件'}…</div>}
         {job?.status === 'failed' && <div className="error" data-testid="review-failed">审查 #{job.id} 失败：{job.error}</div>}
         {report && <ReportView report={report} actions={actions} notice={probeGone || goneNotice ? SNAPSHOT_GONE_NOTICE : undefined} />}
-        {id === undefined && <p className="muted">发起一次审查，或从“最近的审查”里打开。</p>}
+        {id === undefined && <p className="muted empty-state">发起一次审查，或从“最近的审查”里打开。</p>}
       </div>
     </div>
   );
