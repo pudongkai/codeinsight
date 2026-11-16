@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import type { Node, Parser } from 'web-tree-sitter';
 import { dedupeQualifiedNames, makeSymbolKey, symbolIdFromKey } from '../model/symbol-key.js';
 import type { SymbolRow } from '../model/types.js';
+import { sha1 } from '../util/hash.js';
 import { decoratorEntry, djangoRoutes, fileFrameworks } from './entries.js';
 import { baseVars, classHints } from './models.js';
 import { normalizeTokens } from './normalize.js';
@@ -27,10 +27,6 @@ interface WalkContext {
   source: string;
   flags: FileFlags;
   out: RawSymbol[];
-}
-
-export function sha1(text: string | Uint8Array): string {
-  return createHash('sha1').update(text).digest('hex');
 }
 
 /** 模块的点分路径：`a/b/c.py` → `a.b.c`，`a/b/__init__.py` → `a.b` */
@@ -358,6 +354,7 @@ export function extractPythonFile(parser: Parser, filePath: string, source: stri
     const isUrls = /(^|\/)urls\.py$/.test(filePath);
     return {
       path: filePath,
+      language: 'python',
       symbols,
       entries: decoratorEntries(symbols, decorators, fileFrameworks(root)),
       importRows: importRows(root),
@@ -399,7 +396,7 @@ export function restoreExtractedFile(
       const [nameLine, nameCol] = r.kind === 'module' ? [0, 0] : (names.get(`${r.name}@${r.startLine - 1}`) ?? [r.startLine - 1, 0]);
       return { ...r, nameLine, nameCol };
     });
-    return { path: filePath, symbols, entries: [], importRows: importRows(tree.rootNode), djangoRoutes: [], imports: new Map() };
+    return { path: filePath, language: 'python', symbols, entries: [], importRows: importRows(tree.rootNode), djangoRoutes: [], imports: new Map() };
   } finally {
     tree.delete();
   }

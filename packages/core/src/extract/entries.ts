@@ -182,12 +182,12 @@ function resolveRouteTarget(idx: SymbolIndex, file: ExtractedFile, target: strin
 
 /** 把各 urls.py 的路由对应到处理函数或视图类，生成 Django 入口 */
 export function resolveDjangoEntries(files: ExtractedFile[]): ExtractedEntry[] {
-  const withRoutes = files.filter((f) => f.djangoRoutes.length > 0);
+  const withRoutes = files.filter((f) => (f.djangoRoutes?.length ?? 0) > 0);
   if (withRoutes.length === 0) return [];
   const idx = buildIndex(files);
   const entries: ExtractedEntry[] = [];
   for (const f of withRoutes) {
-    for (const r of f.djangoRoutes) {
+    for (const r of f.djangoRoutes ?? []) {
       const sym = resolveRouteTarget(idx, f, r.target);
       if (sym) entries.push({ symbolId: sym.id, kind: 'http', framework: 'django', detail: { ...r.detail, urls: f.path } });
     }

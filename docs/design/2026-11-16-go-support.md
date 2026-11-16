@@ -1,6 +1,6 @@
 # CodeInsight Go 语言支持技术方案
 
-开发状态: TODO
+开发状态: RUNNING
 方案评审: 通过（2026-11-16）
 需求来源: 2026-11-16 用户需求：“增加 go 语言支持”。已确认：调用关系用 scip-go，scip-go 或 Go 工具链不可用、运行失败时按名称匹配；第一版覆盖符号和调用关系、入口识别、数据模型和外部依赖、相似代码和测试文件识别
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-16
@@ -174,12 +174,14 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
 **快照目录**：
 - `PROJECT_CONFIG_FILES` 加 `go.mod`、`go.sum`、`go.work`、`go.work.sum`。这几个文件放进工作区快照目录时**复制**，不硬链接到上一个快照（`linkFromPrevious`，`incremental.ts:93-99`），go 命令即使写了它们也不会改到上一个快照。
 - `vendor/modules.txt` 和 `vendor/` 下的 `.go` 文件照常放入。
-- `//go:embed` 引用的资源文件：阶段0 确认缺少这些文件时 scip-go 是否仍能产出索引；不能的话，阶段4 在 `isPlaced` 里把 embed 引用的文件也放进去。
+- `//go:embed` 引用的资源文件不放入：实测缺少这些文件时 scip-go 仍正常产出完整索引。
 
 **scip-go 运行**：
 1. 查找命令：`findCommand('scip-go', { envVar: 'CODEINSIGHT_SCIP_GO', extraDirs: ['~/go/bin', '$GOPATH/bin'] })`，`go` 同样查找。在 `prepare` 时完成。
 2. 快照目录里没有 `go.mod` → 名称匹配，`reason=not_found`。
 3. 有 `go.work` 时在它所在目录跑一次；否则对每个 `go.mod` 所在目录（`vendor/`、`testdata/` 下的除外）各跑一次。cwd 为该目录的真实路径。
+   - 先用同样的环境变量跑 `go list -e -json ./...`，任何包带 `Error` 或 `DepsErrors` 时按失败处理（scip-go 加载依赖失败时仍返回 0、stderr 为空，只产出缺了引用的索引，并把找不到的包错标成标准库）。
+   - 再跑 `scip-go index -o <out> --module-version=v0.0.0 --quiet`。固定 `--module-version`：不传时 scip-go 在 git 仓库里用提交号作版本，符号文字会随提交变化。
 4. 环境变量：
    - module 目录下有 `vendor/modules.txt` 时 `GOFLAGS=-mod=vendor`，否则 `GOFLAGS=-mod=readonly`；
    - `CGO_ENABLED=0`（不调用 C 编译器）、`GOTOOLCHAIN=local`（不下载其他版本的 Go）；
@@ -202,8 +204,10 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
 **SCIP 边转换的语言规则**（`resolve/scip-rules.ts`，`pythonRules` / `goRules`）：
 - 行注释前缀：`#` / `//`。
 - 续行计算：Python 用现有 `continuedLines`；Go 按括号配对，跳过字符串、反引号字符串、`//` 和 `/* */` 注释。
-- 模块级定义：Python 以 `/__init__:` 结尾。Go 的包定义按阶段0 确认的格式识别，统一映射到该包的“代表文件”的 module 符号。代表文件：有包文档注释（`// Package xxx`）的非测试文件；没有时取文件名排序第一的非测试文件。名称匹配路径用同一个代表文件。
-- 定义没有 `enclosing_range` 时：阶段0 确认 scip-go 是否输出它；不输出的话，Go 规则改为按提取出的符号范围匹配定义位置（名字位置已经有 `nameLine`/`nameCol`）。
+- 模块级定义：Python 以 `/__init__:` 结尾。Go 的包定义是以 `` `<包导入路径>`/ `` 结尾的符号（如 `` scip-go gomod example.com/gobasic v0.0.0 `example.com/gobasic/internal/order`/ ``），每个文件的 `package` 子句都有一个、都没有 `enclosing_range`，统一映射到该包的“代表文件”的 module 符号。代表文件：有包文档注释（`// Package xxx`）的非测试文件；没有时取文件名排序第一的非测试文件。名称匹配路径用同一个代表文件。
+- 其他定义：函数 `NewService().`、方法 `Service#Create().`（值接收者和指针接收者相同）、struct/interface `Service#`、interface 方法 `Repo#Find.`（没有 `()`）、字段 `Service#repo.`；这些定义都有 `enclosing_range`，沿用现有的按位置和范围匹配。`local N` 跳过。
+- import：scip-go 不给 import 标 Import 角色，`import "…/order"` 是对包符号的普通引用。Go 规则按引用所在行是否在 `importRows` 里判断 import 边（和 Python 一样用 `importRows`）。
+- 调用：`s.repo.Find()` 产生对字段 `Service#repo.` 和 interface 方法 `Repo#Find.` 的引用，按现有的“调用位置”判断，调用边连到 interface 方法符号。
 
 **局部类型推断**（`extract/go-types.ts`，提取时做，名称匹配和入口识别共用）：在一个函数内，变量的类型来自：接收者声明、参数声明、`var x T`、`x := &T{}` / `x := T{}`、`x := pkg.NewT(...)` / `x := NewT(...)`（取被调函数签名的第一个返回类型，跨文件时在跨文件处理时补）、结构体字段（`s.repo.Find()` 里 `s` 的类型的 `repo` 字段类型，限同包的 struct）。推断不出就留空。
 
@@ -293,23 +297,25 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
 
 ## 8. 开发计划
 
-- [ ] 阶段0：scip-go 实测
+- [x] 阶段0：scip-go 实测
   - 涉及模块：无代码改动（结果写进本方案 4.4）
   - 依赖：无
-  - 内容：`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` 安装 scip-go 到本机 `~/go/bin`；在临时目录写一个 Go 小项目（两个包、interface、方法、包文档注释、`go.mod` 在子目录、一个 `//go:embed`、一个 `vendor/` 版本），用 4.4 的环境变量跑 scip-go；用 `scip/reader.ts` 读出索引，记录：包定义出现在哪里、函数/方法/interface 方法的符号格式、有没有 `enclosing_range`、文档路径是否相对 module 目录、缺少 embed 文件时能否产出索引、`-mod=vendor` 是否正常、耗时
+  - 内容：安装 scip-go 到本机 `~/go/bin`；在临时目录写一个 Go 小项目（两个包、interface、方法、包文档注释、`go.mod` 在子目录、一个 `//go:embed`、一个 `vendor/` 版本），用 4.4 的环境变量跑 scip-go；用 `scip/reader.ts` 读出索引，记录：包定义出现在哪里、函数/方法/interface 方法的符号格式、有没有 `enclosing_range`、文档路径是否相对 module 目录、缺少 embed 文件时能否产出索引、`-mod=vendor` 是否正常、耗时
   - 完成标准：本方案 4.4 的“模块级定义”“没有 enclosing_range 时”“快照目录”三处改写成实测结论，并写明 scip-go 版本
+  - 验证：`go install github.com/scip-code/scip-go/cmd/scip-go@latest`（模块已从 sourcegraph 改名为 scip-code）得到 scip-go v0.2.9（SCIP 绑定 v0.10.0）；小项目（go.mod 在子目录、interface、两种接收者、embed、vendor）跑 `scip-go index` 退出 0；`relative_path` 相对 module 目录；go.mod/go.sum 跑前后 hash 不变；缺 embed 文件仍完整产出；`-mod=vendor` 正常；现有 `scip/reader.ts` 读不出新版位置字段（已加到阶段2）；依赖加载失败时 scip-go 仍退出 0（已在 4.4 加 `go list -e` 检查）；4.4 已改写为实测结论
 
-- [ ] 阶段1：按语言分派的提取（Python 行为不变）
+- [x] 阶段1：按语言分派的提取（Python 行为不变）
   - 涉及模块：packages/core/src/extract（languages.ts、cache.ts、index.ts、types.ts、python.ts）、packages/core/src/snapshot（incremental.ts、build.ts 的提取和 restoreExtracted 部分）、packages/core/src/model/language.ts、packages/core/src/util/hash.ts、packages/core/src/similar/index.ts、packages/core/src/overview/external.ts、packages/core/src/ask/build-proposal.ts、packages/core/src/resolve/scip-python.ts（sha1 的 import）、packages/core/src/review（supportLevelOf 调用）
   - 依赖：无
   - 内容：`LanguageSupport` 注册表和 Python 实现；`ExtractedFile.language`；`incremental.ts`、`build.ts`（restoreExtracted、日志字段）、`extract/cache.ts`（语法包列表来自注册表、`FINGERPRINT_EXTRA_MODULES`）按语言分派；`sha1` 移到 `util/hash.ts`；`supportLevelOf(language, path)` 加参数并改全部调用方
   - 完成标准：`pnpm --filter @codeinsight/core test`、`pnpm --filter @codeinsight/server test` 全部通过且没有改已有测试的期望值；`pnpm -r build` 通过；`grep -rn "getPythonParser\|extractPythonFile" packages/core/src/snapshot` 无结果
+  - 验证：core 514 通过/10 跳过、server 187 通过/10 跳过，测试只补了 `supportLevelOf` 的路径参数和手写 `ExtractedFile` 的 `language`，期望值未改；`pnpm -r build` 通过；grep 无结果。改动 `extract/languages.ts`（新）、`util/hash.ts`（新）、`extract/index.ts`、`extract/cache.ts`、`snapshot/incremental.ts`、`snapshot/build.ts`、`model/language.ts`、`review/assemble.ts`、`similar/index.ts`、`overview/external.ts`
 
-- [ ] 阶段2：按语言组合的解析框架
+- [~] 阶段2：按语言组合的解析框架
   - 涉及模块：packages/core/src/resolve（types.ts、language-resolver.ts、scip-rules.ts、scip-edges.ts、scip-python.ts）、packages/core/src/scip/runner.ts、packages/core/src/snapshot（build.ts 的解析部分、incremental.ts 的 reuseEdges）、packages/core/src/store（schema.ts、edge_sources 读写）、packages/core/src/util/command.ts、packages/core/src/llm/cli/command.ts、packages/server/src/http/routes/status.ts、packages/server/src/mcp/format.ts、packages/web/src/app/StatusBar.tsx 和 web 的 API 类型
   - 依赖：阶段1
   - 验证方式：独立
-  - 内容：`Resolver.prepare`、`ResolveInput.goTimeoutMs`、`ResolveResult` 的 `sources`/`effectiveVersion`/`failed`；`LanguageResolver`、`defaultResolver()`；一个解析器实例先 prepare 再用于复用判断和解析；`runResolver` 处理部分语言失败和 hash 写入规则；`edge_sources` 列、写入、`reuseEdges` 复制；`needsReresolve` 框架和 `buildOrReuse` 的重跑解析分支；`scip-rules.ts` 抽出 Python 规则；`scipResolverCodeHash` 按语言拆分文件范围；`findCommand`（`resolveCliCommand` 保留为包装）；`runProcess` 进程组；status 接口、状态栏、MCP 说明按语言区分失败
+  - 内容：`scip/reader.ts` 同时支持新旧两种位置字段（SCIP 绑定 v0.10 起位置写在字段 8/9、`enclosing_range` 在 10/11，旧的打包字段 1/7 为空，没写的字段为 0），用阶段0 的 scip-go 索引做测试样本；`Resolver.prepare`、`ResolveInput.goTimeoutMs`、`ResolveResult` 的 `sources`/`effectiveVersion`/`failed`；`LanguageResolver`、`defaultResolver()`；一个解析器实例先 prepare 再用于复用判断和解析；`runResolver` 处理部分语言失败和 hash 写入规则；`edge_sources` 列、写入、`reuseEdges` 复制；`needsReresolve` 框架和 `buildOrReuse` 的重跑解析分支；`scip-rules.ts` 抽出 Python 规则；`scipResolverCodeHash` 按语言拆分文件范围；`findCommand`（`resolveCliCommand` 保留为包装）；`runProcess` 进程组；status 接口、状态栏、MCP 说明按语言区分失败
   - 完成标准：core、server、web 的 `pnpm --filter <包> test` 全部通过且没有改已有测试的期望值；`pnpm -r build` 通过；新增 `language-resolver.test.ts` 覆盖：只跑出现的语言、一个语言失败时另一个语言的边入库且 `resolver_status=failed`、version 只含出现的语言、`edge_sources` 随边复用一起复制、`needsReresolve` 为真时走 `retryResolve`（用一个假的子解析器测试）；旧库启动后 `snapshots` 表有 `edge_sources` 列
 
 - [ ] 阶段3：Go 符号提取、分类和快照接入
@@ -319,10 +325,10 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
   - 完成标准：新增 `extract-go.test.ts`、`go-types.test.ts`、classify 的 Go 用例通过；go-basic 快照构建测试能查到 `example.com/gobasic/internal/order.Service.Create` 方法符号和 interface 方法符号，`service_test.go` 的 `isTest=true`，`order.pb.go` 的 `isGenerated=true`，`vendor/` 下文件的 `supportLevel='none'`；Go 文件的提取结果经过缓存读回后 `go.imports` 不为空；全部已有测试通过
 
 - [ ] 阶段4：Go 调用关系（scip-go 和名称匹配）
-  - 涉及模块：packages/core/src/resolve（go.ts、go-name-match.ts、scip-rules.ts 的 Go 规则）、packages/core/src/scip/runner.ts（runScipGo）、packages/core/src/store/data-dir.ts、packages/core/src/config（scipGoTimeoutMs）、packages/core/src/snapshot/build.ts（needsReresolve 的 Go 条件）、packages/core/src/snapshot/incremental.ts（embed 文件，按阶段0 结论决定是否需要）、packages/web/src/app/StatusBar.tsx（名称匹配提示）
+  - 涉及模块：packages/core/src/resolve（go.ts、go-name-match.ts、scip-rules.ts 的 Go 规则）、packages/core/src/scip/runner.ts（runScipGo）、packages/core/src/store/data-dir.ts、packages/core/src/config（scipGoTimeoutMs）、packages/core/src/snapshot/build.ts（needsReresolve 的 Go 条件）、packages/web/src/app/StatusBar.tsx（名称匹配提示）
   - 依赖：阶段0、阶段3
   - 验证方式：独立
-  - 内容：scip-go 和 go 查找；`runScipGo`（环境变量、go.work 和多 module、路径前缀、超时、中止、索引缓存和清理）；Go 的 SCIP 规则（注释、续行、包定义映射到代表文件、按阶段0 结论处理 enclosing_range）；名称匹配（四种调用形式、import 边）；`GoResolver` 先 scip-go 后名称匹配，返回 `sources` 和 `effectiveVersion`；`needsReresolve` 的三种情况；状态栏提示：Go 调用关系来自名称匹配时显示“Go 调用关系来自名称匹配（未找到 scip-go / scip-go 运行失败），可能不完整”，未找到时附上 scip-go 的安装命令
+  - 内容：scip-go 和 go 查找；`runScipGo`（先 `go list -e -json ./...` 检查加载错误，再 `scip-go index`，固定 `--module-version`；环境变量、go.work 和多 module、路径前缀、超时、中止、索引缓存和清理）；Go 的 SCIP 规则（注释、续行、包定义映射到代表文件、import 按 importRows 判断）；名称匹配（四种调用形式、import 边）；`GoResolver` 先 scip-go 后名称匹配，返回 `sources` 和 `effectiveVersion`；`needsReresolve` 的三种情况；状态栏提示：Go 调用关系来自名称匹配时显示“Go 调用关系来自名称匹配（未找到 scip-go / scip-go 运行失败），可能不完整”，未找到时附上 scip-go 的安装命令
   - 完成标准：`go-name-match.test.ts` 覆盖 ident、pkg、有推断类型的 selector、经 interface 字段调用、同名唯一、同名不唯一、import 边指向代表文件；go-basic 快照在 `scip: false` 时 `resolver_status=ok`、`edge_sources.go.source='name_match'`、有跨包的 `call` 和 `import` 边；重试解析后名称匹配的边数和第一次相同；`needsReresolve` 三种情况各一个测试；本机有 scip-go 时集成测试的 scip 路径通过，`go.mod` 在子目录时定义能对上，跑完后快照目录里 `go.mod`/`go.sum` 的 hash 不变，验证记录写明 scip-go 版本和对上的定义比例；中止时 scip-go 进程组被结束；全部测试通过
 
 - [ ] 阶段5：Go 入口和数据模型

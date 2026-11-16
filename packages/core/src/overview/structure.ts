@@ -1,5 +1,5 @@
 import type { CodeInsightConfig } from '../config/index.js';
-import { sha1 } from '../extract/python.js';
+import { sha1 } from '../util/hash.js';
 import { log } from '../log.js';
 import type { FileRow, SnapshotRow, SymbolRow } from '../model/types.js';
 import type { Warning } from '../report/types.js';

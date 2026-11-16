@@ -35,10 +35,11 @@ export function detectLanguage(filePath: string): Language {
   return EXT_LANG[path.posix.extname(filePath).toLowerCase()] ?? 'unknown';
 }
 
-export function supportLevelOf(language: Language): SupportLevel {
+/** 文件的支持级别；path 用于按目录排除个别语言的文件 */
+export function supportLevelOf(language: Language, _path: string): SupportLevel {
   return LANG_SUPPORT[language] ?? 'none';
 }
 
 export function isSupported(filePath: string): boolean {
-  return supportLevelOf(detectLanguage(filePath)) !== 'none';
+  return supportLevelOf(detectLanguage(filePath), filePath) !== 'none';
 }

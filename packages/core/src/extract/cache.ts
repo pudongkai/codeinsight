@@ -2,20 +2,23 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sha1 } from './python.js';
+import { sha1 } from '../util/hash.js';
+import { allLanguageSupports } from './languages.js';
 import type { BaseVarKind, ExtractedFile, ImportBinding } from './types.js';
 
 /**
  * 提取代码指纹清单：`extract/` 下全部模块，加上 extract 引用的、会影响缓存内容的目录外模块（不含扩展名）。
  * extract 新引用了别的项目模块时要加进这里或 FINGERPRINT_IGNORED，测试会检查。
  */
-export const FINGERPRINT_EXTRA_MODULES = ['model/symbol-key', 'util/collections'] as const;
+export const FINGERPRINT_EXTRA_MODULES = ['model/language', 'model/symbol-key', 'util/collections', 'util/hash'] as const;
 
 /** 不影响缓存内容、不进指纹的模块：只写日志，或只有类型 */
 export const FINGERPRINT_IGNORED_MODULES = ['log', 'model/types'] as const;
 
-/** 解析结果随语法版本变化的依赖包，版本号进指纹 */
-const GRAMMAR_PACKAGES = ['tree-sitter-python', 'web-tree-sitter'] as const;
+/** 解析结果随语法版本变化的依赖包（各语言的语法包和 web-tree-sitter），版本号进指纹 */
+function grammarPackages(): string[] {
+  return [...allLanguageSupports().map((s) => s.grammarPackage), 'web-tree-sitter'];
+}
 
 /** 运行时的源码根目录：构建后是 dist/，vitest 下是 src/ */
 export const DEFAULT_CODE_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -73,7 +76,7 @@ export function codeHash(tag: string, root: string, files: () => string[], packa
 
 /** 提取代码指纹：提取相关代码或语法包版本有任何改动时都会变，旧缓存自然不命中 */
 export function extractCodeHash(root = DEFAULT_CODE_ROOT): string {
-  return codeHash('extract', root, () => fingerprintFiles(root), GRAMMAR_PACKAGES);
+  return codeHash('extract', root, () => fingerprintFiles(root), grammarPackages());
 }
 
 export interface ExtractCacheKeyParts {

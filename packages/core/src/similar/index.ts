@@ -1,4 +1,4 @@
-import { extractPythonFile, getPythonParser } from '../extract/index.js';
+import { emptyExtractContext, languageSupport } from '../extract/index.js';
 import { log } from '../log.js';
 import type { SymbolRow } from '../model/types.js';
 import type { DuplicateFinding } from '../report/types.js';
@@ -246,9 +246,10 @@ export const SNIPPET_PATH = '<snippet>/snippet.py';
 
 /** 解析代码片段里的函数；片段里没有函数定义时（只有一段函数体）包成一个名为 snippet 的匿名函数 */
 async function snippetFunctions(code: string, snapshotId: number): Promise<{ functions: SymbolRow[]; anonymous: boolean }> {
-  const parser = await getPythonParser();
+  const python = languageSupport('python')!;
+  const parser = await python.getParser();
   const parse = (source: string) =>
-    extractPythonFile(parser, SNIPPET_PATH, source, { isTest: false, isGenerated: false })
+    python.extractFile(parser, SNIPPET_PATH, source, { isTest: false, isGenerated: false }, emptyExtractContext())
       .symbols.filter((s) => FUNCTION_KINDS.has(s.kind))
       .map(({ nameLine: _l, nameCol: _c, ...s }) => ({ ...s, snapshotId }));
   const found = parse(code);

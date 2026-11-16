@@ -2,9 +2,10 @@ import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { dataDirInRepo, type CodeInsightConfig } from '../config/index.js';
-import { getPythonParser, restoreExtractedFile, type ExtractedFile, type ExtractResult } from '../extract/index.js';
+import { completeForResolve, emptyExtractContext, loadParsers, type ExtractedFile, type ExtractResult } from '../extract/index.js';
 import { exportArchive, listCommitFiles, listWorkingFiles, repoRoot, resolveRef, workingContentKey } from '../git/index.js';
 import { log } from '../log.js';
+import type { Language } from '../model/language.js';
 import type { SnapshotKind, SnapshotRow, SymbolRow } from '../model/types.js';
 import { ScipPythonResolver } from '../resolve/scip-python.js';
 import type { Resolver } from '../resolve/types.js';
@@ -185,7 +186,7 @@ async function buildLocked(opts: BuildSnapshotOptions, t: Target): Promise<Build
   const extractMs = Date.now() - started;
   const symbols = extracted.files.reduce((n, f) => n + f.symbols.length, 0);
   log.info('extract_done', {
-    files: read.rows.length, python: extracted.files.length, symbols, entries: extracted.entries.length, models: extracted.models,
+    files: read.rows.length, extracted: extracted.files.length, languages: countByLanguage(extracted.files), symbols, entries: extracted.entries.length, models: extracted.models,
     cacheHits: extracted.cacheHits, cacheMisses: extracted.cacheMisses, parseMs: Date.now() - parseStarted, ms: extractMs,
   });
   if (signal?.aborted) cancelResolve(store, snap, 'save');
@@ -194,17 +195,28 @@ async function buildLocked(opts: BuildSnapshotOptions, t: Target): Promise<Build
   return { snapshot: store.getSnapshot(snap.id)!, cached: false, resolveRetried: false };
 }
 
-/** 从库里的符号还原解析层输入；源码从快照目录读 */
+/** 各语言提取出的文件数 */
+function countByLanguage(files: ExtractedFile[]): Partial<Record<Language, number>> {
+  const out: Partial<Record<Language, number>> = {};
+  for (const f of files) out[f.language] = (out[f.language] ?? 0) + 1;
+  return out;
+}
+
+/** 从库里的符号按语言还原解析层输入，再补齐跨文件信息；源码从快照目录读 */
 async function restoreExtracted(store: Store, snap: SnapshotRow, dir: string): Promise<ExtractedFile[]> {
-  const parser = await getPythonParser();
   const byPath = new Map<string, Omit<SymbolRow, 'snapshotId'>[]>();
   for (const s of store.getSymbols(snap.id)) byPath.set(s.path, [...(byPath.get(s.path) ?? []), s]);
+  const full = store.getFiles(snap.id).filter((f) => f.supportLevel === 'full' && byPath.has(f.path));
+  const parsers = await loadParsers(full.map((f) => f.language));
+  const ctx = emptyExtractContext();
   const files: ExtractedFile[] = [];
-  for (const f of store.getFiles(snap.id)) {
-    const rows = byPath.get(f.path);
-    if (f.supportLevel !== 'full' || !rows) continue;
-    files.push(restoreExtractedFile(parser, f.path, await readFile(path.join(dir, f.path), 'utf8'), rows));
+  for (const f of full) {
+    const p = parsers.get(f.language);
+    if (!p) continue;
+    const source = await readFile(path.join(dir, f.path), 'utf8');
+    files.push(p.support.restoreFile(p.parser, f.path, source, byPath.get(f.path)!, ctx));
   }
+  completeForResolve(files);
   return files;
 }
 

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
-import { sha1 } from '../extract/python.js';
+import { sha1 } from '../util/hash.js';
 import { GitError, readBlob, resolveRef, runGit, treeEntries, type TreeEntry } from '../git/index.js';
 import { originDefaultBranch } from '../git/write.js';
 import { log } from '../log.js';

@@ -1,5 +1,5 @@
 import type { Node } from 'web-tree-sitter';
-import { getPythonParser } from '../extract/parser.js';
+import { languageSupport } from '../extract/languages.js';
 import { collectImportModules, type ImportedModule } from '../extract/python.js';
 import { log } from '../log.js';
 import type { FileRow } from '../model/types.js';
@@ -125,7 +125,7 @@ function settingsFields(root: Node): string[] {
 
 async function fileFacts(input: ExternalInput, packages: ReadonlySet<string>, file: string): Promise<FileFacts> {
   const source = await input.read(file);
-  const parser = await getPythonParser();
+  const parser = await languageSupport('python')!.getParser();
   const tree = parser.parse(source);
   if (!tree) throw new Error('tree-sitter failed to parse');
   try {

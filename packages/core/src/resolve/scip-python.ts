@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { codeHash, DEFAULT_CODE_ROOT, moduleFilesIn } from '../extract/cache.js';
-import { sha1 } from '../extract/python.js';
+import { sha1 } from '../util/hash.js';
 import { log } from '../log.js';
 import { decodeScipIndex, type ScipIndex } from '../scip/reader.js';
 import { runScipPython } from '../scip/runner.js';

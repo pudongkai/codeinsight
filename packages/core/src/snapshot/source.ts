@@ -1,5 +1,5 @@
 import { readFile, stat } from 'node:fs/promises';
-import { sha1 } from '../extract/index.js';
+import { sha1 } from '../util/hash.js';
 import { log } from '../log.js';
 import type { FileRow, SnapshotRow } from '../model/types.js';
 import { snapshotDir, type DataDirLayout } from '../store/data-dir.js';

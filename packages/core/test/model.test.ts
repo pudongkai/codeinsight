@@ -38,9 +38,9 @@ describe('symbol key', () => {
 describe('language', () => {
   it('detects languages and support levels', () => {
     expect(detectLanguage('x/y.py')).toBe('python');
-    expect(supportLevelOf('python')).toBe('full');
+    expect(supportLevelOf('python', 'x/y.py')).toBe('full');
     expect(detectLanguage('A.java')).toBe('java');
-    expect(supportLevelOf('java')).toBe('none');
+    expect(supportLevelOf('java', 'A.java')).toBe('none');
     expect(detectLanguage('README.md')).toBe('unknown');
   });
 });

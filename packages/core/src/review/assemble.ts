@@ -15,7 +15,7 @@ export function fileChanges(files: ChangedFile[], classify: ClassifyOptions): Fi
         ...(f.oldPath !== undefined ? { oldPath: f.oldPath } : {}),
         status: f.status,
         language,
-        supportLevel: supportLevelOf(language),
+        supportLevel: supportLevelOf(language, f.path),
         additions: f.additions,
         deletions: f.deletions,
         isTest: isTestPath(f.path, classify),

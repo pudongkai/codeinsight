@@ -6,7 +6,10 @@ import { isGeneratedPath, isTestPath, type ClassifyOptions } from '../classify/i
 import {
   deserializeExtractedFile, extractCacheKey, extractCodeHash, serializeExtractedFile,
 } from '../extract/cache.js';
-import { extractPythonFile, getPythonParser, resolveCrossFile, sha1, type ExtractedFile, type ExtractResult, type SourceFile } from '../extract/index.js';
+import {
+  emptyExtractContext, extractSource, languageSupport, loadParsers, resolveCrossFile,
+  type ExtractContext, type ExtractedFile, type ExtractResult, type LanguageSourceFile,
+} from '../extract/index.js';
 import { log } from '../log.js';
 import { detectLanguage, supportLevelOf } from '../model/language.js';
 import type { FileRow, SnapshotKind, SnapshotRow } from '../model/types.js';
@@ -14,6 +17,7 @@ import { snapshotDir, type DataDirLayout } from '../store/data-dir.js';
 import type { ExtractCacheEntry } from '../store/extract-cache.js';
 import type { Resolver } from '../resolve/types.js';
 import type { Store } from '../store/db.js';
+import { sha1 } from '../util/hash.js';
 
 /** 建快照被中止时所在的阶段 */
 export type BuildStage = 'lock' | 'copy' | 'extract' | 'save' | 'resolve';
@@ -34,7 +38,7 @@ const PROJECT_CONFIG_FILES = new Set(['pyproject.toml', 'setup.cfg', 'pyrightcon
 
 /** 需要放进快照目录（交给 scip-python）的文件：支持的语言和项目配置 */
 export function isPlaced(rel: string): boolean {
-  return supportLevelOf(detectLanguage(rel)) !== 'none' || PROJECT_CONFIG_FILES.has(path.posix.basename(rel));
+  return supportLevelOf(detectLanguage(rel), rel) !== 'none' || PROJECT_CONFIG_FILES.has(path.posix.basename(rel));
 }
 
 // ---- 上一个快照 ----
@@ -56,7 +60,7 @@ export function findPreviousSnapshot(store: Store, layout: DataDirLayout, kind: 
 
 // ---- 读文件、写快照目录 ----
 
-export interface HashedSource extends SourceFile {
+export interface HashedSource extends LanguageSourceFile {
   contentHash: string;
 }
 
@@ -85,7 +89,7 @@ export interface ReadOptions {
 function fileRow(rel: string, data: Buffer, classify: ClassifyOptions): Omit<FileRow, 'snapshotId'> {
   const language = detectLanguage(rel);
   return {
-    path: rel, language, supportLevel: supportLevelOf(language), contentHash: sha1(data),
+    path: rel, language, supportLevel: supportLevelOf(language, rel), contentHash: sha1(data),
     isTest: isTestPath(rel, classify), isGenerated: isGeneratedPath(rel, classify),
   };
 }
@@ -97,6 +101,11 @@ async function linkFromPrevious(prev: PreviousSnapshot | undefined, rel: string,
   const st = await lstat(from).catch(() => undefined);
   if (!st?.isFile()) return false;
   return link(from, dest).then(() => true, () => false);
+}
+
+/** 进入提取输入的文件：完整支持且有提取实现的语言 */
+function isExtracted(row: Omit<FileRow, 'snapshotId'>): boolean {
+  return row.supportLevel === 'full' && languageSupport(row.language) !== undefined;
 }
 
 class SnapshotWriter {
@@ -159,8 +168,10 @@ class SnapshotWriter {
     if (!data) return;
     const row = fileRow(rel, data, this.o.classify);
     this.result.rows.push(row);
-    if (row.language === 'python') {
-      this.result.sources.push({ path: rel, source: data.toString('utf8'), isTest: row.isTest, isGenerated: row.isGenerated, contentHash: row.contentHash });
+    if (isExtracted(row)) {
+      this.result.sources.push({
+        path: rel, language: row.language, source: data.toString('utf8'), isTest: row.isTest, isGenerated: row.isGenerated, contentHash: row.contentHash,
+      });
     }
     if (placed && !st.isSymbolicLink() && this.o.destDir !== undefined) await this.placeFile(rel, data, row.contentHash);
   }
@@ -213,11 +224,13 @@ function putCache(store: Store, entries: readonly ExtractCacheEntry[]): void {
 }
 
 /**
- * 提取一批 Python 文件：没变的文件从 extract_cache 取跨文件识别之前的结果，其余重新提取并写入缓存；
+ * 提取一批文件（按语言选提取实现）：没变的文件从 extract_cache 取跨文件识别之前的结果，其余重新提取并写入缓存；
  * 然后对全部文件照常做跨文件的入口和模型识别，结果与全量提取相同。单个文件失败时跳过并记日志。
  */
-export async function extractWithCache(store: Store, sources: HashedSource[], signal?: AbortSignal): Promise<CachedExtractResult> {
-  const parser = await getPythonParser();
+export async function extractWithCache(
+  store: Store, sources: HashedSource[], signal?: AbortSignal, ctx: ExtractContext = emptyExtractContext(),
+): Promise<CachedExtractResult> {
+  const parsers = await loadParsers(sources.map((s) => s.language));
   const codeHash = extractCodeHash();
   const keys = sources.map((s) => extractCacheKey(codeHash, s));
   const cached = lookupCache(store, keys);
@@ -234,7 +247,7 @@ export async function extractWithCache(store: Store, sources: HashedSource[], si
       continue;
     }
     try {
-      const file = extractPythonFile(parser, s.path, s.source, s);
+      const file = extractSource(parsers, s, ctx);
       fresh.push({ key: keys[i]!, path: s.path, data: serializeExtractedFile(file) });
       files.push(file);
     } catch (err) {

@@ -16,7 +16,7 @@ describe('scipToEdges', () => {
     const file: ExtractedFile = {
       path: 'a.py',
       symbols: [sym({}), sym({ id: 'f', symbolKey: 'a.py#function#f#', kind: 'function', name: 'f', qualifiedName: 'f', startLine: 1, endLine: 2, nameCol: 4 })],
-      entries: [], importRows: [], djangoRoutes: [], imports: new Map(),
+      language: 'python', entries: [], importRows: [], djangoRoutes: [], imports: new Map(),
     };
     const def = (symbol: string, line: number, col: number) => ({
       symbol, roles: SCIP_ROLE_DEFINITION,
@@ -49,7 +49,7 @@ describe('scipToEdges', () => {
     const file: ExtractedFile = {
       path: 'a.py',
       symbols: [sym({ endLine: 11 }), sym({ id: 'f', symbolKey: 'a.py#function#f#', kind: 'function', name: 'f', qualifiedName: 'f', startLine: 1, endLine: 2, nameCol: 4 })],
-      entries: [], importRows: [], djangoRoutes: [], imports: new Map(),
+      language: 'python', entries: [], importRows: [], djangoRoutes: [], imports: new Map(),
     };
     const lines = source.split('\n');
     const ref = (line: number) => {
@@ -77,7 +77,7 @@ describe('scipToEdges', () => {
     const file: ExtractedFile = {
       path: 'a.py',
       symbols: [sym({ endLine: 6 }), sym({ id: 'f', symbolKey: 'a.py#function#f#', kind: 'function', name: 'f', qualifiedName: 'f', startLine: 1, endLine: 2, nameCol: 4 })],
-      entries: [], importRows: [], djangoRoutes: [], imports: new Map(),
+      language: 'python', entries: [], importRows: [], djangoRoutes: [], imports: new Map(),
     };
     const ref = (line: number) => ({ symbol: 'x/f().', roles: 0, range: { startLine: line, startChar: 4, endLine: line, endChar: 5 } });
     const def = {

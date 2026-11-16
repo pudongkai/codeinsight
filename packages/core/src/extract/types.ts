@@ -1,3 +1,4 @@
+import type { Language } from '../model/language.js';
 import type { EntryKind, ModelKind, SymbolRow } from '../model/types.js';
 
 /** 提取层的符号：入库字段之外，带名字标识符的位置，供 SCIP 定义对应到符号 */
@@ -48,12 +49,14 @@ export interface ModelMatch {
 
 export interface ExtractedFile {
   path: string;
+  language: Language;
   /** 按出现顺序，第一个是 module 符号 */
   symbols: ExtractedSymbol[];
   entries: ExtractedEntry[];
   /** import 语句所在的行区间（0 起始，含两端） */
   importRows: [number, number][];
-  djangoRoutes: DjangoRoute[];
+  /** Python 的 urls.py 里的路由；其他语言没有 */
+  djangoRoutes?: DjangoRoute[];
   imports: Map<string, ImportBinding>;
   /** 模型识别用；从库里还原的文件没有 */
   classes?: ClassHint[];
