@@ -199,7 +199,7 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
   - `reason=not_found` 且现在找得到 scip-go → 重跑解析。
   - `reason=failed` 且距 `at` 超过 1 小时 → 重跑解析；不到 1 小时直接复用，避免离线时每次打开都卡 2 分钟。
   - 其余情况直接复用。
-- 持锁前的快速复用路径（`build.ts:263`）不做这个检查，打开页面时不会因此变慢；下一次走到持锁路径时再重跑。
+- 持锁前的快速复用路径只做不需要外部命令的同步判断：某种语言的边来自名称匹配，且 `reason=not_found`，或 `reason=failed` 且距 `at` 超过 1 小时，才进持锁路径做完整判断；其余直接复用。从这条路径返回复用结果时不做快照清理。
 
 **SCIP 边转换的语言规则**（`resolve/scip-rules.ts`，`pythonRules` / `goRules`）：
 - 行注释前缀：`#` / `//`。
@@ -311,14 +311,15 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
   - 完成标准：`pnpm --filter @codeinsight/core test`、`pnpm --filter @codeinsight/server test` 全部通过且没有改已有测试的期望值；`pnpm -r build` 通过；`grep -rn "getPythonParser\|extractPythonFile" packages/core/src/snapshot` 无结果
   - 验证：core 514 通过/10 跳过、server 187 通过/10 跳过，测试只补了 `supportLevelOf` 的路径参数和手写 `ExtractedFile` 的 `language`，期望值未改；`pnpm -r build` 通过；grep 无结果。改动 `extract/languages.ts`（新）、`util/hash.ts`（新）、`extract/index.ts`、`extract/cache.ts`、`snapshot/incremental.ts`、`snapshot/build.ts`、`model/language.ts`、`review/assemble.ts`、`similar/index.ts`、`overview/external.ts`
 
-- [~] 阶段2：按语言组合的解析框架
+- [x] 阶段2：按语言组合的解析框架
   - 涉及模块：packages/core/src/resolve（types.ts、language-resolver.ts、scip-rules.ts、scip-edges.ts、scip-python.ts）、packages/core/src/scip/runner.ts、packages/core/src/snapshot（build.ts 的解析部分、incremental.ts 的 reuseEdges）、packages/core/src/store（schema.ts、edge_sources 读写）、packages/core/src/util/command.ts、packages/core/src/llm/cli/command.ts、packages/server/src/http/routes/status.ts、packages/server/src/mcp/format.ts、packages/web/src/app/StatusBar.tsx 和 web 的 API 类型
   - 依赖：阶段1
   - 验证方式：独立
   - 内容：`scip/reader.ts` 同时支持新旧两种位置字段（SCIP 绑定 v0.10 起位置写在字段 8/9、`enclosing_range` 在 10/11，旧的打包字段 1/7 为空，没写的字段为 0），用阶段0 的 scip-go 索引做测试样本；`Resolver.prepare`、`ResolveInput.goTimeoutMs`、`ResolveResult` 的 `sources`/`effectiveVersion`/`failed`；`LanguageResolver`、`defaultResolver()`；一个解析器实例先 prepare 再用于复用判断和解析；`runResolver` 处理部分语言失败和 hash 写入规则；`edge_sources` 列、写入、`reuseEdges` 复制；`needsReresolve` 框架和 `buildOrReuse` 的重跑解析分支；`scip-rules.ts` 抽出 Python 规则；`scipResolverCodeHash` 按语言拆分文件范围；`findCommand`（`resolveCliCommand` 保留为包装）；`runProcess` 进程组；status 接口、状态栏、MCP 说明按语言区分失败
   - 完成标准：core、server、web 的 `pnpm --filter <包> test` 全部通过且没有改已有测试的期望值；`pnpm -r build` 通过；新增 `language-resolver.test.ts` 覆盖：只跑出现的语言、一个语言失败时另一个语言的边入库且 `resolver_status=failed`、version 只含出现的语言、`edge_sources` 随边复用一起复制、`needsReresolve` 为真时走 `retryResolve`（用一个假的子解析器测试）；旧库启动后 `snapshots` 表有 `edge_sources` 列
+  - 验证：`pnpm -r build` 通过；core 531 通过/10 跳过、server 190、web 183、cli 40 通过，已有测试期望值未改（web fixture 只补新字段）；新增 `language-resolver.test.ts`、`scip-reader.test.ts`（scip-go v0.2.9 真实索引 `test/fixtures/scip-go-mini`）、`find-command.test.ts`、`mcp-format.test.ts`；独立验证提的 6 条已修（快速复用路径只在可能需要重跑时进锁且不做清理、CLI index/similar 传中止信号、解析失败时清空 edge_sources、命令查找缓存命中不重复打日志、分组改 push、版本 hash 覆盖 language-resolver）。偏离：失败语言也记进 edge_sources（`source: 'failed'`）；scip-python 改在独立进程组运行后，CLI 的 index/similar 补了停止信号处理。改动 `resolve/{language-resolver,scip-rules,code-hash,edge-sources}.ts`（新）、`util/command.ts`（新）、`scip/{reader,runner}.ts`、`snapshot/{build,incremental}.ts`、`store/{schema,db}.ts`、`llm/cli/command.ts`、server `status.ts`/`mcp/format.ts`、web `StatusBar.tsx`、cli `cli.ts` 和 `commands/{index,similar}.ts`
 
-- [ ] 阶段3：Go 符号提取、分类和快照接入
+- [~] 阶段3：Go 符号提取、分类和快照接入
   - 涉及模块：packages/core/package.json、packages/core/src/extract（go.ts、go-types.ts、go-module.ts、go-index.ts、normalize.ts、languages.ts）、packages/core/src/classify、packages/core/src/model/language.ts、packages/core/src/snapshot/incremental.ts（Go 配置文件复制、生成代码内容判断）、packages/core/src/resolve/go.ts（只放不出边的占位实现）、packages/core/test/fixtures/go-basic
   - 依赖：阶段2
   - 内容：加依赖 `tree-sitter-go@0.25.0`；Go 解析器加载；Go 提取器（4.2 的符号和命名、interface 方法、签名、文档注释、bodyHash、规范化 token 的 Go 节点类型）；`go` 字段收集（import、调用点、局部类型推断、struct 标签、环境变量读取；`collectGoImports`、`collectGoEnvReads` 导出）；`restoreFile` 和 `completeForResolve`；`go.mod` 解析、包导入路径、缓存 key；`GoSymbolIndex` 和代表文件；跨文件 parentId；`LANG_SUPPORT.go='full'`、vendor/testdata 规则；Go 配置文件放入快照目录并复制；测试和生成代码识别（含内容判断）；go-basic fixture

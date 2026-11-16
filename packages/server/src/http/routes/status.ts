@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises';
-import { envTurnsOff, isCliProvider, LIMIT_ENV, llmSources, loadLlmSources, log, readUserSettings, userSettingsPath, workingKeyHasChanges, writeScopeView } from '@codeinsight/core';
+import { envTurnsOff, isCliProvider, languagesWithSource, LIMIT_ENV, llmSources, loadLlmSources, log, readUserSettings, userSettingsPath, workingKeyHasChanges, writeScopeView } from '@codeinsight/core';
 import type { LlmConfig, LlmSource, SnapshotRow, UserSettings } from '@codeinsight/core';
 import { jobView } from '../../jobs/index-jobs.js';
 import { overviewStale } from '../../jobs/overview-jobs.js';
@@ -37,6 +37,7 @@ function snapshotView(snap: SnapshotRow | undefined) {
   return {
     id: snap.id, kind: snap.kind, commitSha: snap.commitSha, contentKey: snap.contentKey, createdAt: snap.createdAt,
     resolverStatus: snap.resolverStatus, resolverError: snap.resolverError,
+    edgeSources: snap.edgeSources, failedLanguages: languagesWithSource(snap.edgeSources, 'failed'),
     dirty: snap.kind === 'working' && workingKeyHasChanges(snap.contentKey),
   };
 }

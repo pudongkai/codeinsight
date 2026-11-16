@@ -1,0 +1,30 @@
+
+y[
+scip-go0.2.9index-o/tmp/scip-go-mini/index.scip--module-version=v0.0.0--quietfile:///tmp/scip-go-mini �
+shop/shop.goJ>scip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/BWCscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#B	Z \Hscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#Find.BRlocal 0BZFscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#B	Z _Kscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#repo.B
+R
+
+OCscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#B
+
+_Kscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/NewService().BZ local 1BOCscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#BRFscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#B RFscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#B	WKscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#repo.Blocal 1Blocal 2BRFscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#B	`Lscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#Get().BZ local 3Blocal 4Blocal 2B	
+WKscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#repo.BTHscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#Find.Blocal 3BSGscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/format().Blocal 4B[Gscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/format().BZ local 5Blocal 5Bs
+Kscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#repo.(2repo:"go*struct field repo Repo�
+Kscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/NewService().NewService 创建 Service。(2
+NewService:&"go* func NewService(r Repo) *Service�
+Lscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#Get().2Get 通过 repo 查订单，
+函数体跨多行。(2Get:("go*"func (*Service).Get(id int) stringz
+Gscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/format().(2format:%"go*func format(name string) string�
+>scip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/9Package shop 是 SCIP 读取测试用的最小 Go 包。
+(#2shop:"go*package shop�
+Cscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#Repo 读取订单。(2Repo:0"go**type Repo interface{ Find(id int) string }y
+Hscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Repo#Find.(C2Find:%"go*func (Repo).Find(id int) string�
+Fscip-go gomod example.com/mini v0.0.0 `example.com/mini/shop`/Service#Service 处理订单。(12Service:&"go* type Service struct{ repo Repo }$
+local 2(=2s:"go*var s *Service!
+local 3(=2id:"go*
+var id int(
+local 4(=2name:"go*var name string(
+local 5(=2name:"go*var name string!
+local 0(=2id:"go*
+var id int 
+local 1(=2r:"go*
+var r Repo"go0

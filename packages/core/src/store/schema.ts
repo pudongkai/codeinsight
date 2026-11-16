@@ -97,6 +97,12 @@ CREATE TABLE reviews (
  */
 export const EXTRA_TABLES = ['overviews', 'chat_proposals', 'chat_sessions', 'chat_messages', 'extract_cache', 'snapshot_edges_code'] as const;
 
+/** 不随 SCHEMA_VERSION 删库重建、在已有表上补加的列；打开库时缺哪列就加哪列 */
+export const EXTRA_COLUMNS = [
+  // 各语言调用边的来源（JSON，见 model/types.ts:EdgeSources），旧快照为空
+  { table: 'snapshots', column: 'edge_sources', type: 'TEXT' },
+] as const;
+
 export const EXTRA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS overviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

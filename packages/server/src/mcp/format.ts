@@ -1,4 +1,5 @@
-import type { DuplicateFinding, SnapshotRow, SymbolRow } from '@codeinsight/core';
+import { languagesWithSource } from '@codeinsight/core';
+import type { DuplicateFinding, Language, SnapshotRow, SymbolRow } from '@codeinsight/core';
 
 export function location(s: { path: string; startLine: number }): string {
   return `${s.path}:${s.startLine}`;
@@ -16,9 +17,22 @@ export function notFoundText(query: string): string {
   return `No symbol named \`${query}\` in the working tree index. Pass a function name, a qualified name such as \`Class.method\`, or a symbol key.`;
 }
 
-/** 解析失败时调用关系为空，要明确告知而不是给出 0 个调用方 */
+const LANGUAGE_LABELS: Partial<Record<Language, string>> = { python: 'Python', go: 'Go' };
+
+/**
+ * 解析失败时调用关系为空，要明确告知而不是给出 0 个调用方。只有部分语言失败时按语言说明，
+ * 其他语言的调用关系照常可用
+ */
 export function resolverNote(snap: SnapshotRow): string[] {
   if (snap.resolverStatus === 'ok') return [];
+  const failed = languagesWithSource(snap.edgeSources, 'failed');
+  if (failed.length > 0) {
+    return [...failed.map((l) => {
+      const name = LANGUAGE_LABELS[l] ?? l;
+      const reason = snap.edgeSources?.[l]?.note ?? 'unknown';
+      return `> Warning: ${name} call graph unavailable (resolver failed: ${reason}); callers of ${name} symbols are missing.`;
+    }), ''];
+  }
   const reason = snap.resolverError?.split('\n')[0] ?? 'unknown';
   return [`> Warning: call graph unavailable (resolver ${snap.resolverStatus}: ${reason}); caller lists are empty.`, ''];
 }

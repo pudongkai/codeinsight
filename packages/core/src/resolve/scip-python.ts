@@ -1,13 +1,15 @@
 import { existsSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { codeHash, DEFAULT_CODE_ROOT, moduleFilesIn } from '../extract/cache.js';
+import { DEFAULT_CODE_ROOT } from '../extract/cache.js';
 import { sha1 } from '../util/hash.js';
 import { log } from '../log.js';
 import { decodeScipIndex, type ScipIndex } from '../scip/reader.js';
 import { runScipPython } from '../scip/runner.js';
 import { scipPath } from '../store/data-dir.js';
+import { resolverCodeHash, SHARED_SCIP_RESOLVER_MODULES } from './code-hash.js';
 import { scipToEdges } from './scip-edges.js';
+import { pythonRules } from './scip-rules.js';
 import type { ResolveInput, ResolveResult, Resolver } from './types.js';
 
 export interface ScipPythonResolverOptions {
@@ -39,9 +41,12 @@ async function readIndex(file: string, expectDocuments: boolean): Promise<ScipIn
   }
 }
 
-/** 解析相关代码（resolve/、scip/ 下的模块）和 scip-python 包版本的指纹 */
+/** Python 解析用到的模块：共用的 SCIP 转换加上 Python 专用的部分 */
+const PYTHON_RESOLVER_MODULES = [...SHARED_SCIP_RESOLVER_MODULES, 'resolve/scip-python', 'resolve/python-lines'];
+
+/** Python 解析代码和 scip-python 包版本的指纹 */
 export function scipResolverCodeHash(root = DEFAULT_CODE_ROOT): string {
-  return codeHash('resolve', root, () => [...moduleFilesIn(root, 'resolve'), ...moduleFilesIn(root, 'scip')].sort(), ['@sourcegraph/scip-python']);
+  return resolverCodeHash('python', PYTHON_RESOLVER_MODULES, ['@sourcegraph/scip-python'], root);
 }
 
 /** 用 scip-python 解析 Python 引用；index.scip 按 content_key 缓存在数据目录 */
@@ -73,7 +78,7 @@ export class ScipPythonResolver implements Resolver {
     const index = await readIndex(output, input.files.length > 0);
     const sources = new Map<string, string>();
     for (const f of input.files) sources.set(f.path, await readFile(path.join(input.root, f.path), 'utf8'));
-    const result = scipToEdges(index, input.files, sources, input.snapshotId);
+    const result = scipToEdges(index, input.files, sources, input.snapshotId, pythonRules);
     log.info('scip_converted', { documents: index.documents.length, edges: result.edges.length });
     return result;
   }

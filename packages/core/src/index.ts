@@ -70,3 +70,4 @@ export * from './ask/proposal-drafts.js';
 export * from './ask/proposal-failure.js';
 export * from './util/failure.js';
 export * from './util/exec-stop.js';
+export { findCommand, type FindCommandOptions, type FoundCommand } from './util/command.js';

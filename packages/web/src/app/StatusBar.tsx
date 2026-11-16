@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { StatusResponse } from '../api/types';
+import type { SnapshotView, StatusResponse } from '../api/types';
 import { basedOn, formatShortTime } from '../format';
 import { RepoSwitcher } from '../repo/RepoSwitcher';
 import { useOpenSettings } from '../settings/context';
@@ -72,13 +72,23 @@ function Brand() {
   );
 }
 
+const LANGUAGE_LABELS: Record<string, string> = { python: 'Python', go: 'Go' };
+
+/** 解析没有成功时的提示：只有部分语言失败时说明是哪些语言，其他语言的邻居图照常可用 */
+function resolverWarning(snapshot: SnapshotView): string | undefined {
+  if (snapshot.resolverStatus === 'ok') return undefined;
+  const failed = snapshot.failedLanguages ?? [];
+  if (failed.length === 0) return '调用关系解析失败，邻居图不可用';
+  return `${failed.map((l) => LANGUAGE_LABELS[l] ?? l).join('、')} 调用关系解析失败，这部分的邻居图不可用`;
+}
+
 /** 第二行的索引状态：来源、解析失败、建索引进度、代码变化；都没有时不显示 */
 function IndexBar({ status, onReindex }: { status: StatusResponse | undefined; onReindex(): void }) {
   if (!status?.repo) return null;
   return (
     <div className="indexbar">
       {status.snapshot && <IndexSource status={status} />}
-      {status.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn">调用关系解析失败，邻居图不可用</span>}
+      {status.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn" data-testid="resolver-warning">{resolverWarning(status.snapshot)}</span>}
       <IndexState status={status} />
       <CodeChanged status={status} onReindex={onReindex} />
     </div>

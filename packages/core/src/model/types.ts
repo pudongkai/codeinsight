@@ -3,6 +3,23 @@ import type { Language, SupportLevel } from './language.js';
 export type SnapshotKind = 'commit' | 'working';
 export type StepStatus = 'pending' | 'ok' | 'failed' | 'skipped';
 
+/** 名称匹配的原因：找不到外部工具、外部工具运行失败、选项关闭 */
+export type FallbackReason = 'not_found' | 'failed' | 'disabled';
+
+/** 一种语言的调用边来自哪里：scip 索引、名称匹配，或这种语言解析失败（其他语言的边照常入库） */
+export interface EdgeSource {
+  source: 'scip' | 'name_match' | 'failed';
+  /** source 为 name_match 时的原因 */
+  reason?: FallbackReason;
+  /** 回退或失败发生的时间（毫秒时间戳） */
+  at?: number;
+  /** 原因说明的第一行 */
+  note?: string;
+}
+
+/** 各语言调用边的来源；旧快照没有记录时为 null，按全部来自 scip 处理 */
+export type EdgeSources = Partial<Record<Language, EdgeSource>>;
+
 export interface SnapshotRow {
   id: number;
   kind: SnapshotKind;
@@ -12,6 +29,7 @@ export interface SnapshotRow {
   resolverStatus: StepStatus;
   /** 失败原因、跳过原因；ok 时为解析结果的提示（如 SCIP 定义对不上的比例），没有时为 null */
   resolverError: string | null;
+  edgeSources: EdgeSources | null;
   createdAt: number;
   lastUsedAt: number;
 }

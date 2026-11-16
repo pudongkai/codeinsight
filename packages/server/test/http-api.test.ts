@@ -62,6 +62,8 @@ describe('index jobs', () => {
   it('builds the working tree index in the background on start', async () => {
     const s = await indexDone();
     expect(s.snapshot?.id).toBe(s.index.job?.snapshotId);
+    const snap = (await api<{ snapshot: Record<string, unknown> }>('/api/status')).body.snapshot;
+    expect(snap).toMatchObject({ resolverStatus: 'ok', edgeSources: { python: { source: 'scip' } }, failedLanguages: [] });
   });
 
   it('POST /api/index goes from running to done', async () => {

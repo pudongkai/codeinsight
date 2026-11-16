@@ -31,7 +31,7 @@ function tail(text: string): string {
   return text.trimEnd().split('\n').slice(-STDERR_TAIL_LINES).join('\n');
 }
 
-interface ExitInfo {
+export interface ExitInfo {
   code: number | null;
   signal: NodeJS.Signals | null;
   timedOut: boolean;
@@ -45,13 +45,39 @@ interface ActiveRun {
   closed: Promise<void>;
 }
 
-/** 本进程正在运行的 scip-python 子进程，进程退出前用 killActiveScipProcesses 结束它们 */
+/** 本进程正在运行的 SCIP 索引子进程（scip-python、scip-go 等），进程退出前用 killActiveScipProcesses 结束它们 */
 const active = new Map<ChildProcess, ActiveRun>();
 
-function runProcess(args: string[], cwd: string, timeoutMs: number, tmp: string, abort?: AbortSignal): Promise<ExitInfo> {
+/** 结束子进程所在的整个进程组（它启动的 go 等子进程一起结束）；Windows 上只结束子进程本身 */
+function killGroup(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    if (process.platform === 'win32') child.kill('SIGKILL');
+    else process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // 进程组已经不在了
+  }
+}
+
+export interface ProcessRun {
+  bin: string;
+  args: string[];
+  cwd: string;
+  timeoutMs: number;
+  /** 输出的临时文件，被强制结束时删除 */
+  tmp: string;
+  /** 不传时继承当前进程的环境变量 */
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+}
+
+/** 在单独的进程组里运行一个索引命令并等它结束；超时或中止时结束整组。不因退出码抛错，结果在返回值里 */
+export function runProcess(run: ProcessRun): Promise<ExitInfo> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
-    active.set(child, { tmp, closed: new Promise((r) => child.once('close', () => r())) });
+    const child = spawn(run.bin, run.args, {
+      cwd: run.cwd, env: run.env, stdio: ['ignore', 'ignore', 'pipe'], detached: process.platform !== 'win32', windowsHide: true,
+    });
+    active.set(child, { tmp: run.tmp, closed: new Promise((r) => child.once('close', () => r())) });
     let stderr = '';
     let timedOut = false;
     let aborted = false;
@@ -60,16 +86,16 @@ function runProcess(args: string[], cwd: string, timeoutMs: number, tmp: string,
     });
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
-    }, timeoutMs);
+      killGroup(child);
+    }, run.timeoutMs);
     const onAbort = (): void => {
       aborted = true;
-      child.kill('SIGKILL');
+      killGroup(child);
     };
-    abort?.addEventListener('abort', onAbort, { once: true });
+    run.signal?.addEventListener('abort', onAbort, { once: true });
     const done = (): void => {
       clearTimeout(timer);
-      abort?.removeEventListener('abort', onAbort);
+      run.signal?.removeEventListener('abort', onAbort);
       active.delete(child);
     };
     child.on('error', (err) => {
@@ -101,7 +127,7 @@ export async function runScipPython(opts: ScipRunOptions): Promise<void> {
   log.info('scip_python_start', { args: args.slice(1), timeoutMs: opts.timeoutMs });
   const started = Date.now();
   try {
-    const exit = await runProcess(args, cwd, opts.timeoutMs, tmp, opts.signal);
+    const exit = await runProcess({ bin: process.execPath, args, cwd, timeoutMs: opts.timeoutMs, tmp, signal: opts.signal });
     log.info('scip_python_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, aborted: exit.aborted, ms: Date.now() - started });
     if (exit.aborted) throw new ScipRunError('scip-python cancelled');
     if (exit.timedOut) throw new ScipRunError(`scip-python timed out after ${opts.timeoutMs}ms\n${tail(exit.stderr)}`);
@@ -115,12 +141,12 @@ export async function runScipPython(opts: ScipRunOptions): Promise<void> {
 }
 
 /**
- * 结束本进程启动的所有 scip-python 子进程并删除它们的临时输出（serve / mcp 退出前调用，避免留下孤儿进程和 .tmp 文件）。
+ * 结束本进程启动的所有 SCIP 索引子进程（连同它们的进程组）并删除临时输出（serve / mcp 退出前调用，避免留下孤儿进程和 .tmp 文件）。
  * 返回结束的进程数；对应的构建会按解析失败处理。
  */
 export async function killActiveScipProcesses(): Promise<number> {
   const runs = [...active.entries()];
-  for (const [child] of runs) child.kill('SIGKILL');
+  for (const [child] of runs) killGroup(child);
   await Promise.all(runs.map(async ([, run]) => {
     await run.closed;
     await rm(run.tmp, { force: true });

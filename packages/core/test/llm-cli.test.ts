@@ -128,6 +128,17 @@ describe.skipIf(!posix)('resolveCliCommand', () => {
     expect(!r2.ok && r2.error.kind).toBe('not_executable');
   });
 
+  it('logs a missing command only when the result is not served from the cache', async () => {
+    const env = { PATH: tempDir() };
+    const home = tempDir();
+    const { result, lines } = await captureLogs(async () => [
+      resolveCliCommand('claude-code', 'no-such-cli-cached', env, { home }),
+      resolveCliCommand('claude-code', 'no-such-cli-cached', env, { home }),
+    ]);
+    expect(result.map((r) => r.ok)).toEqual([false, false]);
+    expect(lines.filter((l) => l.includes('llm_cli_command_missing'))).toHaveLength(1);
+  });
+
   it('reports command_not_found for unknown names and relative paths', () => {
     const r = resolveCliCommand('claude-code', 'no-such-cli-xyz', { PATH: tempDir() }, { home: tempDir(), noCache: true });
     expect(!r.ok && r.error.kind).toBe('command_not_found');

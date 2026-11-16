@@ -53,7 +53,7 @@ function toMarkdown(out: SimilarOutput): string {
 }
 
 /** codeinsight similar：在工作区或指定提交的快照上找重复实现，输出 JSON 或 Markdown 到 stdout */
-export async function runSimilarCommand(argv: string[]): Promise<number> {
+export async function runSimilarCommand(argv: string[], signal?: AbortSignal): Promise<number> {
   const args = parseSimilarArgs(argv);
   if (args.help) {
     process.stdout.write(SIMILAR_USAGE);
@@ -61,7 +61,7 @@ export async function runSimilarCommand(argv: string[]): Promise<number> {
   }
   const { repo, config, layout, store } = await openWorkspace(args.repo, args['data-dir']);
   try {
-    const { snapshot } = await buildSnapshot({ repo, store, layout, config, ref: args.ref });
+    const { snapshot } = await buildSnapshot({ repo, store, layout, config, ref: args.ref, signal });
     const minScore = args.minScore ?? config.similarMinScore;
     let queryIds: string[] | undefined;
     if (args.symbol !== undefined) {

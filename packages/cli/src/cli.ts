@@ -1,5 +1,5 @@
 import { constants } from 'node:os';
-import { flushOpencodeSessions, GitError, killActiveCliProcesses, ReviewArgsError } from '@codeinsight/core';
+import { flushOpencodeSessions, GitError, killActiveCliProcesses, killActiveScipProcesses, ReviewArgsError } from '@codeinsight/core';
 import { runAskCommand } from './commands/ask.js';
 import { runIndex } from './commands/index.js';
 import { runReviewCommand } from './commands/review.js';
@@ -30,8 +30,8 @@ const COMMANDS: Record<string, (argv: string[], signal: AbortSignal) => Promise<
   mcp: runMcpCommand,
 };
 
-/** 会启动本机 CLI 子进程的命令，由 runCli 统一处理退出信号；serve、mcp 自己处理关闭 */
-const LLM_COMMANDS = new Set(['ask', 'overview', 'review']);
+/** 会启动本机 CLI 或 SCIP 索引子进程的命令，由 runCli 统一处理退出信号；serve、mcp 自己处理关闭 */
+const CHILD_PROCESS_COMMANDS = new Set(['index', 'similar', 'ask', 'overview', 'review']);
 const STOP_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 
 interface StopWatch {
@@ -45,9 +45,9 @@ interface StopWatch {
 }
 
 /**
- * 收到 SIGINT / SIGTERM / SIGHUP 时：中止命令，结束本机 CLI 子进程（连同它的进程组，删 opencode 会话的除外），
- * 等会话删完后结束剩下的子进程；命令到这时还没返回就直接退出。退出码都是 128 + 信号编号。CLI 子进程自成进程组，
- * 不这样处理时终端的 Ctrl-C 到不了它们，进程会继续运行并消耗账号额度。再收到一次信号时立即退出。
+ * 收到 SIGINT / SIGTERM / SIGHUP 时：中止命令，结束 SCIP 索引子进程和本机 CLI 子进程（连同它们的进程组，删 opencode 会话的除外），
+ * 等会话删完后结束剩下的子进程；命令到这时还没返回就直接退出。退出码都是 128 + 信号编号。这些子进程自成进程组，
+ * 不这样处理时终端的 Ctrl-C 到不了它们，进程会继续运行（CLI 子进程还会消耗账号额度）。再收到一次信号时立即退出。
  */
 function watchStopSignals(): StopWatch {
   const ac = new AbortController();
@@ -60,7 +60,7 @@ function watchStopSignals(): StopWatch {
     if (exitCode !== undefined) process.exit(code);
     exitCode = code;
     ac.abort();
-    void stopCliProcesses()
+    void stopChildProcesses()
       .then(() => waitAtMost(done, EXIT_GRACE_MS))
       .finally(() => {
         if (!finished) process.exit(code);
@@ -89,8 +89,8 @@ async function waitAtMost(p: Promise<void>, ms: number): Promise<void> {
   clearTimeout(timer);
 }
 
-async function stopCliProcesses(): Promise<void> {
-  await killActiveCliProcesses({ keepSessionDelete: true });
+async function stopChildProcesses(): Promise<void> {
+  await Promise.all([killActiveScipProcesses(), killActiveCliProcesses({ keepSessionDelete: true })]);
   // 让被结束的调用走完收尾，把 opencode 会话放进删除队列
   await new Promise((r) => setImmediate(r));
   await flushOpencodeSessions();
@@ -108,7 +108,7 @@ export async function runCli(argv: string[]): Promise<number> {
     process.stderr.write(`unknown command: ${command}\n${USAGE}`);
     return 1;
   }
-  const stop = LLM_COMMANDS.has(command) ? watchStopSignals() : undefined;
+  const stop = CHILD_PROCESS_COMMANDS.has(command) ? watchStopSignals() : undefined;
   try {
     const code = await handler(argv.slice(1), stop?.signal ?? new AbortController().signal);
     return stop?.exitCode() ?? code;

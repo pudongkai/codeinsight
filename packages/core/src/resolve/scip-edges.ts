@@ -1,7 +1,7 @@
 import type { EdgeKind, EdgeRow } from '../model/types.js';
 import type { ExtractedFile, ExtractedSymbol } from '../extract/types.js';
 import { SCIP_ROLE_DEFINITION, type ScipDocument, type ScipIndex, type ScipOccurrence, type ScipRange } from '../scip/reader.js';
-import { continuedLines } from './python-lines.js';
+import { pythonRules, type ScipLanguageRules } from './scip-rules.js';
 import type { ResolveResult } from './types.js';
 
 /** 提取层与 SCIP 定义对不上的比例超过这个值时给出 warning */
@@ -18,13 +18,14 @@ interface FileTable {
   lines: string[];
   /** 该行的逻辑行是否延续到下一行 */
   continued: boolean[];
+  rules: ScipLanguageRules;
 }
 
 function posKey(line: number, col: number): string {
   return `${line}:${col}`;
 }
 
-function buildTable(file: ExtractedFile, source: string): FileTable {
+function buildTable(file: ExtractedFile, source: string, rules: ScipLanguageRules): FileTable {
   const byNamePos = new Map<string, ExtractedSymbol>();
   const byName = new Map<string, ExtractedSymbol[]>();
   const defs: ExtractedSymbol[] = [];
@@ -34,7 +35,7 @@ function buildTable(file: ExtractedFile, source: string): FileTable {
     byName.set(s.name, [...(byName.get(s.name) ?? []), s]);
     defs.push(s);
   }
-  return { file, module: file.symbols[0]!, byNamePos, byName, defs, lines: source.split('\n'), continued: continuedLines(source) };
+  return { file, module: file.symbols[0]!, byNamePos, byName, defs, lines: source.split('\n'), continued: rules.continuedLines(source), rules };
 }
 
 function occurrenceText(lines: string[], r: ScipRange): string {
@@ -69,17 +70,13 @@ interface DefinitionMap {
   unmatched: number;
 }
 
-function isModuleDefinition(occ: ScipOccurrence): boolean {
-  return occ.symbol.endsWith('/__init__:') && occ.range.startLine === 0 && occ.range.startChar === 0;
-}
-
 /** SCIP 符号 → 提取层符号 id。只收录本快照文件里的定义，其他符号（外部库、局部变量）没有对应项 */
 function mapDefinitions(docs: [ScipDocument, FileTable][]): DefinitionMap {
   const map: DefinitionMap = { scipToId: new Map(), total: 0, unmatched: 0 };
   for (const [doc, t] of docs) {
     for (const occ of doc.occurrences) {
       if (!(occ.roles & SCIP_ROLE_DEFINITION)) continue;
-      if (isModuleDefinition(occ)) {
+      if (t.rules.isModuleDefinition(occ)) {
         map.scipToId.set(occ.symbol, t.module.id);
         continue;
       }
@@ -108,7 +105,7 @@ function isCallAt(t: FileTable, r: ScipRange): boolean {
   for (let row = r.endLine; row < t.lines.length; row++) {
     const line = t.lines[row]!;
     const rest = (row === r.endLine ? line.slice(r.endChar) : line).trim();
-    if (rest.length > 0 && rest[0] !== '#' && rest !== '\\') return rest[0] === '(';
+    if (rest.length > 0 && !t.rules.skipsRest(rest)) return rest[0] === '(';
     if (!t.continued[row]) return false;
   }
   return false;
@@ -153,19 +150,20 @@ function documentEdges(doc: ScipDocument, t: FileTable, defs: DefinitionMap, sna
 
 /**
  * SCIP → 边：不在文件清单里的 document 丢弃；src 为引用所在的最内层定义（顶层代码归属 module 符号），
- * dst 必须是本快照内定义的符号，外部符号丢弃。
+ * dst 必须是本快照内定义的符号，外部符号丢弃。和语言有关的判断用 rules（默认 Python）。
  */
 export function scipToEdges(
   index: ScipIndex,
   files: ExtractedFile[],
   sources: Map<string, string>,
   snapshotId: number,
+  rules: ScipLanguageRules = pythonRules,
 ): ResolveResult {
   const byPath = new Map(files.map((f) => [f.path, f]));
   const docs: [ScipDocument, FileTable][] = [];
   for (const doc of index.documents) {
     const file = byPath.get(doc.relativePath);
-    if (file) docs.push([doc, buildTable(file, sources.get(file.path) ?? '')]);
+    if (file) docs.push([doc, buildTable(file, sources.get(file.path) ?? '', rules)]);
   }
   const defs = mapDefinitions(docs);
   const edges = docs.flatMap(([doc, t]) => documentEdges(doc, t, defs, snapshotId));

@@ -10,6 +10,7 @@ import type {
   ModelKind,
   ReviewRow,
   ReviewStatus,
+  EdgeSources,
   SnapshotKind,
   SnapshotRow,
   StepStatus,
@@ -21,7 +22,7 @@ import { ExtractCacheTable } from './extract-cache.js';
 import { OverviewTable } from './overviews.js';
 import { isProcessAlive } from './process.js';
 import { ProposalTable } from './proposals.js';
-import { EXTRA_SCHEMA_SQL, EXTRA_TABLES, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { EXTRA_COLUMNS, EXTRA_SCHEMA_SQL, EXTRA_TABLES, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 import { immediateTransaction } from './transaction.js';
 
 type Row = Record<string, SQLInputValue>;
@@ -77,6 +78,27 @@ function ensureExtraTables(db: DatabaseSync): void {
   log.info('index_db_tables_added', { tables: missing.join(',') });
 }
 
+function missingColumns(db: DatabaseSync): (typeof EXTRA_COLUMNS)[number][] {
+  return EXTRA_COLUMNS.filter((c) => {
+    const cols = db.prepare(`PRAGMA table_info(${c.table})`).all() as Row[];
+    return !cols.some((r) => r.name === c.column);
+  });
+}
+
+/**
+ * 补上已有表缺少的列（EXTRA_COLUMNS）。先只读表结构，列都在时直接返回；
+ * 有缺的才开写事务，在事务里再查一次（并发进程可能已经加好）后 ALTER TABLE ADD COLUMN。
+ */
+function ensureExtraColumns(db: DatabaseSync): void {
+  if (missingColumns(db).length === 0) return;
+  const added = immediateTransaction(db, () => {
+    const missing = missingColumns(db);
+    for (const c of missing) db.exec(`ALTER TABLE ${c.table} ADD COLUMN ${c.column} ${c.type}`);
+    return missing;
+  });
+  if (added.length > 0) log.info('index_db_columns_added', { columns: added.map((c) => `${c.table}.${c.column}`).join(',') });
+}
+
 /**
  * 打开数据库；schema 版本不一致（或库是空的）时删库重建（连同额外表），版本一致时补上缺少的额外表。
  * 返回值的 rebuilt 表示本次是否新建了库。
@@ -88,6 +110,7 @@ export function openDatabase(dbPath: string): { db: DatabaseSync; rebuilt: boole
   const version = opened.version;
   if (version === SCHEMA_VERSION) {
     ensureExtraTables(db);
+    ensureExtraColumns(db);
     return { db, rebuilt: false };
   }
   if (version !== undefined) {
@@ -104,6 +127,7 @@ export function openDatabase(dbPath: string): { db: DatabaseSync; rebuilt: boole
     }
     db.exec(EXTRA_SCHEMA_SQL);
   });
+  ensureExtraColumns(db);
   return { db, rebuilt: true };
 }
 
@@ -126,6 +150,7 @@ function toSnapshot(r: Row): SnapshotRow {
     extractStatus: r.extract_status as StepStatus,
     resolverStatus: r.resolver_status as StepStatus,
     resolverError: (r.resolver_error as string | null) ?? null,
+    edgeSources: r.edge_sources == null ? null : (JSON.parse(String(r.edge_sources)) as EdgeSources),
     createdAt: Number(r.created_at),
     lastUsedAt: Number(r.last_used_at),
   };
@@ -319,6 +344,15 @@ export class Store {
   /** 记录快照调用边所用的提取和解析代码指纹 */
   setEdgesCodeHash(snapshotId: number, codeHash: string): void {
     this.db.prepare('INSERT OR REPLACE INTO snapshot_edges_code(snapshot_id, code_hash) VALUES (?, ?)').run(snapshotId, codeHash);
+  }
+
+  clearEdgesCodeHash(snapshotId: number): void {
+    this.db.prepare('DELETE FROM snapshot_edges_code WHERE snapshot_id = ?').run(snapshotId);
+  }
+
+  /** 各语言调用边的来源；null 表示没有记录（按全部来自 scip 处理） */
+  setEdgeSources(snapshotId: number, sources: EdgeSources | null): void {
+    this.db.prepare('UPDATE snapshots SET edge_sources = ? WHERE id = ?').run(sources ? JSON.stringify(sources) : null, snapshotId);
   }
 
   getEdgesCodeHash(snapshotId: number): string | undefined {

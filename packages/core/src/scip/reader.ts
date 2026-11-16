@@ -48,10 +48,28 @@ function toRange(v: number[]): ScipRange | undefined {
   return undefined;
 }
 
+/**
+ * SCIP v0.10 起的位置子消息：SingleLineRange 为 (line, start_character, end_character)，
+ * MultiLineRange 为 (start_line, start_character, end_line, end_character)；没写的字段为 0
+ */
+function readRangeMessage(r: BinaryReader, multiLine: boolean): ScipRange {
+  const v = multiLine ? [0, 0, 0, 0] : [0, 0, 0];
+  const end = r.uint32() + r.pos;
+  while (r.pos < end) {
+    const [no, wt] = r.tag();
+    if (no >= 1 && no <= v.length && wt === WireType.Varint) v[no - 1] = r.int32();
+    else r.skip(wt, no);
+  }
+  return toRange(v)!;
+}
+
+/** Occurrence 的位置：旧格式为打包的 range（字段 1）和 enclosing_range（字段 7），新格式为字段 8/9 和 10/11 */
 function readOccurrence(r: BinaryReader, len: number): ScipOccurrence | undefined {
   const end = r.pos + len;
   const range: number[] = [];
   const enclosing: number[] = [];
+  let rg: ScipRange | undefined;
+  let enc: ScipRange | undefined;
   let symbol = '';
   let roles = 0;
   while (r.pos < end) {
@@ -60,10 +78,12 @@ function readOccurrence(r: BinaryReader, len: number): ScipOccurrence | undefine
     else if (no === 2) symbol = r.string();
     else if (no === 3) roles = r.int32();
     else if (no === 7) readPackedInt32(r, wt, enclosing);
+    else if (no === 8 || no === 9) rg = readRangeMessage(r, no === 9);
+    else if (no === 10 || no === 11) enc = readRangeMessage(r, no === 11);
     else r.skip(wt, no);
   }
-  const rg = toRange(range);
-  return rg ? { range: rg, symbol, roles, enclosingRange: toRange(enclosing) } : undefined;
+  rg ??= toRange(range);
+  return rg ? { range: rg, symbol, roles, enclosingRange: enc ?? toRange(enclosing) } : undefined;
 }
 
 function readDocument(r: BinaryReader, len: number): ScipDocument {

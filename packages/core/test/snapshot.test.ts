@@ -1,8 +1,8 @@
 import { cpSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildSnapshot, initDataDir, loadConfig, ScipPythonResolver, setLogSink, Store } from '../src/index.js';
-import type { BuildSnapshotResult, DataDirLayout, EdgeRow, SymbolRow } from '../src/index.js';
+import { buildSnapshot, FAILED_RERESOLVE_AFTER_MS, initDataDir, loadConfig, ScipPythonResolver, setLogSink, Store } from '../src/index.js';
+import type { BuildSnapshotResult, DataDirLayout, EdgeRow, EdgeSources, ResolveResult, Resolver, SymbolRow } from '../src/index.js';
 import { commitAll, git, tempDir, writeFiles } from './helpers/git-repo.js';
 
 const FIXTURE = path.join(import.meta.dirname, 'fixtures', 'py-basic');
@@ -19,6 +19,7 @@ interface Env {
   repo: string;
   store: Store;
   layout: DataDirLayout;
+  config: Awaited<ReturnType<typeof loadConfig>>;
   build(opts?: { ref?: string; bin?: string }): Promise<BuildSnapshotResult>;
 }
 
@@ -28,7 +29,7 @@ async function setup(repo: string): Promise<Env> {
   const store = new Store(layout.dbPath);
   const build = (opts: { ref?: string; bin?: string } = {}) =>
     buildSnapshot({ repo, store, layout, config, ref: opts.ref, resolver: new ScipPythonResolver({ bin: opts.bin }) });
-  return { repo, store, layout, build };
+  return { repo, store, layout, config, build };
 }
 
 /** 把边转成 `kind src -> dst` 的可读形式 */
@@ -235,4 +236,56 @@ describe('concurrent builds of the same snapshot', () => {
     expect(a.snapshot.resolverStatus).toBe('failed');
     expect(b.snapshot.resolverStatus).toBe('failed');
   }, 120_000);
+});
+
+/** 记录 prepare 次数的假解析器：持锁路径判断要不要重新解析时才会 prepare */
+class FakeResolver implements Resolver {
+  readonly name = 'fake';
+  readonly version = 'v1';
+  prepared = 0;
+  constructor(private readonly opts: { sources?: EdgeSources; reresolve?: boolean; fail?: boolean } = {}) {}
+  async prepare(): Promise<void> {
+    this.prepared++;
+  }
+  async resolve(): Promise<ResolveResult> {
+    if (this.opts.fail) throw new Error('fake resolve failed');
+    return { edges: [], sources: this.opts.sources };
+  }
+  async needsReresolve(): Promise<boolean> {
+    return this.opts.reresolve ?? false;
+  }
+}
+
+describe('reusing a snapshot whose edges come from name matching', () => {
+  async function built(sources: EdgeSources): Promise<{ env: Env; id: number; build: (r: FakeResolver) => Promise<BuildSnapshotResult> }> {
+    const env = await setup(fixtureRepo());
+    const build = (resolver: FakeResolver) => buildSnapshot({ repo: env.repo, store: env.store, layout: env.layout, config: env.config, ref: 'HEAD', resolver });
+    const first = await build(new FakeResolver({ sources }));
+    expect(first.snapshot.edgeSources).toEqual(sources);
+    return { env, id: first.snapshot.id, build };
+  }
+
+  it('reuses without taking the lock when the tool failed recently, and checks with the resolver otherwise', async () => {
+    const { env, id, build } = await built({ python: { source: 'name_match', reason: 'failed', at: Date.now() } });
+    const recent = new FakeResolver();
+    expect(await build(recent)).toMatchObject({ cached: true, resolveRetried: false });
+    expect(recent.prepared).toBe(0);
+
+    env.store.setEdgeSources(id, { python: { source: 'name_match', reason: 'failed', at: Date.now() - FAILED_RERESOLVE_AFTER_MS - 1 } });
+    const old = new FakeResolver();
+    expect(await build(old)).toMatchObject({ cached: true, resolveRetried: false });
+    expect(old.prepared).toBe(1);
+
+    env.store.setEdgeSources(id, { python: { source: 'name_match', reason: 'not_found' } });
+    const notFound = new FakeResolver();
+    expect(await build(notFound)).toMatchObject({ cached: true, resolveRetried: false });
+    expect(notFound.prepared).toBe(1);
+  }, 60_000);
+
+  it('clears the edge sources and the edge code hash when re-resolving fails', async () => {
+    const { env, id, build } = await built({ python: { source: 'name_match', reason: 'not_found' } });
+    const result = await build(new FakeResolver({ reresolve: true, fail: true }));
+    expect(result).toMatchObject({ resolveRetried: true, snapshot: { resolverStatus: 'failed', edgeSources: null } });
+    expect(env.store.getEdgesCodeHash(id)).toBeUndefined();
+  }, 60_000);
 });

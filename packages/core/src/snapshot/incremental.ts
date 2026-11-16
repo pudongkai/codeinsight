@@ -299,13 +299,13 @@ export async function sameResolverInput(prev: PreviousSnapshot, read: ReadResult
   return true;
 }
 
-/** 调用边依赖的代码版本：提取代码指纹（决定符号 id）和解析器的名称、版本 */
-export function edgesCodeHash(resolver: Resolver): string {
-  return sha1([extractCodeHash(), resolver.name, resolver.version ?? ''].join('\0'));
+/** 调用边依赖的代码版本：提取代码指纹（决定符号 id）和解析器的名称、版本（默认为 prepare 后的 version） */
+export function edgesCodeHash(resolver: Resolver, version = resolver.version): string {
+  return sha1([extractCodeHash(), resolver.name, version ?? ''].join('\0'));
 }
 
 /**
- * 把上一个快照的调用边复制到 snap，返回边数；上一个快照已被清理、解析状态变了，
+ * 把上一个快照的调用边和各语言的边来源复制到 snap，返回边数；上一个快照已被清理、解析状态变了，
  * 或它的调用边不是用当前代码版本生成的时返回 undefined
  */
 export function reuseEdges(store: Store, prev: SnapshotRow, snap: SnapshotRow, codeHash: string): number | undefined {
@@ -315,6 +315,7 @@ export function reuseEdges(store: Store, prev: SnapshotRow, snap: SnapshotRow, c
     store.clearSnapshotData(snap.id, 'edges');
     const edges = store.copyEdges(p.id, snap.id);
     store.setSnapshotStatus(snap.id, { resolverStatus: 'ok', resolverError: p.resolverError });
+    store.setEdgeSources(snap.id, p.edgeSources);
     store.setEdgesCodeHash(snap.id, codeHash);
     return edges;
   });

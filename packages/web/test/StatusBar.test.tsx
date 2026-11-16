@@ -70,3 +70,20 @@ describe('StatusBar index source', () => {
     expect(screen.queryByTestId('code-changed')).toBeNull();
   });
 });
+
+describe('StatusBar resolver warning', () => {
+  it('names the failed languages when only some languages failed, and keeps the general warning otherwise', () => {
+    const base = status();
+    const partial = { ...base, snapshot: { ...base.snapshot!, resolverStatus: 'failed', failedLanguages: ['python'] } };
+    const { unmount } = render(<StatusBar status={partial} onReindex={() => undefined} onRepoSwitched={() => undefined} />);
+    expect(screen.getByTestId('resolver-warning').textContent).toBe('Python 调用关系解析失败，这部分的邻居图不可用');
+    unmount();
+    renderBar({ ...base, snapshot: { ...base.snapshot!, resolverStatus: 'failed' } });
+    expect(screen.getByTestId('resolver-warning').textContent).toBe('调用关系解析失败，邻居图不可用');
+  });
+
+  it('shows no warning when resolution succeeded', () => {
+    renderBar(status());
+    expect(screen.queryByTestId('resolver-warning')).toBeNull();
+  });
+});

@@ -31,6 +31,13 @@ export interface IndexJobView {
   finishedAt?: number;
 }
 
+export interface EdgeSourceView {
+  source: 'scip' | 'name_match' | 'failed';
+  reason?: 'not_found' | 'failed' | 'disabled';
+  at?: number;
+  note?: string;
+}
+
 export interface SnapshotView {
   id: number;
   kind: 'commit' | 'working';
@@ -40,6 +47,10 @@ export interface SnapshotView {
   createdAt: number;
   resolverStatus: string;
   resolverError: string | null;
+  /** 各语言调用边的来源；旧快照为 null（按全部来自 scip） */
+  edgeSources: Record<string, EdgeSourceView> | null;
+  /** 调用关系解析失败的语言（其他语言的调用关系照常可用） */
+  failedLanguages: string[];
   /** 工作区快照包含未提交改动 */
   dirty: boolean;
 }

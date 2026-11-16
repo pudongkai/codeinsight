@@ -8,7 +8,7 @@ Build the index for the working tree, or for a commit when --ref is given.
 `;
 
 /** codeinsight index：构建快照并在 stdout 输出一行 JSON 摘要 */
-export async function runIndex(argv: string[]): Promise<number> {
+export async function runIndex(argv: string[], signal?: AbortSignal): Promise<number> {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -25,7 +25,7 @@ export async function runIndex(argv: string[]): Promise<number> {
   }
   const { repo, config, layout, store } = await openWorkspace(values.repo, values['data-dir']);
   try {
-    const result = await buildSnapshot({ repo, store, layout, config, ref: values.ref });
+    const result = await buildSnapshot({ repo, store, layout, config, ref: values.ref, signal });
     const s = result.snapshot;
     const summary = {
       snapshotId: s.id, kind: s.kind, commitSha: s.commitSha, contentKey: s.contentKey, cached: result.cached, resolveRetried: result.resolveRetried,
