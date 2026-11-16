@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import { log } from '../../log.js';
 import { LlmTruncatedError, type CliError, type LlmClient, type LlmRequest } from '../index.js';
 import type { CliClientOptions } from './claude-code.js';
 import { cliError, firstLine, kindOfStatus, runErrorOf } from './errors.js';
-import { logCliExit, logCliFailure, runCli, withCliTempDir, writeCliFile, type CliExit, type CliSpec, type CliUsage } from './process.js';
+import { logCliExit, logCliFailure, runCli, startCliServer, withCliTempDir, writeCliFile, type CliExit, type CliServer, type CliSpec, type CliUsage } from './process.js';
 import { flattenMessages } from './prompt.js';
 
 /**
@@ -62,8 +63,10 @@ export function opencodeEnv(config: Record<string, unknown>): Record<string, str
   };
 }
 
-export function opencodeArgs(model?: string): string[] {
-  return ['run', '--standalone', '--format', 'json', '--agent', OPENCODE_AGENT, '--title', 'codeinsight', ...(model ? [`--model=${model}`] : [])];
+/** server 为私有 opencode serve 的地址时连它，否则用 --standalone 自带的私有服务 */
+export function opencodeArgs(model?: string, server?: string): string[] {
+  const target = server ? ['--server', server] : ['--standalone'];
+  return ['run', ...target, '--format', 'json', '--agent', OPENCODE_AGENT, '--title', 'codeinsight', ...(model ? [`--model=${model}`] : [])];
 }
 
 // ---------- 用户全局配置里的 MCP 服务名 ----------
@@ -309,6 +312,77 @@ export function opencodeRunContext(o: Pick<CliClientOptions, 'command' | 'extraE
 /** serve 关闭、overview / ask / review 命令结束前调用，等会话删除队列清空（最多 timeoutMs） */
 export function flushOpencodeSessions(timeoutMs = DEFAULT_FLUSH_MS): Promise<number> {
   return opencodeSessions.flush(timeoutMs);
+}
+
+// ---------- 私有 opencode serve（问答用） ----------
+
+const SERVE_READY = /listening on (http:\/\/127\.0\.0\.1:\d+)/;
+const SERVE_READY_TIMEOUT_MS = 20_000;
+/** 等 MCP 服务连上的最长时间，和 Claude Code 等 MCP 服务的时限相当 */
+export const OPENCODE_MCP_WAIT_MS = 30_000;
+const MCP_POLL_MS = 250;
+const MCP_REQUEST_TIMEOUT_MS = 3_000;
+
+export interface OpencodeServer extends CliServer {
+  /** 连接这个服务的 opencode run 需要的环境变量（密码） */
+  env: Record<string, string>;
+}
+
+export interface OpencodeServerOptions {
+  command: string;
+  cwd: string;
+  /** opencodeEnv 的结果：带问答 agent 和 MCP 配置 */
+  env: Record<string, string>;
+  extraEnv?: Record<string, string>;
+  baseEnv?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+}
+
+/**
+ * 启动只监听 127.0.0.1、随机端口、随机密码的 opencode serve。
+ * `opencode run --standalone` 在 MCP 服务连上之前就定下了本次可用的工具，之后不再更新，模型拿不到 MCP 工具；
+ * 所以问答先起私有服务，等 MCP 服务连上后再用 `run --server` 连它。
+ */
+export async function startOpencodeServer(o: OpencodeServerOptions): Promise<OpencodeServer> {
+  const password = randomBytes(24).toString('base64url');
+  const env = { OPENCODE_SERVER_PASSWORD: password };
+  const server = await startCliServer({
+    provider: 'opencode', command: o.command, mode: 'ask', cwd: o.cwd, extraEnv: o.extraEnv, stdin: '',
+    args: ['serve', '--hostname', '127.0.0.1', '--port', '0'], env: { ...o.env, ...env },
+  }, { baseEnv: o.baseEnv, signal: o.signal, readyTimeoutMs: SERVE_READY_TIMEOUT_MS, ready: SERVE_READY });
+  return { ...server, env };
+}
+
+type McpEntry = { name?: unknown; status?: { status?: unknown } };
+
+async function mcpStatus(server: OpencodeServer, dir: string, name: string, signal?: AbortSignal): Promise<string> {
+  const url = `${server.url}/api/mcp?directory=${encodeURIComponent(dir)}`;
+  const auth = Buffer.from(`opencode:${server.env.OPENCODE_SERVER_PASSWORD}`).toString('base64');
+  const timeout = AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS);
+  const res = await fetch(url, { headers: { authorization: `Basic ${auth}` }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+  if (!res.ok) return `http_${res.status}`;
+  const body = (await res.json()) as { data?: McpEntry[] };
+  const status = body.data?.find((e) => e.name === name)?.status?.status;
+  return typeof status === 'string' ? status : 'pending';
+}
+
+/**
+ * 轮询私有服务的 /api/mcp（第一次请求会让它为该目录连接 MCP 服务），直到 name 为 connected。
+ * 返回最后看到的状态：connected，或 failed 等失败状态，等满 timeoutMs 仍在连接时为 pending。被中止时抛 AbortError。
+ */
+export async function waitOpencodeMcp(server: OpencodeServer, dir: string, name: string, signal?: AbortSignal, timeoutMs = OPENCODE_MCP_WAIT_MS): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let status = 'pending';
+  while (Date.now() < deadline) {
+    signal?.throwIfAborted();
+    status = await mcpStatus(server, dir, name, signal).catch((err: Error) => {
+      if (signal?.aborted) throw err;
+      return 'pending';
+    });
+    if (status === 'connected' || status === 'failed' || status === 'disabled' || status.startsWith('http_4')) return status;
+    await new Promise((r) => setTimeout(r, MCP_POLL_MS));
+  }
+  return status;
 }
 
 // ---------- 客户端 ----------

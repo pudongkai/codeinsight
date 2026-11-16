@@ -396,3 +396,80 @@ export function logCliExit(spec: Pick<CliSpec, 'provider' | 'mode'>, exit: CliEx
 export function logCliFailure(spec: Pick<CliSpec, 'provider' | 'mode'>, err: CliError, exit: CliExit): void {
   log.warn('llm_cli_failed', { provider: spec.provider, mode: spec.mode, kind: err.kind, exitCode: exit.exitCode, stderr: firstLine(exit.stderrTail) || undefined });
 }
+
+// ---------- 常驻子进程（如 opencode serve） ----------
+
+export interface CliServerOptions {
+  baseEnv?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  /** 等就绪输出的最长时间 */
+  readyTimeoutMs: number;
+  /** stdout 里表示就绪的输出，第一个捕获组是要返回的地址 */
+  ready: RegExp;
+}
+
+export interface CliServer {
+  url: string;
+  /** 结束进程组并等它退出 */
+  stop(): Promise<void>;
+}
+
+/** 等 stdout 出现就绪输出；进程先退出、超时或被中止时返回原因 */
+function waitReady(child: ChildProcess, opts: CliServerOptions): Promise<{ url: string } | { problem: 'exited' | 'timeout' | 'aborted'; stderr: string }> {
+  return new Promise((resolve) => {
+    let out = '';
+    let stderr = '';
+    const done = (v: Awaited<ReturnType<typeof waitReady>>): void => {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      child.stdout!.removeListener('data', onOut);
+      child.removeListener('exit', onExit);
+      resolve(v);
+    };
+    const onOut = (chunk: string): void => {
+      out = (out + chunk).slice(-STDERR_TAIL_CHARS);
+      const m = opts.ready.exec(out);
+      if (m?.[1]) done({ url: m[1] });
+    };
+    const onExit = (): void => done({ problem: 'exited', stderr });
+    const onAbort = (): void => done({ problem: 'aborted', stderr });
+    const timer = setTimeout(() => done({ problem: 'timeout', stderr }), opts.readyTimeoutMs);
+    child.stdout!.setEncoding('utf8');
+    child.stderr!.setEncoding('utf8');
+    child.stdout!.on('data', onOut);
+    child.stderr!.on('data', (chunk: string) => (stderr = (stderr + chunk).slice(-STDERR_TAIL_CHARS)));
+    child.on('exit', onExit);
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts.signal?.aborted) onAbort();
+  });
+}
+
+/**
+ * 启动一个常驻的 CLI 子进程，等它在 stdout 输出就绪地址后返回。和 runCli 一样登记在本进程的子进程表里，
+ * killActiveCliProcesses 会结束它。启动失败、超时时抛 CliError；被中止时抛 AbortError。
+ */
+export async function startCliServer(spec: CliSpec, opts: CliServerOptions): Promise<CliServer> {
+  if (blocked(spec.mode) || opts.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+  const { env } = await buildCliEnv(opts.baseEnv ?? process.env, spec.extraEnv, spec.provider, spec.cwd, spec.env);
+  log.info('llm_cli_server_start', { provider: spec.provider, mode: spec.mode, command: path.basename(spec.command), options: optionNames(spec.args) });
+  const child = spawn(spec.command, spec.args, { cwd: spec.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false, windowsHide: true, detached: process.platform !== 'win32' });
+  let closed = false;
+  const terminate = makeTerminator(child, () => closed);
+  const closedPromise = new Promise<void>((resolve) => child.on('close', () => {
+    closed = true;
+    active.delete(child);
+    resolve();
+  }));
+  active.set(child, { mode: spec.mode, kill: terminate, closed: closedPromise });
+  const stop = async (): Promise<void> => {
+    if (!closed) terminate();
+    await closedPromise;
+  };
+  child.on('error', () => undefined);
+  const r = await waitReady(child, opts);
+  if ('url' in r) return { url: r.url, stop };
+  await stop();
+  log.warn('llm_cli_server_failed', { provider: spec.provider, problem: r.problem, stderr: firstLine(r.stderr) || undefined });
+  if (r.problem === 'aborted') throw new DOMException('aborted', 'AbortError');
+  throw cliError(spec.provider, r.problem === 'timeout' ? 'timeout' : 'cli_failed', firstLine(r.stderr) || `${path.basename(spec.command)} ${spec.args[0] ?? ''} did not start`);
+}

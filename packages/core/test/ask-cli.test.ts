@@ -21,6 +21,7 @@ interface Rec {
   mcp?: { mode: string; content: { mcpServers: Record<string, { type: string; command: string; args: string[] }> } };
   env: Record<string, string>;
   sessionDelete?: string;
+  serve?: boolean;
 }
 
 let recordFile = '';
@@ -33,7 +34,7 @@ function scenario(name: string, env: Record<string, string> = {}): void {
   recordFile = path.join(tempDir('ci-ask-cli-rec-'), 'record.jsonl');
   process.env.FAKE_CLI_SCENARIO = name;
   process.env.FAKE_CLI_RECORD = recordFile;
-  for (const k of ['FAKE_CLI_TOOL_RESULT', 'FAKE_CLI_TOOL_ERROR', 'FAKE_CLI_MCP_STATUS', 'FAKE_CLI_NO_USAGE', 'FAKE_CLI_RECORD_ENV']) delete process.env[k];
+  for (const k of ['FAKE_CLI_TOOL_RESULT', 'FAKE_CLI_TOOL_ERROR', 'FAKE_CLI_MCP_STATUS', 'FAKE_CLI_NO_USAGE', 'FAKE_CLI_RECORD_ENV', 'FAKE_OPENCODE_MCP_STATUS', 'FAKE_OPENCODE_SERVE_FAIL']) delete process.env[k];
   Object.assign(process.env, env);
 }
 
@@ -284,6 +285,36 @@ describe('CLI question answering (opencode)', () => {
     expect(config.mcp.codeinsight.command.slice(0, 4)).toEqual([TOOL_SERVER.command, ...TOOL_SERVER.args]);
     await flushOpencodeSessions(5_000);
     expect(records().some((r) => r.sessionDelete === 'ses_fake123')).toBe(true);
+  });
+
+  it('starts a private opencode serve on 127.0.0.1 with a random password, runs against it, and stops it afterwards', async () => {
+    scenario('stream', { FAKE_CLI_RECORD_ENV: 'OPENCODE_SERVER_PASSWORD,OPENCODE_CONFIG_CONTENT' });
+    const { result } = await ask(opencode());
+    expect(result.status).toBe('done');
+    const [serve, run] = records();
+    expect(serve!.argv).toEqual(['serve', '--hostname', '127.0.0.1', '--port', '0']);
+    expect(serve!.env.OPENCODE_SERVER_PASSWORD).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(serve!.env.OPENCODE_CONFIG_CONTENT).toBe(run!.env.OPENCODE_CONFIG_CONTENT);
+    expect(run!.argv.slice(0, 3)).toEqual(['run', '--server', expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/)]);
+    expect(run!.argv).not.toContain('--standalone');
+    expect(run!.env.OPENCODE_SERVER_PASSWORD).toBe(serve!.env.OPENCODE_SERVER_PASSWORD);
+    expect(alive(serve!.pid)).toBe(false);
+  });
+
+  it('fails without running the question when the codeinsight tool service does not connect, and stops the server', async () => {
+    scenario('stream', { FAKE_OPENCODE_MCP_STATUS: 'failed' });
+    const { result } = await ask(opencode());
+    expect(result.status).toBe('failed');
+    expect(result.answer).toBe('');
+    expect(records().filter((r) => r.argv[0] === 'run')).toHaveLength(0);
+    expect(alive(records()[0]!.pid)).toBe(false);
+  });
+
+  it('fails when the private server does not start', async () => {
+    scenario('stream', { FAKE_OPENCODE_SERVE_FAIL: '1' });
+    const { result } = await ask(opencode());
+    expect(result.status).toBe('failed');
+    expect(records().filter((r) => r.argv[0] === 'run')).toHaveLength(0);
   });
 
   it('tool_use lines with status error are tool errors', async () => {

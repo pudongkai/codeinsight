@@ -7,7 +7,7 @@ import {
   askJson, buildSnapshot, ClaudeCodeClient, claudeArgs, CliError, createLlmClient, flattenMessages, flushOpencodeSessions, initDataDir,
   INTENT_JSON_SCHEMA, isCliClient, jsonRetryPrompt, killActiveCliProcesses, llmClientFromConfig, llmIdentity, LlmTruncatedError, loadConfig,
   OPENCODE_PERMISSIONS_VERIFIED, OpencodeClient, opencodeArgs, OVERVIEW_JSON_SCHEMAS, parseJsonReply, resetCliShutdown, resolveCliCommand, runCli, runIntentCheck,
-  runOverview, setLogSink, Store, withCliTempDir, type CliClientOptions, type CliSpec, type LlmRequest,
+  runOverview, setLogSink, Store, waitOpencodeMcp, withCliTempDir, type CliClientOptions, type CliSpec, type LlmRequest, type OpencodeServer,
 } from '../src/index.js';
 import { commitAll, git, tempDir } from './helpers/git-repo.js';
 
@@ -521,4 +521,29 @@ describe.skipIf(!posix)('overview and intent check through a fake Claude Code', 
       store.close();
     }
   }, 60_000);
+});
+
+describe('waitOpencodeMcp', () => {
+  async function fakeServer(data: unknown[]): Promise<{ server: OpencodeServer; close: () => void }> {
+    const http = createServer((req, res) => {
+      const ok = req.headers.authorization === `Basic ${Buffer.from('opencode:pw').toString('base64')}`;
+      res.writeHead(ok ? 200 : 401, { 'content-type': 'application/json' }).end(ok ? JSON.stringify({ data }) : '');
+    });
+    await new Promise<void>((r) => http.listen(0, '127.0.0.1', () => r()));
+    const port = (http.address() as { port: number }).port;
+    return { server: { url: `http://127.0.0.1:${port}`, env: { OPENCODE_SERVER_PASSWORD: 'pw' }, stop: async () => undefined }, close: () => http.close() };
+  }
+
+  it('returns connected once the server lists it, pending when it never shows up, and stops when aborted', async () => {
+    const up = await fakeServer([{ name: 'codeinsight', status: { status: 'connected' } }]);
+    const none = await fakeServer([]);
+    try {
+      expect(await waitOpencodeMcp(up.server, '/tmp/x', 'codeinsight')).toBe('connected');
+      expect(await waitOpencodeMcp(none.server, '/tmp/x', 'codeinsight', undefined, 600)).toBe('pending');
+      await expect(waitOpencodeMcp(none.server, '/tmp/x', 'codeinsight', AbortSignal.timeout(300))).rejects.toThrow();
+    } finally {
+      up.close();
+      none.close();
+    }
+  });
 });

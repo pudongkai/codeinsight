@@ -12,7 +12,8 @@ export { commonCliDirs, resolveCliCommand, type ResolvedCommand, type ResolveCom
 export { cliError } from './errors.js';
 export {
   classifyOpencodeError, flushOpencodeSessions, newOpencodeOutput, OPENCODE_PERMISSIONS_VERIFIED, OpencodeClient, opencodeArgs, opencodeConfig, opencodeEnv,
-  opencodeGlobalMcpNames, opencodeRunContext, OpencodeSessionCleaner, opencodeSessions, opencodeUsage, parseOpencodeLine, type OpencodeOutput,
+  opencodeGlobalMcpNames, opencodeRunContext, OpencodeSessionCleaner, opencodeSessions, opencodeUsage, parseOpencodeLine, startOpencodeServer, waitOpencodeMcp,
+  type OpencodeOutput, type OpencodeServer,
 } from './opencode.js';
 export { buildCliEnv, claudeSettingsPath, killActiveCliProcesses, resetCliShutdown, runCli, withCliTempDir, writeCliFile, type CliExit, type CliMode, type CliSpec, type CliUsage, type RunCliOptions } from './process.js';
 export { flattenMessages } from './prompt.js';

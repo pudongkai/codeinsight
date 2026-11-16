@@ -2,7 +2,10 @@
 // 假的 opencode 命令：`run` 按 FAKE_CLI_SCENARIO 输出 `--format json` 的行（逗号分隔时第 n 次运行用第 n 项），
 // `session delete <id>` 只记录（FAKE_OPENCODE_DELETE_FAIL=1 时以 1 退出）。每次运行追加一行 JSON 到 FAKE_CLI_RECORD，
 // 内容同 fake-claude.mjs。问答场景（stream、steps-exhausted）输出 codeinsight_ 前缀的 tool_use 行，不启动 MCP 服务。
+// `serve` 在 127.0.0.1 随机端口起 HTTP 服务并输出就绪行，`/api/mcp` 校验 OPENCODE_SERVER_PASSWORD 后按
+// FAKE_OPENCODE_MCP_STATUS 返回 codeinsight 的状态（默认 connected，none 时列表为空）；FAKE_OPENCODE_SERVE_FAIL=1 时报错退出。
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 
 const args = process.argv.slice(2);
 const recordFile = process.env.FAKE_CLI_RECORD;
@@ -87,8 +90,30 @@ const scenarios = {
   },
 };
 
+function serve() {
+  record('', { serve: true, pid: process.pid });
+  if (process.env.FAKE_OPENCODE_SERVE_FAIL === '1') {
+    process.stderr.write('Error: failed to start server\n');
+    process.exitCode = 1;
+    return;
+  }
+  const expected = `Basic ${Buffer.from(`opencode:${process.env.OPENCODE_SERVER_PASSWORD ?? ''}`).toString('base64')}`;
+  const server = createServer((req, res) => {
+    if (req.headers.authorization !== expected) {
+      res.writeHead(401).end();
+      return;
+    }
+    const status = process.env.FAKE_OPENCODE_MCP_STATUS ?? 'connected';
+    const data = status === 'none' ? [] : [{ name: 'codeinsight', status: { status } }];
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data }));
+  });
+  server.listen(0, '127.0.0.1', () => process.stdout.write(`Server listening on http://127.0.0.1:${server.address().port}\n`));
+}
+
 if (args[0] === '--version') {
   process.stdout.write('2.2.0\n');
+} else if (args[0] === 'serve') {
+  serve();
 } else if (args[0] === 'session' && args[1] === 'delete') {
   record('', { sessionDelete: args[2] });
   if (process.env.FAKE_OPENCODE_DELETE_FAIL === '1') {

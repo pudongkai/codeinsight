@@ -1,7 +1,7 @@
 import { estimateTokens } from '../intent/summary.js';
 import {
   ClaudeCodeClient, claudeArgs, claudeEnv, claudeUsage, classifyClaudeError, classifyOpencodeError, cliError, newOpencodeOutput, opencodeArgs, opencodeConfig,
-  opencodeEnv, opencodeRunContext, opencodeUsage, parseClaudeLine, parseOpencodeLine, runCli, withCliTempDir, writeCliFile,
+  opencodeEnv, opencodeRunContext, opencodeUsage, parseClaudeLine, parseOpencodeLine, runCli, startOpencodeServer, waitOpencodeMcp, withCliTempDir, writeCliFile,
   type ClaudeOutput, type CliExit, type CliSpec, type CliUsage, type OpencodeClient, type OpencodeOutput,
 } from '../llm/cli/index.js';
 import { logCliExit, logCliFailure } from '../llm/cli/process.js';
@@ -242,14 +242,17 @@ function onClaudeLine(st: StreamState, out: ClaudeOutput, value: unknown): void 
   }
 }
 
+/** codeinsight 工具服务没连上：pending 是没能及时启动，其余（如 failed）多半是快照已清理 */
+function toolServerEnd(status: string): LoopEnd {
+  const tip = status === 'pending' ? 'it did not finish starting in time; try again' : 'try again after the index is rebuilt';
+  return { status: 'failed', code: 'internal_error', message: `the codeinsight tool service did not start (status: ${status}); ${tip}` };
+}
+
 function claudeEnd(st: StreamState, out: ClaudeOutput, spec: CliSpec, exit: CliExit): LoopEnd {
   const { run } = st;
   const r = out.result;
   if (r?.num_turns !== undefined) run.rounds = r.num_turns;
-  if (st.toolServerProblem) {
-    const tip = st.toolServerProblem === 'pending' ? 'it did not finish starting in time; try again' : 'try again after the index is rebuilt';
-    return { status: 'failed', code: 'internal_error', message: `the codeinsight tool service did not start (status: ${st.toolServerProblem}); ${tip}` };
-  }
+  if (st.toolServerProblem) return toolServerEnd(st.toolServerProblem);
   if (exit.aborted || exit.timedOut || exit.killed) return interruptedEnd(run, spec, exit);
   if (r?.subtype === 'error_max_turns') return limitedEnd(run, 'max_rounds');
   const err = classifyClaudeError(out, exit, ASK_MAX_TOKENS);
@@ -265,6 +268,8 @@ interface CliAskPlan {
   end: (exit: CliExit) => LoopEnd;
   /** 子进程结束后（成功、失败、中止都调用） */
   after?: () => void;
+  /** 结束为这次运行起的常驻进程（opencode 的私有服务） */
+  close?: () => Promise<void>;
 }
 
 async function claudePlan(st: StreamState, client: ClaudeCodeClient, dir: string, server: AskToolServer): Promise<CliAskPlan> {
@@ -327,20 +332,40 @@ function opencodeEnd(st: StreamState, out: OpencodeOutput, spec: CliSpec, exit: 
   return successEnd(run);
 }
 
+/** 起私有 opencode serve 并等 codeinsight 工具服务连上；没连上时记到 toolServerProblem 并结束服务 */
+async function opencodeServer(st: StreamState, client: OpencodeClient, dir: string, env: Record<string, string>) {
+  const o = client.opts;
+  const signal = AbortSignal.any([st.run.signal, st.stop.signal]);
+  const server = await startOpencodeServer({ command: o.command, cwd: dir, env, extraEnv: o.extraEnv, baseEnv: o.baseEnv, signal });
+  const status = await waitOpencodeMcp(server, dir, MCP_NAME, signal).catch(async (err: unknown) => {
+    await server.stop();
+    throw err;
+  });
+  if (status !== 'connected') {
+    st.toolServerProblem = status;
+    log.warn('ask_tool_server_not_connected', { status });
+    await server.stop();
+    return undefined;
+  }
+  return server;
+}
+
 async function opencodePlan(st: StreamState, client: OpencodeClient, dir: string, server: AskToolServer): Promise<CliAskPlan> {
   const { run } = st;
   const o = client.opts;
   const { disabledMcp, deleteSessionLater } = opencodeRunContext(o);
   const systemFile = await writeCliFile(dir, 'system.md', `${run.system}\n\n${CLI_NOTE}`);
   const config = opencodeConfig({ systemFile, steps: run.opts.config.ask.maxRounds, mcpCommand: [server.command, ...toolServerArgs(run, server)], disabledMcp });
+  const env = opencodeEnv(config);
+  const serve = await opencodeServer(st, client, dir, env);
   const spec: CliSpec = {
     provider: 'opencode', command: o.command, mode: 'ask', model: client.model, cwd: dir, extraEnv: o.extraEnv,
-    args: opencodeArgs(client.model), env: opencodeEnv(config), stdin: st.prompt,
+    args: opencodeArgs(client.model, serve?.url), env: { ...env, ...serve?.env }, stdin: st.prompt,
   };
   const out = newOpencodeOutput();
   return {
     spec, onLine: (v) => onOpencodeLine(st, out, v), usage: () => opencodeUsage(out), end: (exit) => opencodeEnd(st, out, spec, exit),
-    after: () => deleteSessionLater(out.sessionId),
+    after: () => deleteSessionLater(out.sessionId), close: serve?.stop,
   };
 }
 
@@ -357,18 +382,23 @@ function askUsage(st: StreamState, u: CliUsage): AskUsage {
 async function runPlan(st: StreamState, client: ClaudeCodeClient | OpencodeClient, server: AskToolServer, dir: string): Promise<LoopEnd> {
   const { run } = st;
   const plan = client instanceof ClaudeCodeClient ? await claudePlan(st, client, dir, server) : await opencodePlan(st, client, dir, server);
-  const exit = await runCli(plan.spec, {
-    signal: AbortSignal.any([run.signal, st.stop.signal]), timeoutMs: run.opts.timeoutMs ?? ASK_TIMEOUT_MS, idleTimeoutMs: CLI_ASK_IDLE_TIMEOUT_MS,
-    baseEnv: client.opts.baseEnv, onLine: plan.onLine,
-  });
-  const usage = plan.usage();
-  logCliExit(plan.spec, exit, usage);
-  plan.after?.();
-  const end = plan.end(exit);
-  run.usage = askUsage(st, usage);
-  addRefsByIds(run, st.resultIds);
-  log.info('ask_cli_end', { provider: plan.spec.provider, status: end.status, rounds: run.rounds, toolCalls: run.toolCalls.length, toolChars: run.toolChars, unfinishedTools: st.pending.size });
-  return end;
+  if (st.toolServerProblem) return toolServerEnd(st.toolServerProblem);
+  try {
+    const exit = await runCli(plan.spec, {
+      signal: AbortSignal.any([run.signal, st.stop.signal]), timeoutMs: run.opts.timeoutMs ?? ASK_TIMEOUT_MS, idleTimeoutMs: CLI_ASK_IDLE_TIMEOUT_MS,
+      baseEnv: client.opts.baseEnv, onLine: plan.onLine,
+    });
+    const usage = plan.usage();
+    logCliExit(plan.spec, exit, usage);
+    plan.after?.();
+    const end = plan.end(exit);
+    run.usage = askUsage(st, usage);
+    addRefsByIds(run, st.resultIds);
+    log.info('ask_cli_end', { provider: plan.spec.provider, status: end.status, rounds: run.rounds, toolCalls: run.toolCalls.length, toolChars: run.toolChars, unfinishedTools: st.pending.size });
+    return end;
+  } finally {
+    await plan.close?.();
+  }
 }
 
 /**
