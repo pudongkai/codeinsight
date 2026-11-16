@@ -46,7 +46,7 @@ function ExtraEnvField({ s }: { s: SettingsForm }) {
       <label>
         <span>附加环境变量</span>
       </label>
-      <div className="field-note muted">启动本机 CLI 时附加，如 https_proxy；子进程拿不到 shell 里的 alias 和临时设置</div>
+      <div className="field-note muted">启动本机 CLI 时附加，如 https_proxy</div>
       {rows.map((row, i) => (
         <EnvRowEdit key={i} row={row} onChange={(patch) => set(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))} onRemove={() => set(rows.filter((_, j) => j !== i))} />
       ))}

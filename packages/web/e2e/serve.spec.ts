@@ -88,7 +88,7 @@ test('clicking a call in the source panel jumps to the callee neighbor graph', a
   await expect(panel.getByTestId('source-call')).toHaveCount(2);
   await panel.getByTestId('source-call').first().click();
   await expect(page.getByTestId('symbol-detail').locator('h3')).toHaveText('f');
-  await expect(page.getByTestId('breadcrumbs')).toHaveText('入口列表 › f › g › f');
+  await expect(page.getByTestId('breadcrumbs')).toHaveText('首页 › f › g › f');
 });
 
 test('with a JS bridge, clicking a function calls openFile instead of showing the source panel', async ({ page }) => {
