@@ -66,6 +66,14 @@ const scenarios = {
     text('退款由 refund 处理。');
     stepFinish();
   },
+  // 真实 opencode 2.2.0：工具那一步以 tool-calls 结束，最后一步只有文字、没有 step_finish 行
+  'stream-no-final-finish': () => {
+    stepStart();
+    toolUse('search_symbols', { query: 'refund' }, 'no symbols found');
+    stepFinish('tool-calls');
+    stepStart();
+    text('退款由 refund 处理。');
+  },
   'steps-error-tool': () => {
     stepStart();
     line('tool_use', { part: { type: 'tool', tool: 'codeinsight_search_symbols', callID: 'call_e', state: { status: 'error', input: { query: 'x' }, error: 'MCP error -32603: boom' } } });

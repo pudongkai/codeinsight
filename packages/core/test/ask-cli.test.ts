@@ -279,7 +279,8 @@ describe('CLI question answering (opencode)', () => {
     expect(result.meta.usage).toEqual({ inputTokens: 48, outputTokens: 12, costUsd: 0.004 });
     const config = JSON.parse(records()[0]!.env.OPENCODE_CONFIG_CONTENT!) as { agent: { codeinsight: { steps: number; permission: Record<string, string> } }; mcp: { codeinsight: { command: string[] } } };
     expect(config.agent.codeinsight.steps).toBe(env.config.ask.maxRounds);
-    expect(config.agent.codeinsight.permission).toEqual({ '*': 'deny', 'codeinsight_*': 'allow' });
+    expect(config.agent.codeinsight.permission).toEqual({ '*': 'deny', read: 'ask', 'codeinsight_*': 'allow' });
+    expect(Object.keys(config.agent.codeinsight.permission)).toEqual(['*', 'read', 'codeinsight_*']);
     expect(config.mcp.codeinsight.command.slice(0, 4)).toEqual([TOOL_SERVER.command, ...TOOL_SERVER.args]);
     await flushOpencodeSessions(5_000);
     expect(records().some((r) => r.sessionDelete === 'ses_fake123')).toBe(true);
@@ -300,6 +301,14 @@ describe('CLI question answering (opencode)', () => {
     opencodeSessions.enqueue({ sessionId: 'ses_keep', command: FAKE_OPENCODE, baseEnv: process.env, disabledMcp: [] });
     await flushOpencodeSessions(5_000);
     expect(records().some((r) => r.sessionDelete === 'ses_keep')).toBe(true);
+  });
+
+  it('a last step with text but no step_finish line is a normal answer, not limited', async () => {
+    scenario('stream-no-final-finish');
+    const { result } = await ask(opencode());
+    expect(result.status).toBe('done');
+    expect(result.answer).toContain('退款由 refund 处理。');
+    expect(result.meta.toolCalls.map((c) => c.name)).toEqual(['search_symbols']);
   });
 
   it('a last step that did not finish normally ends as limited max_rounds', async () => {

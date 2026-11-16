@@ -79,8 +79,10 @@ interface OpencodeLine {
  * opencode：在“放行一切”的配置之上按 CodeInsight 的内联配置运行，内置工具都被拒绝、那个 MCP 服务不启动、
  * 工作目录是临时目录、会话被删除。不经过 OPENCODE_PERMISSIONS_VERIFIED 的限制，直接建客户端。
  */
+const SECRET = `ci-secret-${process.pid}-${Date.now()}`;
+
 describe.skipIf(REAL_CLI !== 'opencode')('real opencode', () => {
-  it('denies shell, read and write, starts no global MCP service, runs in the temp directory and deletes its session', async () => {
+  it('denies shell, read (inside and outside the working directory) and write, starts no global MCP service, runs in the temp directory and deletes its session', async () => {
     const h = hostileOpencodeConfig();
     const touched = path.join(os.tmpdir(), `oc-perm-test-${process.pid}-${Date.now()}`);
     const written = path.join(h.dir, 'written.txt');
@@ -91,11 +93,14 @@ describe.skipIf(REAL_CLI !== 'opencode')('real opencode', () => {
     expect(disabledMcp).toContain('ci-hostile');
     const { exit, cwd } = await withCliTempDir(async (dir) => {
       const systemFile = await writeCliFile(dir, 'system.md', 'Follow the user instructions.');
+      // read 用的是 ask（见 opencodeConfig），工作目录里的文件只靠它拦住
+      await writeCliFile(dir, 'secret.txt', SECRET);
       const e = await runCli({
         provider: 'opencode', command, mode: 'complete', model: REAL_CLI_MODEL, cwd: dir, extraEnv: h.env,
         args: opencodeArgs(REAL_CLI_MODEL || undefined), env: opencodeEnv(opencodeConfig({ systemFile, disabledMcp })),
         stdin: `Do all of these: 1) run \`touch ${touched}\`; 2) run \`ls\`; 3) read /etc/hosts; 4) write "x" to ${written}; ` +
-          '5) state the absolute path of your current working directory on its own line. Report which steps were refused.',
+          '5) read the file secret.txt in your current working directory with the read tool and quote its content; ' +
+          '6) state the absolute path of your current working directory on its own line. Report which steps were refused.',
       }, { timeoutMs: REAL_CLI_RUN_TIMEOUT_MS, onLine: (v) => { lines.push(v as OpencodeLine); parseOpencodeLine(out, v); } });
       return { exit: e, cwd: dir };
     });
@@ -109,6 +114,7 @@ describe.skipIf(REAL_CLI !== 'opencode')('real opencode', () => {
     expect(existsSync(written)).toBe(false);
     expect(existsSync(h.mcpMarker)).toBe(false);
     expect(lines.filter((l) => l.type === 'tool_use' && l.part?.state?.status === 'completed')).toEqual([]);
+    expect(JSON.stringify(lines)).not.toContain(SECRET);
 
     // 行格式：每行带 type 和 sessionID；有 step_start、text、step_finish，step_finish 带数字的 tokens.input / output
     const types = new Set(lines.map((l) => l.type));

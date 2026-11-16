@@ -30,7 +30,14 @@ export interface OpencodeConfigOptions {
 }
 
 /**
- * 通过 OPENCODE_CONFIG_CONTENT 合并在用户全局配置之后：全局权限全部拒绝，codeinsight agent 也全部拒绝，
+ * read 工具用 ask 而不是 deny：deny 会把工具从请求里去掉，OpenCode 的免费模型据此拒绝请求（FreeUsageLimitError）；
+ * ask 保留工具定义，非交互的 `opencode run`（不加 --auto）遇到 ask 一律自动拒绝，效果与 deny 相同。
+ * 规则按键的顺序匹配，后面的覆盖前面的，所以 read 写在 `*` 之后。
+ */
+const DENY_ALL: Record<string, string> = { '*': 'deny', read: 'ask' };
+
+/**
+ * 通过 OPENCODE_CONFIG_CONTENT 合并在用户全局配置之后：全局权限全部拒绝（read 见 DENY_ALL），codeinsight agent 也全部拒绝，
  * 只放行 codeinsight 的 MCP 工具；用户全局配置里的 MCP 服务逐个关掉。只写 enabled 的条目会被 opencode 丢弃，
  * 所以关掉时写完整条目。用户的 provider、模型和登录不受影响。
  */
@@ -38,9 +45,9 @@ export function opencodeConfig(o: OpencodeConfigOptions): Record<string, unknown
   const mcp: Record<string, unknown> = {};
   for (const name of o.disabledMcp ?? []) if (name !== OPENCODE_AGENT) mcp[name] = { type: 'local', command: ['false'], enabled: false };
   if (o.mcpCommand) mcp[OPENCODE_AGENT] = { type: 'local', command: o.mcpCommand, enabled: true };
-  const config: Record<string, unknown> = { permission: { '*': 'deny' } };
+  const config: Record<string, unknown> = { permission: { ...DENY_ALL } };
   if (o.systemFile) {
-    const permission = o.mcpCommand ? { '*': 'deny', [`${OPENCODE_AGENT}_*`]: 'allow' } : { '*': 'deny' };
+    const permission = o.mcpCommand ? { ...DENY_ALL, [`${OPENCODE_AGENT}_*`]: 'allow' } : { ...DENY_ALL };
     config.agent = { [OPENCODE_AGENT]: { mode: 'primary', prompt: `{file:${o.systemFile}}`, steps: o.steps ?? OPENCODE_COMPLETE_STEPS, permission } };
   }
   if (Object.keys(mcp).length > 0) config.mcp = mcp;
@@ -142,7 +149,7 @@ export interface OpencodeOutput {
   sessionId?: string;
   text: string[];
   error?: OpencodeErrorInfo;
-  /** 最后一个 step_finish 的 reason */
+  /** 最后一步的 step_finish reason；最后一步没有 step_finish 行时为空（opencode 不一定为最后一步输出结束行） */
   lastReason?: string;
   usage: { inputTokens: number; outputTokens: number; costUsd: number; steps: number };
 }
@@ -167,11 +174,12 @@ function addStepUsage(out: OpencodeOutput, part: NonNullable<OpencodeLine['part'
   if (typeof part.reason === 'string') out.lastReason = part.reason;
 }
 
-/** 收一行 `--format json` 输出；只依赖 type、sessionID、part.text、part.tokens、error，未知类型的行忽略 */
+/** 收一行 `--format json` 输出；只依赖 type、sessionID、part.text、part.tokens、part.reason、error，未知类型的行忽略 */
 export function parseOpencodeLine(out: OpencodeOutput, value: unknown): void {
   const line = value as OpencodeLine | null;
   if (typeof line?.sessionID === 'string') out.sessionId ??= line.sessionID;
   if (line?.type === 'text' && typeof line.part?.text === 'string') out.text.push(line.part.text);
+  else if (line?.type === 'step_start') out.lastReason = undefined;
   else if (line?.type === 'step_finish' && line.part) addStepUsage(out, line.part);
   else if (line?.type === 'error') out.error = (typeof line.error === 'object' && line.error !== null ? line.error : { message: String(line.error) }) as OpencodeErrorInfo;
 }

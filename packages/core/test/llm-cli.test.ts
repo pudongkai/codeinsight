@@ -359,8 +359,9 @@ describe.skipIf(!posix)('opencode client with a fake opencode', () => {
     expect(run!.argv).toEqual(['run', '--standalone', '--format', 'json', '--agent', 'codeinsight', '--title', 'codeinsight', '--model=p/m']);
     expect(run!.pwd).toBe(run!.cwd);
     const config = JSON.parse(run!.env.OPENCODE_CONFIG_CONTENT!) as { permission: unknown; agent: { codeinsight: { prompt: string } }; mcp: unknown };
-    expect(config.permission).toEqual({ '*': 'deny' });
-    expect(config.agent.codeinsight).toMatchObject({ mode: 'primary', steps: 3, permission: { '*': 'deny' } });
+    expect(config.permission).toEqual({ '*': 'deny', read: 'ask' });
+    expect(Object.keys(config.permission)).toEqual(['*', 'read']);
+    expect(config.agent.codeinsight).toMatchObject({ mode: 'primary', steps: 3, permission: { '*': 'deny', read: 'ask' } });
     expect(config.agent.codeinsight.prompt).toBe(`{file:${path.join(run!.cwd, 'system.md')}}`);
     expect(config.mcp).toEqual({
       codegraph: { type: 'local', command: ['false'], enabled: false },
