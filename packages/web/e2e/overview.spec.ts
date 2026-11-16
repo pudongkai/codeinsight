@@ -56,6 +56,25 @@ test('with an overview the page opens on it; the module graph has the expected m
   await expect(plain).toHaveAttribute('data-tone', 'normal');
 });
 
+test('the module list is as tall as the right side and scrolls inside; the module graph can go full screen and back', async ({ page }) => {
+  await openApp(page);
+  const list = page.getByTestId('module-list');
+  const box = async (sel: string) => (await page.locator(sel).boundingBox())!;
+  const [l, r] = [await box('[data-testid=module-list]'), await box('.overview-main')];
+  expect(Math.abs(l.height - r.height)).toBeLessThanOrEqual(1);
+  expect(await list.evaluate((el) => getComputedStyle(el).overflowY)).toBe('auto');
+
+  const panel = page.getByTestId('module-graph-panel');
+  const graph = page.getByTestId('module-graph');
+  await page.getByTestId('module-graph-fullscreen').click();
+  await expect(panel).not.toHaveAttribute('data-fullscreen', 'none');
+  await expect.poll(async () => (await graph.boundingBox())!.height).toBeGreaterThan(page.viewportSize()!.height - 120);
+  await expect(graph.getByTestId('graph-node')).toHaveCount(MODULES.length);
+  await page.getByTestId('module-graph-fullscreen').click();
+  await expect(panel).toHaveAttribute('data-fullscreen', 'none');
+  await expect.poll(async () => (await graph.boundingBox())!.height).toBeLessThan(500);
+});
+
 test('clicking a module shows its responsibility and external dependencies', async ({ page }) => {
   await openApp(page);
   await page.getByTestId('module-graph').locator('[data-testid=graph-node][data-module="app/payments"]').click();

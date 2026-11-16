@@ -322,3 +322,15 @@ textarea { width: 100%; box-sizing: border-box; }
 
 /* 空状态提示 */
 .empty-state { border: 1px dashed var(--border-strong); border-radius: var(--radius); padding: 40px 20px; text-align: center; background: var(--panel); margin: 0; }
+
+/* 概览页模块列表：不参与撑高，高度跟右侧一致，内容多时在框内滚动 */
+.overview-page > .module-list { contain: size; align-self: stretch; overflow: auto; min-height: 320px; margin-bottom: 0; padding-top: 0; }
+.overview-page > .module-list h3 { position: sticky; top: 0; z-index: 1; background: var(--panel); margin: 0 0 4px; padding: 14px 0 8px; }
+
+/* 模块图：图例和全屏按钮一行；全屏时图占满剩余高度 */
+.module-graph-head { display: flex; align-items: flex-start; gap: 12px; }
+.module-graph-head .legend { flex: 1; margin-top: 0; }
+.module-graph-head button { flex: none; }
+.module-graph-panel.fullscreen { display: flex; flex-direction: column; background: var(--bg); padding: 16px 20px; box-sizing: border-box; }
+.module-graph-panel[data-fullscreen='overlay'] { position: fixed; inset: 0; z-index: 30; }
+.module-graph-panel.fullscreen .graph { flex: 1; min-height: 0; height: auto !important; margin-bottom: 0; }
