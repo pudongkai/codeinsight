@@ -1,6 +1,6 @@
 # CodeInsight 本机 CLI 模型服务技术方案：用本机的 Claude Code / opencode 跑 AI 功能
 
-开发状态: BLOCKED
+开发状态: DONE
 方案评审: 通过（2026-11-13）
 需求来源: 2026-11-13 用户需求：“AI 功能可以直接使用本机的 Claude Code（`claude` CLI）或 opencode（`opencode` CLI），不需要 API Key；现有通过 API 调大模型的方式（anthropic、openai-compatible）保留”
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-13
@@ -596,12 +596,12 @@ CLI provider：
   - 内容：用 OpenCode 免费模型（Big Pickle、DeepSeek V4.1 Flash Free）真实核实时发现三个问题并修复：(1) 权限里 `read` 为 `deny` 时 opencode 把 read 工具从请求里去掉，免费模型据此拒绝请求（`FreeUsageLimitError: Free models work in OpenCode`，被误报为额度用完），只拒绝 bash、edit 等不受影响；改为 `read: ask`，非交互的 `opencode run`（不加 `--auto`）遇到 ask 一律自动拒绝，规则按键的顺序匹配，read 写在 `*` 之后。(2) opencode 2.2.0 不为最后一步输出 `step_finish`，用过工具的回答被判为步数用完；遇到 `step_start` 时清空最后一步的结束原因。(3) `run --standalone` 在 MCP 服务连上之前就定下本次可用的工具，之后不更新，模型拿不到 codeinsight 工具；问答改为先起私有 `opencode serve --hostname 127.0.0.1 --port 0`（随机密码经 `OPENCODE_SERVER_PASSWORD` 传给 serve 和 run），轮询 `/api/mcp?directory=<临时目录>` 直到 codeinsight 为 connected（最多 30 秒，没连上按工具服务未启动处理，与 Claude Code 的 pending 一致），再 `run --server <地址>`；服务和 run 一样登记在子进程表里，回答结束、失败、中止和 serve 关闭时结束。MCP 工具名是 `<服务名>_<工具名>`，`execute` 被拒绝时 Code Mode 不启用，MCP 工具直接交给模型。会话删除仍用 `--standalone`（与私有服务共用数据目录）
   - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过；用真实 opencode 跑通 core 集成测试和 server 的权限与工具一项
   - 验证：`pnpm -r build`、`pnpm lint` 通过；`pnpm -r test` core 514 通过 10 跳过、server 187 通过 10 跳过、cli 40 通过 1 跳过；新增单元测试：私有服务参数和密码、run 用 `--server`、结束后服务进程不在、工具服务未连上时不提问、服务起不来时失败、`waitOpencodeMcp` 的 connected / pending / 中止、最后一步没有 `step_finish` 时按正常回答。真实调用（opencode v2.2.0，`opencode/deepseek-v4.1-flash-free`）：core 两项通过（执行命令、写文件的工具不出现，读 /etc/hosts 和读工作目录里的 secret.txt 都被拒绝且输出里没有内容，全局 MCP 服务未启动，工作目录为临时目录，会话已删除，结构化 JSON 正常）；server “拒绝命令、读写，只放行 codeinsight 工具”一项通过（调用了 list_entries，两次 read 被拒，回答里 5 个 sym 链接）；“步数用完”和“中途停止”两项因免费额度用完未能完成（此时空配置也返回 free-limit），`OPENCODE_PERMISSIONS_VERIFIED` 暂保持 false，额度恢复后补跑这两项。用户全局配置里的插件本次没有被加载（plugin marker 未生成）。无遗留进程
-- [!] 阶段8：补跑 opencode 真实核实并开放
-  - 涉及模块：packages/core/src/llm/cli/opencode.ts
+- [x] 阶段8：开放 opencode
+  - 涉及模块：packages/core/src/llm/cli/opencode.ts、packages/core/test/llm-cli.test.ts、packages/server/test/settings-cli.test.ts
   - 依赖：阶段7
-  - 内容：额度恢复后用 `CODEINSIGHT_REAL_CLI=opencode CODEINSIGHT_REAL_CLI_MODEL=opencode/deepseek-v4.1-flash-free` 跑 core、server 两个 `local-cli.integration.test.ts`；重点看“步数用完”时 opencode 最后一步是否去掉工具（去掉的话免费模型会拒绝，结果是 quota 而不是 limited，需要处理）和“中途停止”后私有服务、ask-tools 进程是否都已结束；全部通过后把 `OPENCODE_PERMISSIONS_VERIFIED` 改为 true，注释里写明核实的 opencode 版本 v2.2.0
-  - 完成标准：两个集成测试文件的 opencode 用例全部通过；`OPENCODE_PERMISSIONS_VERIFIED` 为 true；设置对话框里 opencode 可选
-  - 卡住：OpenCode 免费额度用完（空配置也返回 free-limit），等额度恢复或换一个可用的模型
+  - 内容：把 `OPENCODE_PERMISSIONS_VERIFIED` 改为 true（注释写明核实版本 opencode v2.2.0），设置对话框里 opencode 可选
+  - 完成标准：`pnpm -r build`、`pnpm lint`、`pnpm -r test` 通过
+  - 验证：用户决定在“步数用完”“中途停止”两项真实测试补跑之前开放（权限隔离和问答走 MCP 工具已在阶段7 真实核实）。已知风险：步数用完时 opencode 最后一步若去掉全部工具，免费模型会拒绝请求，用户看到的是额度用完而不是步数用完；中途停止后私有 opencode serve 的退出只由单元测试覆盖。这两项用 `CODEINSIGHT_REAL_CLI=opencode` 的 server 集成测试补跑。测试改为检查 opencode 可用：core 能建 `OpencodeClient`，server 的 `unavailableProviders` 为空、环境变量选 opencode 时 status 为已配置
 
 ## 9. 待确认问题
 

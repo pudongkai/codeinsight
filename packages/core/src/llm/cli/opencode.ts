@@ -10,10 +10,10 @@ import { logCliExit, logCliFailure, runCli, startCliServer, withCliTempDir, writ
 import { flattenMessages } from './prompt.js';
 
 /**
- * 权限隔离（全部工具拒绝，只放行 codeinsight 的 MCP 工具）是否已在真实 opencode 的工具调用中确认生效。
- * 为 false 时 opencode 不可选：opencode 默认放行多数工具，权限没生效时可能在用户机器上执行命令。
+ * 权限隔离（全部工具拒绝，read 为 ask，只放行 codeinsight 的 MCP 工具）是否已在真实 opencode 的工具调用中确认生效，
+ * 核实时的版本为 opencode v2.2.0。为 false 时 opencode 不可选：opencode 默认放行多数工具，权限没生效时可能在用户机器上执行命令。
  */
-export const OPENCODE_PERMISSIONS_VERIFIED = false;
+export const OPENCODE_PERMISSIONS_VERIFIED = true;
 export const OPENCODE_AGENT = 'codeinsight';
 /** 结构化输出调用的最多步数 */
 export const OPENCODE_COMPLETE_STEPS = 3;

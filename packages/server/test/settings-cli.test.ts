@@ -34,6 +34,8 @@ let restoreSink: ((line: string) => void) | undefined;
 const prevLevel = process.env.CODEINSIGHT_LOG;
 
 /** 假 CLI 的环境：PATH（找 node）、空的 Claude Code 配置目录、调用记录文件；场景按用例改 */
+const FAKE_OPENCODE = path.join(import.meta.dirname, '..', '..', 'core', 'test', 'helpers', 'fake-opencode.mjs');
+
 function cliEnv(): Record<string, string> {
   const dir = tempDir('ci-cli-env-');
   return { PATH: process.env.PATH ?? '', CLAUDE_CONFIG_DIR: dir, FAKE_CLI_RECORD: path.join(dir, 'record.jsonl'), FAKE_CLI_SCENARIO: 'ok-text' };
@@ -156,21 +158,13 @@ describe('saving a CLI provider', () => {
   });
 });
 
-describe('opencode before its permissions are verified', () => {
-  it('cannot be saved or tested, and status reports it as not configured with the reason', async () => {
-    const api = await start({ env: { ...cliEnv(), CODEINSIGHT_LLM_PROVIDER: 'opencode' } });
-    for (const call of [saveLlm, testLlm]) {
-      const r = await call(api, { provider: 'opencode' });
-      expect(r.status).toBe(400);
-      expect(r.body.error).toBe('provider_unavailable');
-    }
-    const st = (await api<Status>('/api/status')).body;
-    expect(st).toMatchObject({ llmConfigured: false, llm: null });
-    expect(st.llmProblem).toContain('opencode');
+describe('opencode after its permissions are verified', () => {
+  it('is not listed as unavailable, and an opencode configured through the environment counts as configured', async () => {
+    const api = await start({ env: { ...cliEnv(), CODEINSIGHT_LLM_PROVIDER: 'opencode', CODEINSIGHT_LLM_COMMAND: FAKE_OPENCODE } });
     const s = (await api<SettingsView>('/api/settings')).body;
-    expect(s.unavailableProviders).toEqual(['opencode']);
-    expect(s.effective).toMatchObject({ configured: false, kind: 'cli' });
-    expect(s.effective.problem).toContain('opencode');
+    expect(s.unavailableProviders).toEqual([]);
+    const st = (await api<Status>('/api/status')).body;
+    expect(st).toMatchObject({ llmConfigured: true, llm: { provider: 'opencode', kind: 'cli' }, llmProblem: null });
   });
 });
 

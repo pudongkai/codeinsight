@@ -419,16 +419,9 @@ describe('creating CLI clients', () => {
     expect(r && 'warning' in r && r.warning.message).toContain('command not found');
   });
 
-  it('keeps opencode unavailable until its permission isolation is verified', () => {
-    expect(OPENCODE_PERMISSIONS_VERIFIED).toBe(false);
-    const err = (() => {
-      try {
-        createLlmClient({ provider: 'opencode', model: '', command: FAKE_OPENCODE });
-      } catch (e) {
-        return e;
-      }
-    })();
-    expect(err).toMatchObject({ kind: 'provider_unavailable' });
+  it('opencode is available once its permission isolation is verified', () => {
+    expect(OPENCODE_PERMISSIONS_VERIFIED).toBe(true);
+    expect(createLlmClient({ provider: 'opencode', model: '', command: FAKE_OPENCODE })).toBeInstanceOf(OpencodeClient);
   });
 
   it('uses "default" for an empty CLI model in the cache identity', () => {
