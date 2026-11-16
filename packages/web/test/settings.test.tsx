@@ -31,20 +31,20 @@ function renderDialog(s: SettingsResponse = settings()) {
 const input = (id: string) => screen.getByTestId<HTMLInputElement>(id);
 
 describe('SettingsDialog', () => {
-  it('shows where each value comes from, the shadowed env var, and only the last 4 characters of the key', async () => {
+  it('does not show where values come from; shows the shadowed env var and only the last 4 characters of the key', async () => {
     renderDialog();
     await screen.findByTestId('settings-provider');
-    expect(screen.getByTestId('settings-provider-source').textContent).toContain('用户设置');
-    expect(screen.getByTestId('settings-model-source').textContent).toContain('环境变量 CODEINSIGHT_LLM_MODEL');
+    expect(screen.getByTestId('settings-dialog').textContent).not.toContain('来源');
+    expect(screen.queryByTestId('settings-provider-source')).toBeNull();
     expect(screen.getByTestId('settings-baseUrl-shadowed').textContent).toBe('环境变量 CODEINSIGHT_LLM_BASE_URL 也设置了，当前使用用户设置');
-    // 用户设置的值填进输入框；其他来源的值只放在提示里
+    // 用户设置的值填进输入框；环境变量等给出的值只放在提示里
     expect(input('settings-baseUrl').value).toBe('https://api.example.com/v1');
     expect(input('settings-model').value).toBe('');
-    expect(input('settings-model').placeholder).toBe('gpt-x（环境变量 CODEINSIGHT_LLM_MODEL）');
+    expect(input('settings-model').placeholder).toBe('gpt-x');
     const key = input('settings-apiKey');
     expect(key.type).toBe('password');
     expect(key.value).toBe('');
-    expect(key.placeholder).toBe('已设置（来自用户设置，末 4 位 a1b2）留空不修改');
+    expect(key.placeholder).toBe('已设置（末 4 位 a1b2），留空不修改');
   });
 
   it('saving with an empty key field does not send a key; the status is refreshed', async () => {
@@ -72,7 +72,7 @@ describe('SettingsDialog', () => {
 
   it('the clear option only appears for a key saved in the user settings', async () => {
     renderDialog(settings({ apiKey: { set: true, last4: 'zz99', source: 'env', env: 'OPENAI_API_KEY' } }));
-    expect((await screen.findByTestId<HTMLInputElement>('settings-apiKey')).placeholder).toBe('已设置（来自环境变量 OPENAI_API_KEY，末 4 位 zz99）留空不修改');
+    expect((await screen.findByTestId<HTMLInputElement>('settings-apiKey')).placeholder).toBe('已设置（末 4 位 zz99），留空不修改');
     expect(screen.queryByTestId('settings-clearApiKey')).toBeNull();
   });
 

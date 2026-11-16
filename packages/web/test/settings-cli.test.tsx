@@ -66,7 +66,7 @@ describe('SettingsDialog with a local CLI', () => {
     expect(input('settings-command').placeholder).toBe('留空则自动查找 claude');
     expect(input('settings-model').placeholder).toBe('留空使用工具默认模型');
     expect(screen.getByTestId('settings-key-drop').textContent).toContain('不再保留已保存的 API Key 和服务地址');
-    expect(screen.getByTestId('settings-test-note').textContent).toBe('会真实调用一次本机 CLI，消耗少量额度');
+    expect(screen.getByTestId('settings-test-note').textContent).toBe('测试会真实调用一次本机 CLI，消耗少量额度');
     fireEvent.change(select, { target: { value: 'anthropic' } });
     expect(screen.getByTestId('settings-apiKey')).toBeTruthy();
   });

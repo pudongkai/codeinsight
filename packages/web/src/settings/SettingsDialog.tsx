@@ -1,34 +1,30 @@
 import { isCliProvider } from '@codeinsight/core/settings/types';
 import type { LlmFieldView, LlmProvider, SettingsResponse } from '../api/types';
 import { CliFields } from './CliFields';
-import { apiKeyPlaceholder, sourceText, testResultText } from './labels';
+import { apiKeyPlaceholder, testResultText } from './labels';
 import { Modal } from './Modal';
 import { unavailableEffectiveProvider, useSettingsForm, type SettingsForm } from './useSettingsForm';
 
 type Shadowed = SettingsResponse['llm']['shadowed'];
 
-/** 来源说明和“环境变量也设置了”的提示 */
-function SourceNote({ name, field, shadowed }: { name: string; field: { source: LlmFieldView['source']; env?: string }; shadowed: Shadowed }) {
+/** 用户设置和环境变量同时设置了这一项时的提醒 */
+function ShadowedNote({ name, shadowed }: { name: string; shadowed: Shadowed }) {
   const sh = shadowed.find((x) => x.field === name);
-  return (
-    <div className="field-note" data-testid={`settings-${name}-source`}>
-      <span className="muted">来源：{sourceText(field)}</span>
-      {sh && <span className="warn" data-testid={`settings-${name}-shadowed`}>环境变量 {sh.env} 也设置了，当前使用用户设置</span>}
-    </div>
-  );
+  if (!sh) return null;
+  return <div className="field-note warn" data-testid={`settings-${name}-shadowed`}>环境变量 {sh.env} 也设置了，当前使用用户设置</div>;
 }
 
-/** 输入框提示：不是用户设置的值时显示当前生效的值和来源 */
+/** 输入框提示：不是用户设置的值时显示当前生效的值 */
 function placeholderOf(f: LlmFieldView): string {
   if (f.source === 'user') return '留空则用环境变量或默认值';
-  return f.value ? `${f.value}（${sourceText(f)}）` : '未设置';
+  return f.value || '未设置';
 }
 
 interface TextFieldProps {
   name: 'baseUrl' | 'model';
   label: string;
   s: SettingsForm;
-  /** 不传时按当前生效的值和来源生成 */
+  /** 不传时按当前生效的值生成 */
   placeholder?: string;
   hint?: string;
 }
@@ -42,7 +38,7 @@ function TextField({ name, label, s, placeholder, hint }: TextFieldProps) {
         <input data-testid={`settings-${name}`} value={s.form![name]} placeholder={placeholder ?? placeholderOf(field)} onChange={(e) => s.update(name === 'baseUrl' ? { baseUrl: e.target.value } : { model: e.target.value })} />
       </label>
       {hint && <div className="field-note muted" data-testid={`settings-${name}-hint`}>{hint}</div>}
-      <SourceNote name={name} field={field} shadowed={s.view!.llm.shadowed} />
+      <ShadowedNote name={name} shadowed={s.view!.llm.shadowed} />
     </div>
   );
 }
@@ -69,7 +65,7 @@ function ApiKeyField({ s }: { s: SettingsForm }) {
           <input type="checkbox" data-testid="settings-clearApiKey" checked={form.clearApiKey} onChange={(e) => s.update({ clearApiKey: e.target.checked, apiKey: '' })} /> 清除
         </label>
       )}
-      <SourceNote name="apiKey" field={key} shadowed={s.view!.llm.shadowed} />
+      <ShadowedNote name="apiKey" shadowed={s.view!.llm.shadowed} />
     </div>
   );
 }
@@ -84,15 +80,15 @@ function ProviderField({ s }: { s: SettingsForm }) {
       <label>
         <span>服务类型</span>
         <select data-testid="settings-provider" value={s.form!.provider} onChange={(e) => s.update({ provider: e.target.value as LlmProvider })}>
-          <option value="anthropic">anthropic</option>
-          <option value="openai-compatible">openai-compatible</option>
+          <option value="anthropic">Anthropic API</option>
+          <option value="openai-compatible">OpenAI 兼容 API</option>
           <option value="claude-code">Claude Code（本机）</option>
           <option value="opencode" disabled={unavailable.includes('opencode')}>opencode（本机）</option>
         </select>
       </label>
       {unavailable.includes('opencode') && <div className="field-note muted" data-testid="settings-provider-unavailable">{UNAVAILABLE_NOTE}</div>}
       {replaced && <div className="field-note warn" data-testid="settings-provider-replaced">当前生效的 {replaced} 暂不可用，这里先改为 anthropic，请重新选择服务类型后保存。</div>}
-      <SourceNote name="provider" field={s.view!.llm.provider} shadowed={s.view!.llm.shadowed} />
+      <ShadowedNote name="provider" shadowed={s.view!.llm.shadowed} />
     </div>
   );
 }
@@ -125,23 +121,35 @@ function ProviderFields({ s }: { s: SettingsForm }) {
   );
 }
 
+/** 测试连接、保存和测试结果 */
+function LlmActions({ s }: { s: SettingsForm }) {
+  return (
+    <div className="settings-card-foot">
+      {s.test && <div className={s.test.ok ? 'ok-inline' : 'error-inline'} data-testid="settings-test-result">{testResultText(s.test)}</div>}
+      <div className="actions">
+        {isCliProvider(s.form!.provider) && <span className="muted small-note" data-testid="settings-test-note">测试会真实调用一次本机 CLI，消耗少量额度</span>}
+        <button type="button" className="small" data-testid="settings-test" disabled={s.busy !== undefined} onClick={() => void s.testConnection()}>
+          {s.busy === 'test' ? '正在测试…' : '测试连接'}
+        </button>
+        <button type="button" className="primary" data-testid="settings-save" disabled={s.busy !== undefined} onClick={() => void s.save()}>保存</button>
+      </div>
+    </div>
+  );
+}
+
 /** 第一部分：模型服务 */
 function LlmSection({ s }: { s: SettingsForm }) {
   const problem = s.view!.effective.problem;
   return (
-    <section className="settings-section">
-      <h4>模型服务</h4>
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <h4>模型服务</h4>
+        <span className="muted">概览、问答和意图检查用到的模型</span>
+      </div>
       <ProviderField s={s} />
       <ProviderFields s={s} />
       {problem && <div className="warn" data-testid="settings-problem">当前配置有问题：{problem}</div>}
-      {s.test && <div className={s.test.ok ? 'ok-inline' : 'error-inline'} data-testid="settings-test-result">{testResultText(s.test)}</div>}
-      <div className="actions">
-        <button type="button" className="small" data-testid="settings-test" disabled={s.busy !== undefined} onClick={() => void s.testConnection()}>
-          {s.busy === 'test' ? '正在测试…' : '测试连接'}
-        </button>
-        {isCliProvider(s.form!.provider) && <span className="muted small-note" data-testid="settings-test-note">会真实调用一次本机 CLI，消耗少量额度</span>}
-        <button type="button" className="primary" data-testid="settings-save" disabled={s.busy !== undefined} onClick={() => void s.save()}>保存</button>
-      </div>
+      <LlmActions s={s} />
     </section>
   );
 }
@@ -149,11 +157,17 @@ function LlmSection({ s }: { s: SettingsForm }) {
 /** 第二部分：索引 */
 function IndexSection({ s }: { s: SettingsForm }) {
   return (
-    <section className="settings-section">
-      <h4>索引</h4>
-      <label>
+    <section className="settings-card">
+      <div className="settings-card-head">
+        <h4>索引</h4>
+      </div>
+      <label className="settings-switch">
         <input type="checkbox" data-testid="settings-autoReindex" checked={s.view!.autoReindex} disabled={s.busy !== undefined}
-          onChange={(e) => void s.setAutoReindex(e.target.checked)} /> 检测到代码变化后自动更新索引
+          onChange={(e) => void s.setAutoReindex(e.target.checked)} />
+        <span>
+          检测到代码变化后自动更新索引
+          <span className="muted small-note">关闭时顶栏会提示代码已变化，由你点“更新索引”</span>
+        </span>
       </label>
     </section>
   );
@@ -163,15 +177,20 @@ function IndexSection({ s }: { s: SettingsForm }) {
 export function SettingsDialog({ onClose, onSaved }: { onClose(): void; onSaved(): void }) {
   const s = useSettingsForm(onSaved);
   return (
-    <Modal label="设置" testId="settings-dialog">
-      <h3>设置</h3>
-      {s.loadError && <div className="error">{s.loadError}</div>}
-      {!s.view && !s.loadError && <p className="muted">正在读取设置…</p>}
-      {s.view && s.form && <LlmSection s={s} />}
-      {s.view && <IndexSection s={s} />}
-      {s.message && <div className={s.message.ok ? 'ok-inline' : 'error'} data-testid="settings-message">{s.message.text}</div>}
-      <div className="actions">
-        {s.view && <span className="muted settings-path">保存在 <code>{s.view.path}</code></span>}
+    <Modal label="设置" testId="settings-dialog" className="settings-modal">
+      <div className="modal-head">
+        <h3>设置</h3>
+        <button type="button" className="modal-x" aria-label="关闭" title="关闭" onClick={onClose}>×</button>
+      </div>
+      <div className="modal-body">
+        {s.loadError && <div className="error">{s.loadError}</div>}
+        {!s.view && !s.loadError && <p className="muted">正在读取设置…</p>}
+        {s.view && s.form && <LlmSection s={s} />}
+        {s.view && <IndexSection s={s} />}
+        {s.message && <div className={s.message.ok ? 'ok-inline' : 'error'} data-testid="settings-message">{s.message.text}</div>}
+      </div>
+      <div className="modal-foot">
+        {s.view && <span className="muted settings-path">设置保存在 <code>{s.view.path}</code></span>}
         <button type="button" className="small" data-testid="settings-close" onClick={onClose}>关闭</button>
       </div>
     </Modal>

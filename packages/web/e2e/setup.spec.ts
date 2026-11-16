@@ -73,7 +73,7 @@ test.describe('model service settings', () => {
     await dialog.getByTestId('settings-apiKey').fill(API_KEY);
     await dialog.getByTestId('settings-save').click();
     await expect(dialog.getByTestId('settings-message')).toHaveText('已保存');
-    await expect(dialog.getByTestId('settings-apiKey')).toHaveAttribute('placeholder', `已设置（来自用户设置，末 4 位 ${API_KEY.slice(-4)}）留空不修改`);
+    await expect(dialog.getByTestId('settings-apiKey')).toHaveAttribute('placeholder', `已设置（末 4 位 ${API_KEY.slice(-4)}），留空不修改`);
     await expect(dialog.getByTestId('settings-apiKey')).toHaveValue('');
     expect(await page.content()).not.toContain(API_KEY);
     await dialog.getByTestId('settings-close').click();

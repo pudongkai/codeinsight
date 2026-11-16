@@ -1,18 +1,5 @@
-import type { LlmSourceKind, LlmTestResult, SettingsResponse } from '../api/types';
+import type { LlmTestResult, SettingsResponse } from '../api/types';
 import { providerName } from './model-label';
-
-const SOURCE_LABELS: Record<LlmSourceKind, string> = {
-  user: '用户设置',
-  env: '环境变量',
-  repo: '仓库配置',
-  default: '默认值',
-  none: '未设置',
-};
-
-/** 来源的中文说明，环境变量带上变量名，如“环境变量 CODEINSIGHT_LLM_MODEL” */
-export function sourceText(f: { source: LlmSourceKind; env?: string }): string {
-  return f.source === 'env' && f.env ? `环境变量 ${f.env}` : SOURCE_LABELS[f.source];
-}
 
 const TEST_REASONS: Record<string, string> = {
   missing_key: '没有 API key',
@@ -48,6 +35,5 @@ export function testResultText(r: LlmTestResult): string {
 /** apiKey 输入框的提示：已设置时只给来源和末 4 位，不显示原文 */
 export function apiKeyPlaceholder(k: SettingsResponse['llm']['apiKey']): string {
   if (!k.set) return '未设置';
-  const tail = k.last4 ? `，末 4 位 ${k.last4}` : '';
-  return `已设置（来自${sourceText(k)}${tail}）留空不修改`;
+  return k.last4 ? `已设置（末 4 位 ${k.last4}），留空不修改` : '已设置，留空不修改';
 }

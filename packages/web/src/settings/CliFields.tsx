@@ -1,5 +1,4 @@
 import { DEFAULT_CLI_COMMAND, isCliProvider } from '@codeinsight/core/settings/types';
-import { sourceText } from './labels';
 import type { EnvRow, SettingsForm } from './useSettingsForm';
 
 /**
@@ -16,14 +15,12 @@ export function commandPlaceholder(s: Pick<SettingsForm, 'form' | 'view'>): stri
 }
 
 function CommandField({ s }: { s: SettingsForm }) {
-  const cmd = s.view!.llm.command;
   return (
     <div className="field">
       <label>
         <span>命令路径</span>
         <input data-testid="settings-command" value={s.form!.command} placeholder={commandPlaceholder(s)} onChange={(e) => s.update({ command: e.target.value })} />
       </label>
-      {cmd && cmd.source !== 'none' && <div className="field-note muted" data-testid="settings-command-source">来源：{sourceText(cmd)}</div>}
     </div>
   );
 }
@@ -48,8 +45,8 @@ function ExtraEnvField({ s }: { s: SettingsForm }) {
     <div className="field" data-testid="settings-extraEnv">
       <label>
         <span>附加环境变量</span>
-        <span className="muted small-note">启动本机 CLI 时附加，如 https_proxy；子进程拿不到 shell 里的 alias 和临时设置</span>
       </label>
+      <div className="field-note muted">启动本机 CLI 时附加，如 https_proxy；子进程拿不到 shell 里的 alias 和临时设置</div>
       {rows.map((row, i) => (
         <EnvRowEdit key={i} row={row} onChange={(patch) => set(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))} onRemove={() => set(rows.filter((_, j) => j !== i))} />
       ))}

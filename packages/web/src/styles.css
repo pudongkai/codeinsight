@@ -285,13 +285,6 @@ textarea { width: 100%; box-sizing: border-box; }
 .ok-inline { color: #15803d; }
 .small-note { font-size: 12px; margin-top: 2px; }
 .setup-hint { margin: 8px 0; }
-.settings-section { margin-top: 8px; }
-.settings-section .field { margin-bottom: 8px; }
-.field > label:first-child { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: center; }
-.field input:not([type='checkbox']), .field select { width: 100%; box-sizing: border-box; }
-.field-check { margin-left: 104px; font-size: 12.5px; }
-.field-note { margin-left: 104px; font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
-.settings-path { margin-right: auto; font-size: 12px; overflow-wrap: anywhere; }
 .repo-page { max-width: 760px; margin: 48px auto; }
 .repo-form .row { display: flex; gap: 8px; align-items: center; }
 .repo-form .row input { flex: 1; min-width: 0; padding: 6px 10px; }
@@ -313,11 +306,6 @@ textarea { width: 100%; box-sizing: border-box; }
 .entry-list li:hover { background: var(--bg-soft); }
 .entry-list li .loc { margin-left: auto; }
 
-/* 设置里的环境变量：一行一项，名字、值和删除按钮并排 */
-.field-note.env-row { flex-wrap: nowrap; align-items: center; gap: 6px; margin-bottom: 6px; }
-.field .env-row input:not([type='checkbox']) { width: auto; flex: 1; min-width: 0; }
-.field .env-row input[data-testid='settings-env-name'] { flex: 0 0 34%; }
-.settings-section h4 { margin-top: 10px; }
 .indexbar button.small { padding: 1px 10px; font-size: 12px; }
 
 /* 空状态提示 */
@@ -334,3 +322,34 @@ textarea { width: 100%; box-sizing: border-box; }
 .module-graph-panel.fullscreen { display: flex; flex-direction: column; background: var(--bg); padding: 16px 20px; box-sizing: border-box; }
 .module-graph-panel[data-fullscreen='overlay'] { position: fixed; inset: 0; z-index: 30; }
 .module-graph-panel.fullscreen .graph { flex: 1; min-height: 0; height: auto !important; margin-bottom: 0; }
+
+/* 设置对话框：标题栏、可滚动的内容区和底栏；内容分为“模型服务”“索引”两张卡片，标签在输入框上方 */
+.settings-modal { width: min(620px, 94vw); padding: 0; display: flex; flex-direction: column; max-height: 84vh; overflow: hidden; }
+.modal-backdrop:has(.settings-modal) { padding-top: 7vh; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 22px 12px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { margin: 0; font-size: 16px; }
+.modal-x { border: none; background: none; font-size: 20px; line-height: 1; color: var(--muted); cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm); }
+.modal-x:hover { background: var(--bg-soft); color: var(--fg); }
+.modal-body { padding: 16px 22px; overflow: auto; display: flex; flex-direction: column; gap: 14px; background: var(--bg-soft); }
+.modal-foot { display: flex; align-items: center; gap: 12px; padding: 12px 22px; border-top: 1px solid var(--border); }
+.settings-path { margin-right: auto; font-size: 12px; overflow-wrap: anywhere; }
+.settings-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm); }
+.settings-card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.settings-card-head h4 { margin: 0; font-size: 13.5px; color: var(--fg); text-transform: none; letter-spacing: 0; }
+.settings-card-head .muted { font-size: 12px; }
+.settings-card-foot { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.settings-card-foot .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin: 0; }
+.settings-card-foot .small-note { margin: 0 auto 0 0; }
+.settings-card > .warn { font-size: 12.5px; margin-top: 4px; }
+.field { margin-bottom: 14px; }
+.field > label:first-child { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--fg-2); }
+.field input:not([type='checkbox']), .field select { width: 100%; box-sizing: border-box; font-weight: 400; font-size: 13.5px; padding: 7px 10px; }
+.field-check { display: inline-flex; gap: 6px; align-items: center; margin-top: 6px; font-size: 12.5px; }
+.field-note { margin-top: 5px; font-size: 12px; display: flex; gap: 10px; flex-wrap: wrap; line-height: 1.5; }
+.field-note.env-row { flex-wrap: nowrap; align-items: center; gap: 6px; margin-top: 6px; }
+.field .env-row input:not([type='checkbox']) { width: auto; flex: 1; min-width: 0; padding: 6px 10px; }
+.field .env-row input[data-testid='settings-env-name'] { flex: 0 0 34%; }
+.field .env-row > span { color: var(--muted); }
+.settings-switch { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.settings-switch input { margin-top: 3px; }
+.settings-switch .small-note { display: block; }
