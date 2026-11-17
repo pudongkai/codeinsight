@@ -118,7 +118,8 @@ describe('go extraction', () => {
     expect(calls).toContainEqual({ form: 'selector', name: 'Find', qualifier: undefined, receiverType: `${PKG}.Repo` });
     const main = result.files.find((f) => f.path === 'backend/cmd/server/main.go')!;
     const create = main.go!.calls.find((c) => c.name === 'Create')!;
-    expect(create).toMatchObject({ form: 'selector', receiverType: `${PKG}.Service`, callerId: main.symbols[1]!.id });
+    const handler = main.symbols.find((s) => s.qualifiedName === 'example.com/gobasic/cmd/server.main.func1')!;
+    expect(create).toMatchObject({ form: 'selector', receiverType: `${PKG}.Service`, callerId: handler.id });
   });
 
   it('keeps the go field through the extract cache format', () => {

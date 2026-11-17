@@ -8,7 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Resolver } from '@codeinsight/core';
 import { createMcpServer } from '../src/index.js';
-import { fixtureRepo, openWorkspace, tempDir, writeFiles } from './helpers/env.js';
+import { fixtureRepo, git, openWorkspace, tempDir, writeFiles } from './helpers/env.js';
 import { tempHomeEnv } from './setup-home.js';
 
 const HELPER = path.join(import.meta.dirname, 'helpers', 'mcp-stdio.mjs');
@@ -171,4 +171,43 @@ describe('MCP shutdown while indexing', () => {
     expect(snaps.length).toBeGreaterThan(0);
     expect(snaps.map((s) => s.resolverStatus)).toEqual(snaps.map(() => 'failed'));
   });
+});
+
+describe('MCP find_similar on Go code', () => {
+  it('compares a Go snippet with Go functions when language is go', async () => {
+    const repo = tempDir('ci-mcp-go-');
+    const lookup = (name: string, field: string) => [
+      `func ${name}(db *sql.DB, id int) (string, error) {`,
+      `\trow := db.QueryRow("SELECT ${field} FROM users WHERE id = ?", id)`,
+      '\tvar v string',
+      '\tif err := row.Scan(&v); err != nil {',
+      '\t\treturn "", err',
+      '\t}',
+      '\treturn v, nil',
+      '}',
+      '',
+    ].join('\n');
+    writeFiles(repo, {
+      'go.mod': 'module example.com/shop\n\ngo 1.22\n',
+      'users/users.go': `package users\n\nimport "database/sql"\n\n${lookup('EmailOf', 'email')}`,
+    });
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'init');
+    const ws = await openWorkspace(repo, tempDir('ci-mcp-go-data-'));
+    const server = createMcpServer({ workspace: ws });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: 'codeinsight-test', version: '0.0.0' });
+    await client.connect(clientSide);
+    try {
+      const r = await client.callTool({ name: 'find_similar', arguments: { code: lookup('PhoneOf', 'phone'), language: 'go' } });
+      expect(r.isError).toBeFalsy();
+      expect(text(r)).toMatch(/`example\.com\/shop\/users\.EmailOf` at users\/users\.go:\d+/);
+    } finally {
+      await client.close();
+      await server.close();
+      ws.store.close();
+    }
+  }, 120_000);
 });

@@ -74,6 +74,28 @@ export interface GoCallSite {
   receiverChain?: GoTypeChain;
 }
 
+/** 按名字引用的函数或方法：函数名（ident）、`pkg.Func`（pkg）、方法值 `h.Create`（selector），规则同调用点 */
+export type GoFuncRef = Pick<GoCallSite, 'form' | 'name' | 'qualifier' | 'receiverType' | 'receiverChain'>;
+
+/** 处理函数：按名字引用，或已建了符号的函数字面量 */
+export type GoHandlerRef = GoFuncRef | { symbolId: string };
+
+/** 一条路由注册，处理函数在跨文件处理时查找 */
+export interface GoRoute {
+  framework: 'net/http' | 'gin' | 'echo' | 'chi';
+  /** 请求方法（大写）；net/http 的路由模式里没写方法时为空 */
+  method?: string;
+  /** 本函数里能看到的路由分组前缀加上注册的路径 */
+  path: string;
+  handler: GoHandlerRef;
+}
+
+/** 一个 `cobra.Command` 字面量，处理函数为 Run 或 RunE */
+export interface GoCobraCommand {
+  use: string;
+  handler: GoHandlerRef;
+}
+
 /** struct 的标签信息，数据模型识别用 */
 export interface GoStructTags {
   /** 字段标签里出现的键，如 json、gorm、db */
@@ -99,6 +121,10 @@ export interface GoFileFacts {
   structFields: Record<string, Record<string, string>>;
   /** 本文件包级函数的第一个返回类型：函数名 → 类型的 qualifiedName */
   funcResults: Record<string, string>;
+  /** 路由注册（net/http、gin、echo、chi） */
+  routes?: GoRoute[];
+  /** cobra 命令 */
+  cobraCommands?: GoCobraCommand[];
 }
 
 export interface ExtractedFile {

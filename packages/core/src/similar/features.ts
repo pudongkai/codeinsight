@@ -88,10 +88,10 @@ function closingParen(sig: string): number {
 }
 
 /**
- * 签名形状：参数个数（不含方法的 self / cls，以及 `*`、`/` 分隔符）和是否有返回值。
+ * Python 签名形状：参数个数（不含方法的 self / cls，以及 `*`、`/` 分隔符）和是否有返回值。
  * 有返回注解时以注解为准（`-> None` 为没有返回值）；没有注解时看函数体里有没有 return。
  */
-export function signatureShape(s: SymbolRow): SignatureShape {
+function pythonSignatureShape(s: SymbolRow): SignatureShape {
   const sig = s.displaySignature;
   const close = sig.startsWith('(') ? closingParen(sig) : -1;
   let params = close > 0 ? splitTopLevel(sig.slice(1, close)).filter((p) => p !== '*' && p !== '/') : [];
@@ -100,6 +100,38 @@ export function signatureShape(s: SymbolRow): SignatureShape {
   const annotated = ret.startsWith('->');
   const returnsValue = annotated ? ret.slice(2).trim() !== 'None' : s.normTokens.includes('return');
   return { params: params.length, returnsValue };
+}
+
+/** 方括号外第一个 `(` 的位置（跳过名字后的类型参数 `[T any]`） */
+function firstParenOutsideBrackets(sig: string): number {
+  let depth = 0;
+  for (let i = 0; i < sig.length; i++) {
+    const ch = sig[i]!;
+    if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+    else if (ch === '(' && depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Go 签名形状：`func (接收者) 名字[类型参数](参数) 返回值`，interface 方法为 `名字(参数) 返回值`。
+ * 接收者不算参数；`a, b int` 算两个参数；写了返回值（单个或 `(T, error)` 多个）就算有返回值
+ */
+function goSignatureShape(s: SymbolRow): SignatureShape {
+  let sig = s.displaySignature.replace(/^func\b\s*/, '');
+  if (s.kind === 'method' && s.displaySignature.startsWith('func') && sig.startsWith('(')) sig = sig.slice(closingParen(sig) + 1).trimStart();
+  const open = firstParenOutsideBrackets(sig);
+  if (open < 0) return { params: 0, returnsValue: false };
+  const rest = sig.slice(open);
+  const close = closingParen(rest);
+  if (close < 0) return { params: 0, returnsValue: false };
+  return { params: splitTopLevel(rest.slice(1, close)).length, returnsValue: rest.slice(close + 1).trim() !== '' };
+}
+
+/** 签名形状：参数个数和是否有返回值，按符号所在文件的语言解析签名 */
+export function signatureShape(s: SymbolRow): SignatureShape {
+  return detectLanguage(s.path) === 'go' ? goSignatureShape(s) : pythonSignatureShape(s);
 }
 
 /** 参数个数相似度（少的 / 多的，都为 0 时为 1）和返回值是否一致各占一半 */
@@ -118,9 +150,21 @@ export function bodyLines(s: SymbolRow): number {
   return s.endLine - s.startLine;
 }
 
-/** 参与重复实现检测的函数：函数或方法、非测试、非生成代码（同名重复规则不看函数体长度） */
+type SimilarityKindInput = Pick<SymbolRow, 'kind' | 'path' | 'displaySignature'>;
+
+/** Go interface 里声明的方法：没有函数体，签名不以 `func` 开头 */
+function isGoInterfaceMethod(s: SimilarityKindInput): boolean {
+  return s.kind === 'method' && detectLanguage(s.path) === 'go' && !s.displaySignature.startsWith('func');
+}
+
+/** 能作为相似比较对象的符号：函数或方法，Go interface 方法除外 */
+export function isSimilarityKind(s: SimilarityKindInput): boolean {
+  return FUNCTION_KINDS.has(s.kind) && !isGoInterfaceMethod(s);
+}
+
+/** 参与重复实现检测的函数：函数或方法（Go interface 方法除外）、非测试、非生成代码（同名重复规则不看函数体长度） */
 export function isCheckedFunction(s: SymbolRow): boolean {
-  return FUNCTION_KINDS.has(s.kind) && !s.isTest && !s.isGenerated;
+  return isSimilarityKind(s) && !s.isTest && !s.isGenerated;
 }
 
 /** 能参与常规比较的函数：在 isCheckedFunction 之外，函数体不少于 3 行 */
@@ -128,8 +172,27 @@ export function isComparableFunction(s: SymbolRow): boolean {
   return isCheckedFunction(s) && bodyLines(s) >= MIN_BODY_LINES;
 }
 
+/** Go 里各包惯用的同名函数：程序入口、包初始化和构造函数，同名不说明重复 */
+function isGoConventionalName(name: string): boolean {
+  return name === 'main' || name === 'init' || /^New(?![a-z])/.test(name);
+}
+
+/** 方法所属的类型：qualifiedName 去掉最后的方法名（Go 为 `包路径.类型`） */
+function ownerOf(s: SymbolRow): string {
+  return s.qualifiedName.slice(0, s.qualifiedName.lastIndexOf('.'));
+}
+
 /**
- * 同名重复：不同文件里名字完全相同、签名形状也相同（参数个数相同、是否有返回值一致）。
+ * Go 的同名重复额外条件：main、init、New 开头的函数不算；方法要求包路径和类型都相同，
+ * 不同类型实现同一个接口的方法（如各类型的 `String()`）不算
+ */
+function goSameNameAllowed(a: FunctionFeatures, b: FunctionFeatures): boolean {
+  if (a.symbol.kind === 'method' || b.symbol.kind === 'method') return a.symbol.kind === b.symbol.kind && ownerOf(a.symbol) === ownerOf(b.symbol);
+  return !isGoConventionalName(a.symbol.name);
+}
+
+/**
+ * 同名重复：不同文件里名字完全相同、签名形状也相同（参数个数相同、是否有返回值一致）；Go 另见 goSameNameAllowed。
  * 同一文件里的同名是重复定义（qualified_name 带 `#2`），不算。
  */
 export function isSameNameDuplicate(a: FunctionFeatures, b: FunctionFeatures): boolean {
@@ -137,7 +200,8 @@ export function isSameNameDuplicate(a: FunctionFeatures, b: FunctionFeatures): b
     a.symbol.name === b.symbol.name &&
     a.symbol.path !== b.symbol.path &&
     a.shape.params === b.shape.params &&
-    a.shape.returnsValue === b.shape.returnsValue
+    a.shape.returnsValue === b.shape.returnsValue &&
+    (a.language !== 'go' || goSameNameAllowed(a, b))
   );
 }
 

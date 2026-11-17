@@ -55,3 +55,11 @@ export function receiverVarName(decl: Node): string | undefined {
   const name = param?.childForFieldName('name')?.text;
   return name && name !== '_' ? name : undefined;
 }
+
+/** `x.Name` 的 x 和 Name；不是 selector_expression 或缺少其中一部分时为 undefined */
+export function goSelectorParts(node: Node | null | undefined): { operand: Node; field: string } | undefined {
+  if (node?.type !== 'selector_expression') return undefined;
+  const operand = node.childForFieldName('operand');
+  const field = node.childForFieldName('field')?.text;
+  return operand && field ? { operand, field } : undefined;
+}

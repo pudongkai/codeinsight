@@ -1,4 +1,5 @@
 import type { Node } from 'web-tree-sitter';
+import { goSelectorParts } from './go-syntax.js';
 import type { GoTypeChain } from './types.js';
 
 /** 解析类型名需要的文件信息：本包导入路径和导入名表 */
@@ -53,11 +54,9 @@ export function isImportName(name: string, ctx: GoTypeContext, vars: GoVarTypes)
 /** 被调函数是包级函数（`F()` 或 `pkg.F()`）时返回它的 qualifiedName */
 function calleeName(fn: Node | null, ctx: GoTypeContext, vars: GoVarTypes): string | undefined {
   if (fn?.type === 'identifier') return vars.has(fn.text) ? undefined : `${ctx.packagePath}.${fn.text}`;
-  if (fn?.type !== 'selector_expression') return undefined;
-  const operand = fn.childForFieldName('operand');
-  const field = fn.childForFieldName('field')?.text;
-  if (operand?.type !== 'identifier' || !field || !isImportName(operand.text, ctx, vars)) return undefined;
-  return `${ctx.imports[operand.text]}.${field}`;
+  const sel = goSelectorParts(fn);
+  if (sel?.operand.type !== 'identifier' || !isImportName(sel.operand.text, ctx, vars)) return undefined;
+  return `${ctx.imports[sel.operand.text]}.${sel.field}`;
 }
 
 /** 表达式的类型线索：变量、字段访问、`T{}`、`&T{}`、包级函数调用（取第一个返回类型）；推断不出时为 undefined */
@@ -76,11 +75,10 @@ export function exprChain(expr: Node | null | undefined, ctx: GoTypeContext, var
       return ctor ? { root: { ctor }, fields: [] } : undefined;
     }
     case 'selector_expression': {
-      const operand = expr.childForFieldName('operand');
-      const field = expr.childForFieldName('field')?.text;
-      if (!field || (operand?.type === 'identifier' && isImportName(operand.text, ctx, vars))) return undefined;
-      const base = exprChain(operand, ctx, vars);
-      return base ? { root: base.root, fields: [...base.fields, field] } : undefined;
+      const sel = goSelectorParts(expr);
+      if (!sel || (sel.operand.type === 'identifier' && isImportName(sel.operand.text, ctx, vars))) return undefined;
+      const base = exprChain(sel.operand, ctx, vars);
+      return base ? { root: base.root, fields: [...base.fields, sel.field] } : undefined;
     }
     default:
       return undefined;

@@ -6,9 +6,9 @@ import { symbolRef } from '../review/impact.js';
 import type { Store } from '../store/db.js';
 import {
   bodySimilarityOf,
-  FUNCTION_KINDS,
   functionFeatures,
   isCheckedFunction,
+  isSimilarityKind,
   isSameNameDuplicate,
   nameSimilarity,
   shapeSimilarity,
@@ -18,7 +18,7 @@ import { LshIndex, minhash } from './minhash.js';
 import { pushTo } from '../util/collections.js';
 
 export { LshIndex, minhash, MINHASH_SIZE } from './minhash.js';
-export { FUNCTION_KINDS, isCheckedFunction, isComparableFunction, isSameNameDuplicate, nameTokens, signatureShape, shapeSimilarity, MIN_BODY_LINES } from './features.js';
+export { FUNCTION_KINDS, isCheckedFunction, isComparableFunction, isSameNameDuplicate, isSimilarityKind, nameTokens, signatureShape, shapeSimilarity, MIN_BODY_LINES } from './features.js';
 
 /** 函数体相似度达到这个值时，名字不像也作为候选 */
 export const BODY_CANDIDATE_MIN = 0.5;
@@ -201,7 +201,7 @@ export function findDuplicates(input: SimilarInput): SimilarResult {
     ? pool
     : input.queryIds!.flatMap((id) => {
         const s = byId.get(id);
-        return s && FUNCTION_KINDS.has(s.kind) ? [features.get(id) ?? functionFeatures(s)] : [];
+        return s && isSimilarityKind(s) ? [features.get(id) ?? functionFeatures(s)] : [];
       });
   const stats: SimilarStats = { queries: queries.length, candidates: 0, filtered: 0, aboveThreshold: 0, sameName: 0, findings: 0 };
   const withLsh = scanAll || queries.length > EXACT_BODY_QUERY_MAX;
@@ -241,21 +241,35 @@ export function similarInSnapshot(store: Store, snapshotId: number, opts: Simila
   return result;
 }
 
-/** 传入代码片段的虚拟路径，不会和仓库里的文件重名 */
-export const SNIPPET_PATH = '<snippet>/snippet.py';
+/** 代码片段能用的语言 */
+export type SnippetLanguage = 'python' | 'go';
+
+/** 传入代码片段的虚拟路径（相似比较按路径判断语言），不会和仓库里的文件重名 */
+export const SNIPPET_PATHS: Readonly<Record<SnippetLanguage, string>> = { python: '<snippet>/snippet.py', go: '<snippet>/snippet.go' };
+
+/** 片段在各语言里的写法：补齐能单独解析的文件头，只有函数体时包成名为 snippet 的函数 */
+const SNIPPET_SOURCE: Readonly<Record<SnippetLanguage, { file(code: string): string; wrap(code: string): string }>> = {
+  python: {
+    file: (code) => code,
+    wrap: (code) => `def snippet():\n${code.split('\n').map((l) => '    ' + l).join('\n')}\n`,
+  },
+  go: {
+    file: (code) => (/^\s*package\s/m.test(code) ? code : `package snippet\n\n${code}`),
+    wrap: (code) => `package snippet\n\nfunc snippet() {\n${code}\n}\n`,
+  },
+};
 
 /** 解析代码片段里的函数；片段里没有函数定义时（只有一段函数体）包成一个名为 snippet 的匿名函数 */
-async function snippetFunctions(code: string, snapshotId: number): Promise<{ functions: SymbolRow[]; anonymous: boolean }> {
-  const python = languageSupport('python')!;
-  const parser = await python.getParser();
+async function snippetFunctions(code: string, snapshotId: number, language: SnippetLanguage): Promise<{ functions: SymbolRow[]; anonymous: boolean }> {
+  const support = languageSupport(language)!;
+  const parser = await support.getParser();
   const parse = (source: string) =>
-    python.extractFile(parser, SNIPPET_PATH, source, { isTest: false, isGenerated: false }, emptyExtractContext())
-      .symbols.filter((s) => FUNCTION_KINDS.has(s.kind))
+    support.extractFile(parser, SNIPPET_PATHS[language], source, { isTest: false, isGenerated: false }, emptyExtractContext())
+      .symbols.filter(isSimilarityKind)
       .map(({ nameLine: _l, nameCol: _c, ...s }) => ({ ...s, snapshotId }));
-  const found = parse(code);
+  const found = parse(SNIPPET_SOURCE[language].file(code));
   if (found.length > 0) return { functions: found, anonymous: false };
-  const body = code.split('\n').map((l) => '    ' + l).join('\n');
-  return { functions: parse(`def snippet():\n${body}\n`), anonymous: true };
+  return { functions: parse(SNIPPET_SOURCE[language].wrap(code)), anonymous: true };
 }
 
 export interface SimilarToCodeResult extends SimilarResult {
@@ -265,15 +279,18 @@ export interface SimilarToCodeResult extends SimilarResult {
 
 /**
  * 找和一段尚未写入仓库的代码相似的已有函数（AI 写代码前查重）。片段不在调用图里，不做透传 / 包装排除。
- * 只有函数体、被包装成函数的片段没有真实名字，按匿名查询处理。
+ * 只有函数体、被包装成函数的片段没有真实名字，按匿名查询处理。片段按 language 解析（默认 Python），只和同语言的函数比较。
  */
-export async function similarToCode(store: Store, snapshotId: number, code: string, opts: { minScore: number; maxCandidates?: number }): Promise<SimilarToCodeResult> {
+export async function similarToCode(
+  store: Store, snapshotId: number, code: string, opts: { minScore: number; maxCandidates?: number; language?: SnippetLanguage },
+): Promise<SimilarToCodeResult> {
   const started = Date.now();
-  const { functions: queries, anonymous } = await snippetFunctions(code, snapshotId);
+  const { language = 'python', ...scoring } = opts;
+  const { functions: queries, anonymous } = await snippetFunctions(code, snapshotId, language);
   const queryIds = queries.map((q) => q.id);
   const symbols = [...store.getSymbols(snapshotId, { withTokens: true }), ...queries];
   const anonymousIds = anonymous ? new Set(queryIds) : undefined;
-  const result = findDuplicates({ symbols, queryIds, excludeIds: new Set(queryIds), anonymousIds, linkedPairs: new Set(), ...opts });
-  log.info('similar_done', { snapshotId, mode: 'code', functions: queries.length, anonymous, ...result.stats, minScore: opts.minScore, ms: Date.now() - started });
+  const result = findDuplicates({ symbols, queryIds, excludeIds: new Set(queryIds), anonymousIds, linkedPairs: new Set(), ...scoring });
+  log.info('similar_done', { snapshotId, mode: 'code', language, functions: queries.length, anonymous, ...result.stats, minScore: scoring.minScore, ms: Date.now() - started });
   return { ...result, queries };
 }

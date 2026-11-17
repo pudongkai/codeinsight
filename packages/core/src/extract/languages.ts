@@ -4,7 +4,9 @@ import type { SymbolRow } from '../model/types.js';
 import { resolveDjangoEntries } from './entries.js';
 import { resolveModels } from './models.js';
 import { extractGoFile, restoreGoFile } from './go.js';
+import { resolveGoEntries } from './go-entries.js';
 import { completeGoFiles } from './go-index.js';
+import { resolveGoModels } from './go-models.js';
 import { getGoParser, getPythonParser } from './parser.js';
 import { extractPythonFile, restoreExtractedFile, type FileFlags } from './python.js';
 import type { ExtractedEntry, ExtractedFile } from './types.js';
@@ -62,8 +64,8 @@ const go: LanguageSupport = {
     completeGoFiles(files);
   },
   resolveCrossFile: (files) => {
-    completeGoFiles(files);
-    return { entries: files.flatMap((f) => f.entries), models: 0 };
+    const index = completeGoFiles(files);
+    return { entries: resolveGoEntries(files, index), models: resolveGoModels(files) };
   },
 };
 

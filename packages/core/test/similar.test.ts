@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   EXACT_BODY_QUERY_MAX,
+  extractFiles,
   extractPythonFiles,
   findDuplicates,
   initDataDir,
@@ -290,6 +291,93 @@ describe('similarToCode', () => {
     try {
       const r = await similarToCode(store, snapshotId, INLINE, { minScore: 0.6 });
       expect(r.findings[0]!.candidates[0]).toMatchObject({ symbol: { path: 'lease/repo.py' }, reasons: ['same-name duplicate'], score: 0.5 });
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Go functions', () => {
+  const MODULES = new Map([['', 'example.com/shop']]);
+
+  async function goSymbolsOf(files: Record<string, string>): Promise<SymbolRow[]> {
+    const sources = Object.entries(files).map(([p, source]) => ({ path: p, source, language: 'go' as const, isTest: false, isGenerated: false }));
+    const { files: extracted } = await extractFiles(sources, { goModules: MODULES });
+    return extracted.flatMap((f) => f.symbols.map((s) => ({ ...s, snapshotId: 0 })));
+  }
+
+  /** 结构相同、只有名字和字段不同的两个查询函数，另有一个结构不同的函数 */
+  const lookup = (name: string, field: string) => [
+    `func ${name}(db *sql.DB, id int) (string, error) {`,
+    `\trow := db.QueryRow("SELECT ${field} FROM users WHERE id = ?", id)`,
+    '\tvar v string',
+    '\tif err := row.Scan(&v); err != nil {',
+    '\t\treturn "", err',
+    '\t}',
+    '\treturn v, nil',
+    '}',
+    '',
+  ].join('\n');
+  const USERS = ['package users', '', 'import "database/sql"', '', lookup('EmailOf', 'email'), [
+    'func Total(items []int) int {', '\tsum := 0', '\tfor _, it := range items {', '\t\tsum += it', '\t}', '\treturn sum', '}', '',
+  ].join('\n')].join('\n');
+  const ACCOUNTS = ['package accounts', '', 'import "database/sql"', '', lookup('PhoneOf', 'phone')].join('\n');
+
+  it('reads the Go signature shape without the receiver, with grouped params and multiple results', async () => {
+    const syms = await goSymbolsOf({
+      'm/m.go': [
+        'package m', '', 'type S struct{}', '', 'type R interface {', '\tFind(id int) (*S, error)', '}', '',
+        'func (s *S) Do(a, b int, opts ...string) (int, error) {', '\treturn 0, nil', '}', '',
+        'func Map[K comparable, V any](m map[K]V, f func(K) V) {', '}', '',
+      ].join('\n'),
+    });
+    const by = new Map(syms.map((s) => [s.name, s]));
+    expect(signatureShape(by.get('Do')!)).toEqual({ params: 3, returnsValue: true });
+    expect(signatureShape(by.get('Map')!)).toEqual({ params: 2, returnsValue: false });
+    expect(signatureShape(by.get('Find')!)).toEqual({ params: 1, returnsValue: true });
+  });
+
+  it('ranks the structurally identical Go function first and never compares Go with Python', async () => {
+    const syms = [
+      ...(await goSymbolsOf({ 'users/users.go': USERS, 'accounts/accounts.go': ACCOUNTS })),
+      ...(await symbolsOf({ 'pkg/repo.py': REPO_PY })),
+    ];
+    const q = syms.find((s) => s.name === 'EmailOf')!;
+    const { findings } = findDuplicates({ symbols: syms, queryIds: [q.id], linkedPairs: new Set(), minScore: 0.3 });
+    const c = findings[0]!.candidates;
+    expect(c[0]!.symbol).toMatchObject({ path: 'accounts/accounts.go', qualifiedName: 'example.com/shop/accounts.PhoneOf' });
+    expect(c.every((x) => x.symbol.path.endsWith('.go'))).toBe(true);
+  });
+
+  it('does not treat String() on different types, New() in different packages or interface methods as same-name duplicates', async () => {
+    const pkg = (name: string, type: string) => [
+      `package ${name}`, '', `type ${type} struct{ n int }`, '',
+      `func New() *${type} {`, `\treturn &${type}{}`, '}', '',
+      `func (x ${type}) String() string {`, '\treturn "x"', '}', '',
+      'func main() {', '}', '',
+      'type Stringer interface {', '\tString() string', '}', '',
+      'func Helper(n int) int {', '\treturn n + 1', '}', '',
+    ].join('\n');
+    const syms = await goSymbolsOf({ 'a/a.go': pkg('a', 'A'), 'b/b.go': pkg('b', 'B') });
+    const { findings } = findDuplicates({ symbols: syms, linkedPairs: new Set(), minScore: 0.99 });
+    const sameName = findings.flatMap((f) => f.candidates.filter((c) => c.reasons.includes('same-name duplicate')).map(() => f.symbol.name));
+    // 只有普通函数 Helper 按同名重复报告
+    expect(sameName).toEqual(['Helper']);
+  });
+
+  it('finds Go functions for a Go snippet, with or without a package clause', async () => {
+    const store = new Store(path.join(tempDir('ci-similar-go-'), 'index.db'));
+    const snap = store.createSnapshot('commit', 'x', 'x');
+    store.insertSymbols([...(await goSymbolsOf({ 'users/users.go': USERS })), ...(await symbolsOf({ 'pkg/repo.py': REPO_PY }))].map((s) => ({ ...s, snapshotId: snap.id })));
+    try {
+      const named = await similarToCode(store, snap.id, `import "database/sql"\n\n${lookup('AddressOf', 'address')}`, { minScore: 0.6, language: 'go' });
+      expect(named.queries.map((q) => q.path)).toEqual(['<snippet>/snippet.go']);
+      expect(named.findings[0]!.candidates[0]!.symbol).toMatchObject({ path: 'users/users.go', name: 'EmailOf' });
+      const body = lookup('X', 'address').split('\n').slice(1, -2).join('\n');
+      // 匿名片段没有参数和返回值，签名形状不计分，阈值放低
+      const anonymous = await similarToCode(store, snap.id, body, { minScore: 0.5, language: 'go' });
+      expect(anonymous.queries.map((q) => q.name)).toEqual(['snippet']);
+      expect(anonymous.findings[0]!.candidates.map((c) => c.symbol.path)).toEqual(['users/users.go']);
     } finally {
       store.close();
     }

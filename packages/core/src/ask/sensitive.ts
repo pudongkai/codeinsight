@@ -12,6 +12,7 @@ export const SENSITIVE_FILES: ReadonlySet<string> = new Set([
   'package.json', '.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs',
   'makefile', 'gnumakefile', 'justfile',
   'pyproject.toml', 'setup.py', 'setup.cfg', 'tox.ini', 'noxfile.py', 'conftest.py',
+  'go.mod', 'go.sum', 'go.work',
   'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew', 'pom.xml', 'mvnw', 'build.rs',
 ].map((n) => n.toLowerCase()));
 

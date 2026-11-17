@@ -82,6 +82,27 @@ describe('StatusBar resolver warning', () => {
     expect(screen.getByTestId('resolver-warning').textContent).toBe('调用关系解析失败，邻居图不可用');
   });
 
+  it('says Go call edges come from name matching, with the install command when scip-go was not found', () => {
+    const base = status();
+    const withGo = (go: { source: 'name_match'; reason: 'not_found' | 'failed' | 'disabled' | 'no_module'; note?: string }) => (
+      { ...base, snapshot: { ...base.snapshot!, edgeSources: { python: { source: 'scip' as const }, go } } });
+    const { unmount } = render(<StatusBar status={withGo({ source: 'name_match', reason: 'not_found' })} onReindex={() => undefined} onRepoSwitched={() => undefined} />);
+    expect(screen.getByTestId('name-match-hint').textContent).toContain('Go 调用关系来自名称匹配（未找到 scip-go），可能不完整');
+    expect(screen.getByTestId('scip-go-install').textContent).toBe('go install github.com/scip-code/scip-go/cmd/scip-go@latest');
+    unmount();
+    const second = render(<StatusBar status={withGo({ source: 'name_match', reason: 'failed', note: 'go list: boom' })} onReindex={() => undefined} onRepoSwitched={() => undefined} />);
+    expect(screen.getByTestId('name-match-hint').textContent).toBe('Go 调用关系来自名称匹配（scip-go 运行失败），可能不完整');
+    expect(screen.getByTestId('name-match-hint').getAttribute('title')).toBe('go list: boom');
+    expect(screen.queryByTestId('scip-go-install')).toBeNull();
+    second.unmount();
+    const third = render(<StatusBar status={withGo({ source: 'name_match', reason: 'no_module' })} onReindex={() => undefined} onRepoSwitched={() => undefined} />);
+    expect(screen.getByTestId('name-match-hint').textContent).toBe('Go 调用关系来自名称匹配（项目没有 go.mod），可能不完整');
+    expect(screen.queryByTestId('scip-go-install')).toBeNull();
+    third.unmount();
+    renderBar(withGo({ source: 'name_match', reason: 'disabled' }));
+    expect(screen.queryByTestId('name-match-hint')).toBeNull();
+  });
+
   it('shows no warning when resolution succeeded', () => {
     renderBar(status());
     expect(screen.queryByTestId('resolver-warning')).toBeNull();

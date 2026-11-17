@@ -35,6 +35,8 @@ export interface CodeInsightConfig {
   testGlobs: string[];
   generatedGlobs: string[];
   scipTimeoutMs: number;
+  /** scip-go（含 go list 检查）的超时，超时后 Go 改用名称匹配 */
+  scipGoTimeoutMs: number;
   impactDepth: number;
   similarMinScore: number;
   /** 概览的划分、分层、外部库分类（仓库配置直接生效），以及费用和发送相关的上限（仓库配置只能调严） */
@@ -105,6 +107,7 @@ interface FileConfig {
   testGlobs?: string[];
   generatedGlobs?: string[];
   scipTimeoutMs?: number;
+  scipGoTimeoutMs?: number;
   impactDepth?: number;
   similar?: { minScore?: number };
   overview?: FileOverviewConfig;
@@ -563,6 +566,7 @@ export async function loadConfig(repo: string, opts: LoadConfigOptions = {}): Pr
     testGlobs: file.testGlobs ?? [],
     generatedGlobs: file.generatedGlobs ?? [],
     scipTimeoutMs: Number(env.CODEINSIGHT_SCIP_TIMEOUT_MS ?? file.scipTimeoutMs ?? 300_000),
+    scipGoTimeoutMs: Number(env.CODEINSIGHT_SCIP_GO_TIMEOUT_MS ?? file.scipGoTimeoutMs ?? 120_000),
     impactDepth: file.impactDepth ?? 2,
     similarMinScore: file.similar?.minScore ?? 0.6,
     overview: overviewConfig(file, limits),

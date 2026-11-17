@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { initDataDir, loadConfig, reportToMarkdown, runReview, ScipPythonResolver, setLogSink, Store } from '../src/index.js';
+import { GoResolver, initDataDir, loadConfig, reportToMarkdown, runReview, ScipPythonResolver, setLogSink, Store } from '../src/index.js';
 import type { ResolveInput, Resolver, ReviewReport, SymbolChange } from '../src/index.js';
 import { commitAll, git, initRepo, tempDir, writeFiles } from './helpers/git-repo.js';
 
@@ -296,5 +296,29 @@ describe('review edge cases', () => {
     expect(report.head).toMatchObject({ ref: 'HEAD', working: false });
     expect(report.base.ref).toBe('HEAD~1');
     expect(byName(report, 'fresh')).toMatchObject([{ change: 'added' }]);
+  }, 120_000);
+});
+
+describe('review of a Go repository', () => {
+  const ORDER = (createBody: string) => [
+    'package order', '',
+    'type Service struct{ n int }', '',
+    'func (s *Service) Create(id int) int {', `\treturn ${createBody}`, '}', '',
+  ].join('\n');
+  const HELPER = ['func Total(items []int) int {', '\tsum := 0', '\tfor _, it := range items {', '\t\tsum += it', '\t}', '\treturn sum', '}', ''].join('\n');
+
+  it('reports a changed method and a function moved to another file as symbol-level changes', async () => {
+    const repo = initRepo({
+      'go.mod': 'module example.com/shop\n\ngo 1.22\n',
+      'internal/order/service.go': `${ORDER('id + s.n')}\n${HELPER}`,
+      'internal/order/util.go': 'package order\n',
+    });
+    writeFiles(repo, { 'internal/order/service.go': ORDER('id * 2 + s.n'), 'internal/order/util.go': `package order\n\n${HELPER}` });
+    commitAll(repo, 'v2: change Create, move Total');
+    const report = await (await setup(repo)).review({ head: 'HEAD', resolver: new GoResolver() });
+    const PKG = 'example.com/shop/internal/order';
+    expect(byName(report, `${PKG}.Service.Create`)).toMatchObject([{ change: 'modified', kind: 'method', path: 'internal/order/service.go' }]);
+    expect(byName(report, `${PKG}.Total`)).toMatchObject([{ change: 'moved', path: 'internal/order/util.go', movedFrom: `internal/order/service.go#function#${PKG}.Total#` }]);
+    expect(report.warnings.map((w) => w.code)).not.toContain('language_unsupported');
   }, 120_000);
 });

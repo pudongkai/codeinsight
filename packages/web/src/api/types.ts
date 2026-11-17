@@ -33,7 +33,7 @@ export interface IndexJobView {
 
 export interface EdgeSourceView {
   source: 'scip' | 'name_match' | 'failed';
-  reason?: 'not_found' | 'failed' | 'disabled';
+  reason?: 'not_found' | 'failed' | 'disabled' | 'no_module';
   at?: number;
   note?: string;
 }

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { SnapshotView, StatusResponse } from '../api/types';
+import type { EdgeSourceView, SnapshotView, StatusResponse } from '../api/types';
 import { basedOn, formatShortTime } from '../format';
 import { RepoSwitcher } from '../repo/RepoSwitcher';
 import { useOpenSettings } from '../settings/context';
@@ -82,6 +82,33 @@ function resolverWarning(snapshot: SnapshotView): string | undefined {
   return `${failed.map((l) => LANGUAGE_LABELS[l] ?? l).join('、')} 调用关系解析失败，这部分的邻居图不可用`;
 }
 
+/** scip-go 的安装命令，和 core 的 SCIP_GO_INSTALL 一致 */
+const SCIP_GO_INSTALL = 'go install github.com/scip-code/scip-go/cmd/scip-go@latest';
+
+/** 名称匹配提示括号里的原因；选项关闭时不提示 */
+const NAME_MATCH_REASONS: Partial<Record<NonNullable<EdgeSourceView['reason']>, string>> = {
+  not_found: '未找到 scip-go',
+  failed: 'scip-go 运行失败',
+  no_module: '项目没有 go.mod',
+};
+
+/**
+ * Go 的调用关系改用名称匹配时的提示（找不到 scip-go、scip-go 运行失败、项目没有 go.mod）；
+ * 找不到时附上安装命令，失败时悬停显示原因
+ */
+function NameMatchHint({ snapshot }: { snapshot: SnapshotView }) {
+  const go = snapshot.edgeSources?.go;
+  const label = go?.source === 'name_match' && go.reason ? NAME_MATCH_REASONS[go.reason] : undefined;
+  if (!go || !label) return null;
+  const notFound = go.reason === 'not_found';
+  return (
+    <span className="warn" data-testid="name-match-hint" title={go.note}>
+      Go 调用关系来自名称匹配（{label}），可能不完整
+      {notFound && <>，安装：<code data-testid="scip-go-install">{SCIP_GO_INSTALL}</code></>}
+    </span>
+  );
+}
+
 /** 第二行的索引状态：来源、解析失败、建索引进度、代码变化；都没有时不显示 */
 function IndexBar({ status, onReindex }: { status: StatusResponse | undefined; onReindex(): void }) {
   if (!status?.repo) return null;
@@ -89,6 +116,7 @@ function IndexBar({ status, onReindex }: { status: StatusResponse | undefined; o
     <div className="indexbar">
       {status.snapshot && <IndexSource status={status} />}
       {status.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn" data-testid="resolver-warning">{resolverWarning(status.snapshot)}</span>}
+      {status.snapshot && <NameMatchHint snapshot={status.snapshot} />}
       <IndexState status={status} />
       <CodeChanged status={status} onReindex={onReindex} />
     </div>

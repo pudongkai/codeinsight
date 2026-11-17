@@ -2,7 +2,7 @@ import { cpSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  applyFeatureNames, buildSnapshot, classifyExternal, collectExternal, collectImportModules, computeStructure, externalLibs,
+  applyFeatureNames, buildSnapshot, classifyExternal, classifyGoImport, collectExternal, collectImportModules, computeStructure, externalLibs,
   externalTable, firstPathSegment, getPythonParser, initDataDir, loadConfig, makeFeature, moduleMarkdown, moduleSnippets,
   overviewMarkdown, projectPackages, Store, structureReport,
 } from '../src/index.js';
@@ -323,4 +323,77 @@ describe('module snippets', () => {
     const out = await moduleSnippets('m', ranked, read, { perModule: 6, maxLines: 60, maxCharsPerModule: 30 });
     expect(out.map((s) => s.code)).toEqual(['line 1\nline 2', 'line 3\nline 4']);
   });
+});
+
+describe('Go overview facts', () => {
+  const GO_MOD = 'module example.com/shop\n\ngo 1.22\n';
+  const MAIN_GO = [
+    'package main', '',
+    'import (',
+    '\t"database/sql"', '\t"net/http"', '\tenv "os"', '',
+    '\t"example.com/shop/internal/order"',
+    '\t"github.com/gin-gonic/gin"', '\t"github.com/redis/go-redis/v9"', '\t"github.com/jackc/pgx/v5/pgxpool"',
+    '\t"gorm.io/gorm"', '\t"github.com/spf13/viper"', '\t_ "github.com/go-sql-driver/mysql"',
+    ')', '',
+    'func main() {',
+    '\taddr := env.Getenv("LISTEN_ADDR")',
+    '\tif v, ok := env.LookupEnv("DB_DSN"); ok {', '\t\t_ = v', '\t}',
+    '\t_ = env.Getenv("PREFIX_" + addr)',
+    '\t_, _, _, _, _, _ = sql.Open, http.Get, order.New, gin.New, redis.NewClient, pgxpool.New',
+    '\t_, _ = gorm.Open, viper.Get',
+    '}', '',
+  ].join('\n');
+
+  it('classifies Go imports by path prefix, ignoring stdlib, project packages and /vN suffixes', () => {
+    const mods = ['example.com/shop'];
+    expect(classifyGoImport('net/http', mods)).toBeUndefined();
+    expect(classifyGoImport('example.com/shop/internal/order', mods)).toBeUndefined();
+    expect(classifyGoImport('example.com/shopping', mods)).toEqual({ lib: 'example.com/shopping', category: 'other' });
+    expect(classifyGoImport('github.com/jackc/pgx/v5/pgxpool', mods)).toEqual({ lib: 'github.com/jackc/pgx', category: 'database' });
+    expect(classifyGoImport('github.com/redis/go-redis/v9', mods)).toEqual({ lib: 'github.com/redis/go-redis', category: 'cache' });
+    expect(classifyGoImport('go.mongodb.org/mongo-driver/mongo', mods)).toEqual({ lib: 'go.mongodb.org/mongo-driver', category: 'database' });
+    expect(classifyGoImport('google.golang.org/grpc/credentials', mods)).toEqual({ lib: 'google.golang.org/grpc', category: 'web_framework' });
+    expect(classifyGoImport('github.com/aws/aws-sdk-go-v2/service/s3', mods)).toEqual({ lib: 'github.com/aws/aws-sdk-go-v2', category: 'storage' });
+    expect(classifyGoImport('github.com/spf13/cobra/doc', mods)).toEqual({ lib: 'github.com/spf13/cobra', category: 'other' });
+    expect(classifyGoImport('go.uber.org/zap/zapcore', mods)).toEqual({ lib: 'go.uber.org/zap', category: 'other' });
+    expect(classifyGoImport('gopkg.in/yaml.v3', mods)).toEqual({ lib: 'gopkg.in/yaml.v3', category: 'other' });
+  });
+
+  it('groups Go third-party libraries by category and lists environment variables, with go.mod read from the snapshot', async () => {
+    const files = { 'go.mod': GO_MOD, 'cmd/main.go': MAIN_GO };
+    const { byModule } = await collectExternal({
+      modules: [{ id: 'cmd', files: ['cmd/main.go'] }],
+      files: Object.keys(files).map((p) => ({ path: p, language: p.endsWith('.go') ? 'go' : 'unknown' }) as FileRow),
+      read: async (p) => files[p as keyof typeof files],
+      table: externalTable(),
+    });
+    expect(byModule.get('cmd')!.external).toEqual([
+      { category: 'database', libs: ['github.com/go-sql-driver/mysql', 'github.com/jackc/pgx', 'gorm.io/gorm'], files: ['cmd/main.go'] },
+      { category: 'cache', libs: ['github.com/redis/go-redis'], files: ['cmd/main.go'] },
+      { category: 'web_framework', libs: ['github.com/gin-gonic/gin'], files: ['cmd/main.go'] },
+      { category: 'other', libs: ['github.com/spf13/viper'], files: ['cmd/main.go'] },
+    ]);
+    expect(byModule.get('cmd')!.envVars.map((e) => e.name)).toEqual(['DB_DSN', 'LISTEN_ADDR']);
+  });
+
+  it('counts only exported Go functions, types and methods of exported types as public', async () => {
+    const repo = initRepo({
+      'go.mod': GO_MOD,
+      'internal/order/order.go': [
+        'package order', '',
+        '// Service handles orders.', 'type Service struct{ repo Repo }', '',
+        'type Repo interface {', '\tFind(id int) (string, error)', '}', '',
+        'type cache struct{}', '',
+        'func New(r Repo) *Service {', '\treturn &Service{repo: r}', '}', '',
+        'func helper() int {', '\treturn 1', '}', '',
+        'func (s *Service) Create(id int) (string, error) {', '\treturn s.repo.Find(id + helper())', '}', '',
+        'func (s *Service) validate() bool {', '\treturn true', '}', '',
+        'func (c cache) Get() int {', '\treturn 0', '}', '',
+      ].join('\n'),
+    });
+    const { structure } = await structureOf(repo, {});
+    const names = [...structure.ranked.values()].flat().map((s) => s.name).sort();
+    expect(names).toEqual(['Create', 'Find', 'New', 'Repo', 'Service']);
+    expect(structure.external).toEqual([]);
+  }, 120_000);
 });

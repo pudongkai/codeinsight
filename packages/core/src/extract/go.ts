@@ -2,10 +2,11 @@ import path from 'node:path';
 import type { Node, Parser } from 'web-tree-sitter';
 import type { SymbolRow } from '../model/types.js';
 import { sha1 } from '../util/hash.js';
-import { collectCalls } from './go-calls.js';
+import { collectCalls, type CallVisitor } from './go-calls.js';
 import { addFunc, addTypeDeclaration, linkReceivers, type DeclWalk } from './go-decls.js';
 import { collectGoEnvReads, collectGoImports, goImportBindings, goImportRows } from './go-imports.js';
 import { goPackagePath } from './go-module.js';
+import { addHandlerLiterals, routeEnv, routeVisitor, type RouteCollection, type RouteEnv } from './go-routes.js';
 import { goDocComment } from './go-syntax.js';
 import { declareParams, fileTypeLookup, type GoTypeContext } from './go-types.js';
 import type { FileFlags } from './python.js';
@@ -26,30 +27,42 @@ function moduleSymbol(filePath: string, packagePath: string, root: Node, source:
   };
 }
 
-/** 顶层声明建符号，同时记下 struct 字段、函数返回类型、标签 */
-function walkDecls(root: Node, w: DeclWalk): void {
+/** 顶层声明建符号，同时记下 struct 字段、函数返回类型、标签；最后给处理函数字面量建符号 */
+function walkDecls(root: Node, w: DeclWalk, env: RouteEnv): void {
   for (const n of root.namedChildren) {
     if (n.type === 'function_declaration' || n.type === 'method_declaration') addFunc(w, n);
     else if (n.type === 'type_declaration') addTypeDeclaration(w, n);
   }
   linkReceivers(w);
+  for (const [idx, decl] of w.funcs) addHandlerLiterals(w, [decl], w.out[idx]!.qualifiedName, idx, env);
+  const vars = root.namedChildren.filter((n) => n.type === 'var_declaration');
+  addHandlerLiterals(w, vars, `${w.ctx.packagePath}.glob.`, 0, env);
 }
 
-/** 各函数体和包级变量初始化里的调用点 */
-function fileCalls(root: Node, w: DeclWalk, symbols: ExtractedSymbol[]): GoCallSite[] {
+/** 各函数体和包级变量初始化里的调用点；visitor 为每个函数新建的附加处理（路由收集） */
+function fileCalls(root: Node, w: DeclWalk, symbols: ExtractedSymbol[], visitor: () => CallVisitor): GoCallSite[] {
   const out: GoCallSite[] = [];
   const lookup = fileTypeLookup(w.ctx.packagePath, w.structFields, w.funcResults);
   for (const [idx, decl] of w.funcs) {
-    const c = { ctx: w.ctx, lookup, callerId: symbols[idx]!.id, vars: new Map(), out };
+    const c = { ctx: w.ctx, lookup, callerId: symbols[idx]!.id, vars: new Map(), out, visitor: visitor() };
     declareParams(decl.childForFieldName('receiver'), w.ctx, c.vars);
     declareParams(decl.childForFieldName('parameters'), w.ctx, c.vars);
     const body = decl.childForFieldName('body');
     if (body) collectCalls(body, c);
   }
   for (const n of root.namedChildren) {
-    if (n.type === 'var_declaration') collectCalls(n, { ctx: w.ctx, lookup, callerId: symbols[0]!.id, vars: new Map(), out });
+    if (n.type !== 'var_declaration') continue;
+    collectCalls(n, { ctx: w.ctx, lookup, callerId: symbols[0]!.id, vars: new Map(), out, visitor: visitor() });
   }
   return out.sort((a, b) => a.line - b.line || a.col - b.col);
+}
+
+/** 调用点和路由、cobra 命令一起收集 */
+function callsAndRoutes(root: Node, w: DeclWalk, symbols: ExtractedSymbol[], env: RouteEnv): { calls: GoCallSite[] } & RouteCollection {
+  const literalIds = new Map([...w.literals].map(([start, idx]) => [start, symbols[idx]!.id]));
+  const routes: RouteCollection = { routes: [], cobraCommands: [] };
+  const calls = fileCalls(root, w, symbols, () => routeVisitor(env, literalIds, routes));
+  return { calls, ...routes };
 }
 
 /** struct 标签按 struct 符号 id 记录 */
@@ -61,7 +74,7 @@ function structTagsById(w: DeclWalk, symbols: ExtractedSymbol[]): Record<string,
 
 function newWalk(filePath: string, flags: FileFlags, ctx: GoTypeContext, module: RawSymbol): DeclWalk {
   return {
-    path: filePath, flags, ctx, out: [module], types: new Map(), receivers: new Map(), funcs: new Map(),
+    path: filePath, flags, ctx, out: [module], types: new Map(), receivers: new Map(), funcs: new Map(), literals: new Map(),
     structTags: new Map(), structFields: {}, funcResults: {},
   };
 }
@@ -77,20 +90,21 @@ function extractTree(root: Node, filePath: string, source: string, flags: FileFl
   const { packageName, packagePath } = packageOf(root, filePath, goModules);
   const bindings = goImportBindings(collectGoImports(root));
   const ctx: GoTypeContext = { packagePath, imports: bindings.imports };
+  const env = routeEnv(ctx);
   const w = newWalk(filePath, flags, ctx, moduleSymbol(filePath, packagePath, root, source, flags));
-  walkDecls(root, w);
+  walkDecls(root, w, env);
   const symbols = finalizeSymbols(w.out);
   const go: GoFileFacts = {
     packagePath, packageName, imports: bindings.imports, dotImports: bindings.dotImports,
-    calls: fileCalls(root, w, symbols), structTags: structTagsById(w, symbols),
+    ...callsAndRoutes(root, w, symbols, env), structTags: structTagsById(w, symbols),
     envReads: collectGoEnvReads(root, bindings), structFields: w.structFields, funcResults: w.funcResults,
   };
   return { path: filePath, language: 'go', symbols, entries: [], importRows: goImportRows(root), imports: new Map(), go };
 }
 
 /**
- * 提取一个 Go 文件：module 符号、函数、方法、struct、interface 和 interface 方法，以及 go 字段
- * （import、调用点和局部类型推断、struct 标签、环境变量读取）。方法的跨文件父符号和要跨文件确定的
+ * 提取一个 Go 文件：module 符号、函数、方法、struct、interface 和 interface 方法、作为处理函数的函数字面量，
+ * 以及 go 字段（import、调用点和局部类型推断、struct 标签、环境变量读取、路由和 cobra 命令）。方法的跨文件父符号和要跨文件确定的
  * 接收者类型由跨文件处理补上
  */
 export function extractGoFile(

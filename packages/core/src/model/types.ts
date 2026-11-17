@@ -3,8 +3,8 @@ import type { Language, SupportLevel } from './language.js';
 export type SnapshotKind = 'commit' | 'working';
 export type StepStatus = 'pending' | 'ok' | 'failed' | 'skipped';
 
-/** 名称匹配的原因：找不到外部工具、外部工具运行失败、选项关闭 */
-export type FallbackReason = 'not_found' | 'failed' | 'disabled';
+/** 名称匹配的原因：找不到外部工具、外部工具运行失败、选项关闭、项目里没有 go.mod（装了工具也用不上） */
+export type FallbackReason = 'not_found' | 'failed' | 'disabled' | 'no_module';
 
 /** 一种语言的调用边来自哪里：scip 索引、名称匹配，或这种语言解析失败（其他语言的边照常入库） */
 export interface EdgeSource {
@@ -68,9 +68,12 @@ export interface SymbolRow {
 
 /**
  * 数据模型类的来源：pydantic BaseModel、SQLModel、SQLAlchemy 声明式模型（含 Flask-SQLAlchemy db.Model）、
- * Django models.Model、TypedDict、NamedTuple、dataclass、attrs。继承项目内模型类的子类沿用基类的类别
+ * Django models.Model、TypedDict、NamedTuple、dataclass、attrs。继承项目内模型类的子类沿用基类的类别。
+ * Go 的 struct 按字段标签分：gorm（gorm 标签或嵌入 gorm.Model）、sqlx（db 标签）、json（只有 json 标签）
  */
-export type ModelKind = 'pydantic' | 'sqlmodel' | 'sqlalchemy' | 'django' | 'typeddict' | 'namedtuple' | 'dataclass' | 'attrs';
+export type ModelKind =
+  | 'pydantic' | 'sqlmodel' | 'sqlalchemy' | 'django' | 'typeddict' | 'namedtuple' | 'dataclass' | 'attrs'
+  | 'gorm' | 'sqlx' | 'json';
 
 export type EdgeKind = 'call' | 'reference' | 'import' | 'inherit' | 'implement' | 'dispatch' | 'route_handler';
 export type Provenance = 'scip' | 'psi' | 'name_match' | 'framework';

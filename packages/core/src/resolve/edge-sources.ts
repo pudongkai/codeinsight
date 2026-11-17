@@ -25,7 +25,7 @@ export const FAILED_RERESOLVE_AFTER_MS = 60 * 60 * 1000;
 
 /**
  * 不调用解析器、只看记录判断有没有可能需要重新解析：某种语言因为找不到外部工具回退到名称匹配，
- * 或因为外部工具运行失败回退且已过去 FAILED_RERESOLVE_AFTER_MS。返回 true 时再由解析器的 needsReresolve 细判
+ * 或因为外部工具运行失败回退且已过去 FAILED_RERESOLVE_AFTER_MS（disabled、no_module 不算）。返回 true 时再由解析器的 needsReresolve 细判
  */
 export function mayNeedReresolve(sources: EdgeSources | null | undefined, now = Date.now()): boolean {
   return Object.values(sources ?? {}).some((s) => s.source === 'name_match'

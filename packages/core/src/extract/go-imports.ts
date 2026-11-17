@@ -1,5 +1,5 @@
 import type { Node } from 'web-tree-sitter';
-import { goStringValue } from './go-syntax.js';
+import { goSelectorParts, goStringValue } from './go-syntax.js';
 
 /** 一条 Go import */
 export interface GoImport {
@@ -62,9 +62,8 @@ const ENV_FUNCS = new Set(['Getenv', 'LookupEnv']);
 /** 调用的是 os 包里读环境变量的函数：`os.Getenv`（含别名）或点导入 os 后的 `Getenv` */
 function isEnvCall(fn: Node | null, b: GoImportBindings): boolean {
   if (fn?.type === 'identifier') return ENV_FUNCS.has(fn.text) && b.dotImports.includes('os');
-  if (fn?.type !== 'selector_expression') return false;
-  const operand = fn.childForFieldName('operand');
-  return operand?.type === 'identifier' && Object.hasOwn(b.imports, operand.text) && b.imports[operand.text] === 'os' && ENV_FUNCS.has(fn.childForFieldName('field')?.text ?? '');
+  const sel = goSelectorParts(fn);
+  return sel?.operand.type === 'identifier' && Object.hasOwn(b.imports, sel.operand.text) && b.imports[sel.operand.text] === 'os' && ENV_FUNCS.has(sel.field);
 }
 
 /** `os.Getenv` / `os.LookupEnv` 的字面量参数，去重后按出现顺序 */

@@ -19,6 +19,8 @@ export interface DeclWalk {
   receivers: Map<number, string>;
   /** 函数和方法：out 里的下标 → 声明节点，之后收集调用点 */
   funcs: Map<number, Node>;
+  /** 建了符号的处理函数字面量：起始位置 → out 里的下标 */
+  literals: Map<number, number>;
   /** struct 在 out 里的下标 → 标签信息 */
   structTags: Map<number, GoStructTags>;
   structFields: Record<string, Record<string, string>>;
@@ -75,6 +77,15 @@ export function addFunc(w: DeclWalk, decl: Node): void {
   }
   const result = typeQualifiedName(firstResultType(decl), w.ctx);
   if (result) w.funcResults[nameNode.text] = result;
+}
+
+/** 作为处理函数的函数字面量：qualifiedName 为 `<外层>.func<N>`，name 为外层之后的部分；返回在 out 里的下标 */
+export function addFuncLiteral(w: DeclWalk, lit: Node, qualifiedName: string, name: string, parent: number): number {
+  const body = lit.childForFieldName('body');
+  return push(w, lit, lit, {
+    kind: 'function', name, qualifiedName, displaySignature: collapsedHead(lit, body), parent,
+    bodyHash: sha1(lit.text), normTokens: body ? normalizeTokens([body], GO_TOKENS) : [], docstring: null,
+  });
 }
 
 /** interface 里声明的方法，父符号为 interface */

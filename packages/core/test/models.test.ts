@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractPythonFiles } from '../src/index.js';
+import { extractFiles, extractPythonFiles } from '../src/index.js';
 
 type Files = Record<string, string>;
 
@@ -132,5 +132,45 @@ describe('data model recognition', () => {
       'c.py': 'class P(Q): pass\nclass Q(P): pass\n',
     });
     expect(r).toMatchObject({ 'm.py:BaseModel': 'pydantic', 'm.py:X': 'pydantic', 'c.py:P': null, 'c.py:Q': null });
+  });
+});
+
+describe('go data model recognition', () => {
+  it('classifies structs by field tags: gorm, embedded gorm.Model, sqlx, json, and plain structs', async () => {
+    const source = `package store
+
+import "gorm.io/gorm"
+
+type User struct {
+\tID   uint   \`gorm:"primaryKey" json:"id"\`
+\tName string \`json:"name"\`
+}
+
+type Post struct {
+\tgorm.Model
+\tTitle string
+}
+
+type Row struct {
+\tID   int    \`db:"id" json:"id"\`
+\tName string \`db:"name"\`
+}
+
+type DTO struct {
+\tCount int \`json:"count,omitempty"\`
+}
+
+type Service struct {
+\trepo *Row
+}
+
+type Labeled struct {
+\tX int \`yaml:"x"\`
+}
+`;
+    const r = await extractFiles([{ path: 'store/m.go', source, language: 'go', isTest: false, isGenerated: false }], { goModules: new Map([['', 'example.com/app']]) });
+    const kinds = Object.fromEntries(r.files[0]!.symbols.filter((s) => s.kind === 'class').map((s) => [s.name, s.modelKind]));
+    expect(kinds).toEqual({ User: 'gorm', Post: 'gorm', Row: 'sqlx', DTO: 'json', Service: null, Labeled: null });
+    expect(r.models).toBe(4);
   });
 });

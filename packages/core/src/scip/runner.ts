@@ -37,11 +37,13 @@ export interface ExitInfo {
   timedOut: boolean;
   aborted: boolean;
   stderr: string;
+  /** captureStdout 为 true 时的标准输出，否则为空字符串 */
+  stdout: string;
 }
 
 interface ActiveRun {
-  /** 输出的临时文件 */
-  tmp: string;
+  /** 输出的临时文件；没有输出文件的命令为 undefined */
+  tmp?: string;
   closed: Promise<void>;
 }
 
@@ -64,24 +66,29 @@ export interface ProcessRun {
   args: string[];
   cwd: string;
   timeoutMs: number;
-  /** 输出的临时文件，被强制结束时删除 */
-  tmp: string;
+  /** 输出的临时文件，被强制结束时删除；没有输出文件的命令不传 */
+  tmp?: string;
   /** 不传时继承当前进程的环境变量 */
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** 收集标准输出（如 go list 的结果）；默认丢弃 */
+  captureStdout?: boolean;
 }
 
 /** 在单独的进程组里运行一个索引命令并等它结束；超时或中止时结束整组。不因退出码抛错，结果在返回值里 */
 export function runProcess(run: ProcessRun): Promise<ExitInfo> {
   return new Promise((resolve, reject) => {
     const child = spawn(run.bin, run.args, {
-      cwd: run.cwd, env: run.env, stdio: ['ignore', 'ignore', 'pipe'], detached: process.platform !== 'win32', windowsHide: true,
+      cwd: run.cwd, env: run.env, stdio: ['ignore', run.captureStdout ? 'pipe' : 'ignore', 'pipe'],
+      detached: process.platform !== 'win32', windowsHide: true,
     });
     active.set(child, { tmp: run.tmp, closed: new Promise((r) => child.once('close', () => r())) });
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (d: Buffer) => stdout.push(d));
     let stderr = '';
     let timedOut = false;
     let aborted = false;
-    child.stderr.on('data', (d: Buffer) => {
+    child.stderr?.on('data', (d: Buffer) => {
       stderr = (stderr + d.toString('utf8')).slice(-64 * 1024);
     });
     const timer = setTimeout(() => {
@@ -104,9 +111,23 @@ export function runProcess(run: ProcessRun): Promise<ExitInfo> {
     });
     child.on('close', (code, signal) => {
       done();
-      resolve({ code, signal, timedOut, aborted, stderr });
+      resolve({ code, signal, timedOut, aborted, stderr, stdout: Buffer.concat(stdout).toString('utf8') });
     });
   });
+}
+
+/** 被中止、超时或退出码不为 0 时抛出 ScipRunError */
+function checkExit(name: string, exit: ExitInfo, timeoutMs: number): void {
+  if (exit.aborted) throw new ScipRunError(`${name} cancelled`);
+  if (exit.timedOut) throw new ScipRunError(`${name} timed out after ${timeoutMs}ms\n${tail(exit.stderr)}`);
+  if (exit.code !== 0) throw new ScipRunError(`${name} exited with code ${exit.code ?? exit.signal}\n${tail(exit.stderr)}`);
+}
+
+/** 临时输出非空时改名为正式输出，否则抛出 ScipRunError */
+async function keepOutput(name: string, tmp: string, output: string, exit: ExitInfo): Promise<void> {
+  const size = (await stat(tmp).catch(() => undefined))?.size ?? 0;
+  if (size === 0) throw new ScipRunError(`${name} produced no output\n${tail(exit.stderr)}`);
+  await rename(tmp, output);
 }
 
 /**
@@ -129,12 +150,100 @@ export async function runScipPython(opts: ScipRunOptions): Promise<void> {
   try {
     const exit = await runProcess({ bin: process.execPath, args, cwd, timeoutMs: opts.timeoutMs, tmp, signal: opts.signal });
     log.info('scip_python_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, aborted: exit.aborted, ms: Date.now() - started });
-    if (exit.aborted) throw new ScipRunError('scip-python cancelled');
-    if (exit.timedOut) throw new ScipRunError(`scip-python timed out after ${opts.timeoutMs}ms\n${tail(exit.stderr)}`);
-    if (exit.code !== 0) throw new ScipRunError(`scip-python exited with code ${exit.code ?? exit.signal}\n${tail(exit.stderr)}`);
-    const size = (await stat(tmp).catch(() => undefined))?.size ?? 0;
-    if (size === 0) throw new ScipRunError(`scip-python produced no output\n${tail(exit.stderr)}`);
-    await rename(tmp, opts.output);
+    checkExit('scip-python', exit, opts.timeoutMs);
+    await keepOutput('scip-python', tmp, opts.output, exit);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
+
+export interface ScipGoRunOptions {
+  /** scip-go 可执行文件 */
+  bin: string;
+  /** go 可执行文件，用来先检查包能否全部加载 */
+  goBin: string;
+  /** go.mod 所在目录 */
+  moduleDir: string;
+  output: string;
+  /** go 和 scip-go 共用的环境变量 */
+  env: NodeJS.ProcessEnv;
+  /** go list 和 scip-go 合计的超时 */
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+/** 依次拼接的多个 JSON 对象（`go list -json` 的输出）拆开解析 */
+export function parseJsonStream(text: string): unknown[] {
+  const out: unknown[] = [];
+  let depth = 0;
+  let start = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      if (depth++ === 0) start = i;
+    } else if (ch === '}' && --depth === 0) {
+      out.push(JSON.parse(text.slice(start, i + 1)));
+    }
+  }
+  return out;
+}
+
+interface GoListPackage {
+  Error?: { Err?: string };
+  DepsErrors?: { Err?: string }[];
+}
+
+/** CGO_ENABLED=0 时只有 cgo 文件的包报这个错，不影响其他包的索引，不算加载错误 */
+const IGNORED_GO_LIST_ERROR = 'build constraints exclude all Go files';
+
+/** `go list -e -json` 输出里第一个包加载错误（包自身的 Error 或依赖的 DepsErrors）；没有时为 undefined */
+export function goListError(stdout: string): string | undefined {
+  for (const pkg of parseJsonStream(stdout) as GoListPackage[]) {
+    const errors = [pkg.Error, ...(pkg.DepsErrors ?? [])].filter((e) => e !== undefined && e !== null);
+    const hit = errors.find((e) => !(e.Err ?? '').includes(IGNORED_GO_LIST_ERROR));
+    if (hit) return hit.Err || 'package load error';
+  }
+  return undefined;
+}
+
+/**
+ * 先用 go list 检查 module 里的包和依赖能否全部加载：scip-go 加载依赖失败时仍正常退出，
+ * 只产出缺了引用的索引，所以有加载错误时按失败处理
+ */
+async function checkGoPackages(opts: ScipGoRunOptions, cwd: string, timeoutMs: number): Promise<void> {
+  const args = ['list', '-e', '-json', './...'];
+  const exit = await runProcess({ bin: opts.goBin, args, cwd, timeoutMs, env: opts.env, signal: opts.signal, captureStdout: true });
+  checkExit('go list', exit, timeoutMs);
+  const error = goListError(exit.stdout);
+  if (error) throw new ScipRunError(`go list: ${error}`);
+}
+
+/**
+ * 对一个 Go module 运行 scip-go 生成索引（文档路径相对 module 目录）：先 go list 检查加载错误，再 scip-go index。
+ * 固定 --module-version：不传时 scip-go 在 git 仓库里用提交号作版本，符号文字会随提交变化。
+ * 先写临时文件，成功后再改名；中止或超时时结束整个进程组
+ */
+export async function runScipGo(opts: ScipGoRunOptions): Promise<void> {
+  if (opts.signal?.aborted) throw new ScipRunError('scip-go cancelled');
+  const cwd = await realpath(opts.moduleDir);
+  const deadline = Date.now() + opts.timeoutMs;
+  const tmp = `${opts.output}.${process.pid}.tmp`;
+  const args = ['index', '-o', tmp, '--module-version=v0.0.0', '--quiet'];
+  log.info('scip_go_start', { cwd, goflags: opts.env.GOFLAGS, timeoutMs: opts.timeoutMs });
+  const started = Date.now();
+  try {
+    await checkGoPackages(opts, cwd, opts.timeoutMs);
+    const remaining = Math.max(1, deadline - Date.now());
+    const exit = await runProcess({ bin: opts.bin, args, cwd, timeoutMs: remaining, tmp, env: opts.env, signal: opts.signal });
+    log.info('scip_go_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, aborted: exit.aborted, ms: Date.now() - started });
+    checkExit('scip-go', exit, opts.timeoutMs);
+    await keepOutput('scip-go', tmp, opts.output, exit);
   } finally {
     await rm(tmp, { force: true });
   }
@@ -149,8 +258,8 @@ export async function killActiveScipProcesses(): Promise<number> {
   for (const [child] of runs) killGroup(child);
   await Promise.all(runs.map(async ([, run]) => {
     await run.closed;
-    await rm(run.tmp, { force: true });
+    if (run.tmp) await rm(run.tmp, { force: true });
   }));
-  if (runs.length > 0) log.info('scip_python_killed', { count: runs.length });
+  if (runs.length > 0) log.info('scip_processes_killed', { count: runs.length });
   return runs.length;
 }

@@ -1,6 +1,6 @@
 # CodeInsight Go 语言支持技术方案
 
-开发状态: RUNNING
+开发状态: DONE
 方案评审: 通过（2026-11-16）
 需求来源: 2026-11-16 用户需求：“增加 go 语言支持”。已确认：调用关系用 scip-go，scip-go 或 Go 工具链不可用、运行失败时按名称匹配；第一版覆盖符号和调用关系、入口识别、数据模型和外部依赖、相似代码和测试文件识别
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-16
@@ -326,24 +326,27 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
   - 完成标准：新增 `extract-go.test.ts`、`go-types.test.ts`、classify 的 Go 用例通过；go-basic 快照构建测试能查到 `example.com/gobasic/internal/order.Service.Create` 方法符号和 interface 方法符号，`service_test.go` 的 `isTest=true`，`order.pb.go` 的 `isGenerated=true`，`vendor/` 下文件的 `supportLevel='none'`；Go 文件的提取结果经过缓存读回后 `go.imports` 不为空；全部已有测试通过
   - 验证：`pnpm -r build` 通过；core 561 通过/10 跳过、server 190、web 183、cli 40 通过（server `repo-switch.test.ts` 有一次在全量运行时超时失败，单独跑 3 次和重跑全量都通过，属于负载下的时间敏感测试）；新增 `extract-go.test.ts`（16）、`go-types.test.ts`（6）、`snapshot-go.test.ts`（6），go-basic 快照里有 `example.com/gobasic/internal/order.Service.Create`（父节点为 Service struct）和 `Repo.Find`/`Repo.Save` interface 方法，`service_test.go` isTest、`order.pb.go` isGenerated、vendor 文件 supportLevel=none，缓存读回后 `go.imports` 不为空，`go.mod` 复制不硬链接，重试解析后 `go` 字段一致。选择：`importRows` 沿用顶层字段；`go` 增加 `dotImports`、`structFields`、`funcResults`；需要跨文件的接收者类型先记 `receiverChain`，跨文件处理时补成 `receiverType`；Go 占位解析器来源记为 name_match/disabled（不触发重跑）。改动 `extract/{go,go-decls,go-calls,go-types,go-imports,go-syntax,go-module,go-index,symbols}.ts`（新）、`resolve/go.ts`（新）、`extract/{parser,normalize,types,languages,index,cache,python}.ts`、`classify/index.ts`、`model/language.ts`、`snapshot/{incremental,build}.ts`
 
-- [~] 阶段4：Go 调用关系（scip-go 和名称匹配）
+- [x] 阶段4：Go 调用关系（scip-go 和名称匹配）
   - 涉及模块：packages/core/src/resolve（go.ts、go-name-match.ts、scip-rules.ts 的 Go 规则）、packages/core/src/scip/runner.ts（runScipGo）、packages/core/src/store/data-dir.ts、packages/core/src/config（scipGoTimeoutMs）、packages/core/src/snapshot/build.ts（needsReresolve 的 Go 条件）、packages/web/src/app/StatusBar.tsx（名称匹配提示）
   - 依赖：阶段0、阶段3
   - 验证方式：独立
   - 内容：scip-go 和 go 查找；`runScipGo`（先 `go list -e -json ./...` 检查加载错误，再 `scip-go index`，固定 `--module-version`；环境变量、go.work 和多 module、路径前缀、超时、中止、索引缓存和清理）；Go 的 SCIP 规则（注释、续行、包定义映射到代表文件、import 按 importRows 判断）；名称匹配（四种调用形式、import 边）；`GoResolver` 先 scip-go 后名称匹配，返回 `sources` 和 `effectiveVersion`；`needsReresolve` 的三种情况；状态栏提示：Go 调用关系来自名称匹配时显示“Go 调用关系来自名称匹配（未找到 scip-go / scip-go 运行失败），可能不完整”，未找到时附上 scip-go 的安装命令
   - 完成标准：`go-name-match.test.ts` 覆盖 ident、pkg、有推断类型的 selector、经 interface 字段调用、同名唯一、同名不唯一、import 边指向代表文件；go-basic 快照在 `scip: false` 时 `resolver_status=ok`、`edge_sources.go.source='name_match'`、有跨包的 `call` 和 `import` 边；重试解析后名称匹配的边数和第一次相同；`needsReresolve` 三种情况各一个测试；本机有 scip-go 时集成测试的 scip 路径通过，`go.mod` 在子目录时定义能对上，跑完后快照目录里 `go.mod`/`go.sum` 的 hash 不变，验证记录写明 scip-go 版本和对上的定义比例；中止时 scip-go 进程组被结束；全部测试通过
+  - 验证：`pnpm -r build` 通过；core 604 通过/10 跳过、server 191、web 184、cli 40 通过；新增 `go-name-match.test.ts`、`go-resolver.test.ts`、`go-scip.test.ts`，覆盖名称匹配四种调用形式、经 interface 字段调用、import 边指向代表文件、外部测试包、重试解析后边数相同（11）、重新解析条件、中止时结束进程组、环境变量、多 module 路径前缀、go.work、版本改写；本机 scip-go v0.2.9 跑 go-basic（go.mod 在 `backend/`）21 个定义全部对上，跑完 go.mod hash 不变。独立验证提的问题已修：没有 go.mod 记为 `no_module`（不重跑、状态栏不提示安装）、go.work 未列入的 module 用 `GOWORK=off` 单独跑、忽略 cgo 包的“build constraints exclude all Go files”、`go list` 改用普通 `-json` 兼容旧版 Go、外部测试包函数按 `<path>_test` 查找、日志改名 `scip_processes_killed`、module 查找和 selector 解析去重。偏离：有 go.work 时每个 go.mod 目录各跑一次（在 go.work 目录跑 `./...` 找不到包）；跨 module 符号版本 `.` 改写为 `v0.0.0`；转换前去掉局部符号、字段、变量和常量定义，包定义只留在代表文件；`failed` 一小时后只在当前找得到 scip-go 时重跑。改动 `resolve/{go,go-scip,scip-rules-go,go-name-match}.ts`、`scip/runner.ts`、`store/data-dir.ts`、`config/index.ts`、`snapshot/build.ts`、`extract/go-module.ts`、`extract/go-index.ts`、web `StatusBar.tsx`
 
-- [~] 阶段5：Go 入口和数据模型
+- [x] 阶段5：Go 入口和数据模型
   - 涉及模块：packages/core/src/extract（go.ts 的路由和 cobra 收集、处理函数字面量符号；go-entries.ts、go-models.ts；languages.ts 里 Go 的 resolveCrossFile）、packages/core/src/model/types.ts、packages/web/src/marks
   - 依赖：阶段3
   - 内容：4.4 表里的入口写法收集、处理函数字面量的 `func<N>` 符号、处理函数查找（函数名、`pkg.Func`、方法值、函数字面量）、路由分组前缀；数据模型识别；`ModelKind` 加 `gorm`、`sqlx`、`json`；网页模型标签
   - 完成标准：新增 `go-entries.test.ts` 覆盖 main、net/http、gin、echo、chi、cobra 各至少一个用例，以及方法值、函数字面量、gin 分组前缀、chi Route 前缀；`models.test.ts` 的 Go 用例覆盖三种类别和不是模型的 struct；go-basic 快照的 entries 里有 `cli/go` 和 `http/net/http`；`pnpm --filter @codeinsight/web test` 和 `pnpm --filter @codeinsight/web build` 通过
+  - 验证：新增 `go-entries.test.ts`，覆盖 main、net/http、gin、echo、chi、cobra、方法值、函数字面量、gin 分组前缀、chi Route 前缀；`models.test.ts` 覆盖 gorm（标签和嵌入 gorm.Model）、sqlx、json、非模型 struct；go-basic 快照入口有 `cli/go`（main）和 `http/net/http`（`main.func1`，路径 `/orders`），Order=gorm、Summary=json；web test 和 build 通过（合并后全量结果见阶段4）。选择：函数字面量按 Go 运行时规则编号 `<外层>.funcN`，提取时生成，还原时能对上；函数字面量里的调用记在字面量符号上；net/http 的 `"POST /items"` 拆成方法和路径，`http.HandlerFunc(f)` 解开为 f。未做：`mux.Handle(p, h)` 里 h 是 handler 变量或 `&T{}` 时不对应到 `ServeHTTP`。改动 `extract/{go-routes,go-entries,go-models}.ts`（新）、`extract/{go-calls,go-decls,go,go-index,types,languages,index}.ts`、`model/types.ts`、web `marks/marks.ts`
 
-- [~] 阶段6：概览、相似代码、审查和其他 Go 适配
+- [x] 阶段6：概览、相似代码、审查和其他 Go 适配
   - 涉及模块：packages/core/src/overview（external.ts、external-table.ts、facts.ts）、packages/core/src/similar、packages/core/src/ask/sensitive.ts、packages/server/src/mcp/similar-tool.ts、packages/core/test（review 的 Go 用例）
   - 依赖：阶段3
   - 内容：概览按语言选解析器，Go 用 `collectGoImports`、`collectGoEnvReads`；Go 外部依赖（标准库判断：首段不含 `.`；项目内包按 module 前缀；第三方库分类表，含数据库、缓存、消息队列、Web 框架、RPC、配置、日志、云服务等常见库）；`isPublic` 的 Go 规则；Go 签名形状、同名重复规则、interface 方法不参与；`similar` 片段按语言选路径和提取器，MCP 工具加 `language` 参数；`sensitive` 加 `go.mod`、`go.sum`、`go.work`；Go 审查用例
   - 完成标准：`overview.test.ts` 的 Go 用例通过（第三方库按类别分组、标准库和项目内包不出现、环境变量被列出、首字母大写的符号算公开）；`similar.test.ts` 的 Go 用例通过（结构相同的两个 Go 函数相似度排第一，不同类型的 `String()`、各包的 `New()` 不算同名重复，Go 片段能搜到 Go 函数）；MCP `similar` 工具传 `language: "go"` 的 server 测试通过；Go 审查用例报告符号级变更和函数移动；全部测试通过
+  - 验证：`overview.test.ts`、`similar.test.ts`、`review.test.ts`、server `mcp.test.ts` 的 Go 用例通过（合并后全量结果见阶段4）：第三方库按类别分组、标准库和项目内包不出现、环境变量列出、首字母大写算公开；结构相同的 Go 函数相似度排第一，不同类型的 `String()`、各包的 `New()` 不算同名重复，Go 片段能搜到 Go 函数；MCP similar 传 `language: "go"` 正常；Go 审查用例报告符号级变更和移动。偏离：没有新增 RPC/配置/日志/云服务类别（要改概览类型和网页标签），gRPC 归入 Web 框架、云 SDK 归入存储、viper/cobra/zap/logrus 显示为“其他”并带完整路径；Go 标准库一律不列出；MCP 参数说明沿用英文。改动 `overview/{external,external-table,facts}.ts`、`similar/{features,index}.ts`、`ask/sensitive.ts`、server `mcp/similar-tool.ts`
 
 ## 9. 待确认问题
 

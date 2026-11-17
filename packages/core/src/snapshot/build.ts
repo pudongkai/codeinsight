@@ -184,7 +184,8 @@ async function runResolver(
   const started = Date.now();
   try {
     const result = await resolver.resolve({
-      snapshotId: snap.id, contentKey: snap.contentKey, root: dir, layout, files, timeoutMs: config.scipTimeoutMs, signal,
+      snapshotId: snap.id, contentKey: snap.contentKey, root: dir, layout, files,
+      timeoutMs: config.scipTimeoutMs, goTimeoutMs: config.scipGoTimeoutMs, signal,
     });
     saveResolveResult(store, snap, resolver, result);
     const failed = result.failed?.map((f) => f.language).join(',');

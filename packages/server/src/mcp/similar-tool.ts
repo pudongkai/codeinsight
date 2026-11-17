@@ -1,4 +1,4 @@
-import { FUNCTION_KINDS, similarInSnapshot, similarToCode } from '@codeinsight/core';
+import { FUNCTION_KINDS, similarInSnapshot, similarToCode, type SnippetLanguage } from '@codeinsight/core';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -9,7 +9,8 @@ import { runTool, textResult } from './tool-result.js';
 
 const inputSchema = {
   symbol: z.string().min(1).optional().describe('Existing function: name, qualified name (Class.method) or symbol key'),
-  code: z.string().min(1).optional().describe('Python code not yet written to the repo (one or more functions, or a function body)'),
+  code: z.string().min(1).optional().describe('Python or Go code not yet written to the repo (one or more functions, or a function body)'),
+  language: z.enum(['python', 'go']).optional().describe('Language of code (default python); only functions in the same language are compared'),
 };
 
 async function bySymbol(ctx: McpContext, query: string): Promise<CallToolResult> {
@@ -24,10 +25,10 @@ async function bySymbol(ctx: McpContext, query: string): Promise<CallToolResult>
   return textResult(similarText(`# Functions similar to \`${sym.qualifiedName}\` (${location(sym)})`, findings, minScore));
 }
 
-async function byCode(ctx: McpContext, code: string): Promise<CallToolResult> {
+async function byCode(ctx: McpContext, code: string, language: SnippetLanguage = 'python'): Promise<CallToolResult> {
   const snap = await ensureWorkspaceSnapshot(ctx);
   const minScore = ctx.ws.config.similarMinScore;
-  const { findings, queries } = await similarToCode(ctx.ws.store, snap.id, code, { minScore });
+  const { findings, queries } = await similarToCode(ctx.ws.store, snap.id, code, { minScore, language });
   const names = queries.map((q) => `\`${q.qualifiedName}\``).join(', ');
   return textResult(similarText(`# Existing functions similar to the given code (${names})`, findings, minScore));
 }
@@ -41,9 +42,9 @@ export function registerSimilarTool(server: McpServer, ctx: McpContext): void {
       inputSchema,
     },
     (args) =>
-      runTool(ctx, 'find_similar', { symbol: args.symbol, codeChars: args.code?.length }, async () => {
+      runTool(ctx, 'find_similar', { symbol: args.symbol, codeChars: args.code?.length, language: args.language }, async () => {
         if ((args.symbol === undefined) === (args.code === undefined)) return textResult('Error: pass exactly one of symbol or code', true);
-        return args.symbol !== undefined ? bySymbol(ctx, args.symbol) : byCode(ctx, args.code!);
+        return args.symbol !== undefined ? bySymbol(ctx, args.symbol) : byCode(ctx, args.code!, args.language);
       }),
   );
 }

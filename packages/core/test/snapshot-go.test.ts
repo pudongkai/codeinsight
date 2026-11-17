@@ -3,6 +3,9 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { buildSnapshot, initDataDir, loadConfig, sha1, Store } from '../src/index.js';
 import type { BuildSnapshotResult, DataDirLayout, ExtractedFile, FileRow, Resolver, SymbolRow } from '../src/index.js';
+import { GoResolver } from '../src/resolve/go.js';
+import { LanguageResolver } from '../src/resolve/language-resolver.js';
+import { ScipPythonResolver } from '../src/resolve/scip-python.js';
 import { snapshotDir } from '../src/store/data-dir.js';
 import { extractWithCache, type HashedSource } from '../src/snapshot/incremental.js';
 import { commitAll, git, tempDir } from './helpers/git-repo.js';
@@ -32,7 +35,9 @@ describe('snapshot build of a Go repository', () => {
     const config = await loadConfig(repo, { dataDir: tempDir('ci-go-data-') });
     layout = await initDataDir(config.dataDir);
     store = new Store(layout.dbPath);
-    build = () => buildSnapshot({ repo, store, layout, config });
+    // Go 固定走名称匹配，结果不受本机有没有 scip-go 影响
+    const resolver = () => new LanguageResolver({ python: new ScipPythonResolver(), go: new GoResolver({ scip: false }) });
+    build = () => buildSnapshot({ repo, store, layout, config, resolver: resolver() });
     first = await build();
     files = new Map(store.getFiles(first.snapshot.id).map((f) => [f.path, f]));
     symbols = store.getSymbols(first.snapshot.id);
@@ -57,6 +62,18 @@ describe('snapshot build of a Go repository', () => {
     expect(files.get('backend/vendor/example.com/dep/dep.go')).toMatchObject({ language: 'go', supportLevel: 'none' });
     expect(symbols.some((s) => s.path.includes('/vendor/'))).toBe(false);
     expect(files.get('report.py')).toMatchObject({ language: 'python', supportLevel: 'full' });
+  });
+
+  it('stores Go entries for func main and net/http routes, and Go data models', () => {
+    const byId = new Map(symbols.map((s) => [s.id, s]));
+    const entries = store.getEntries(first.snapshot.id).map((e) => ({ ...e, qn: byId.get(e.symbolId)?.qualifiedName }));
+    expect(entries).toContainEqual(expect.objectContaining({ kind: 'cli', framework: 'go', qn: 'example.com/gobasic/cmd/server.main' }));
+    expect(entries).toContainEqual(expect.objectContaining({
+      kind: 'http', framework: 'net/http', detail: { path: '/orders' }, qn: 'example.com/gobasic/cmd/server.main.func1',
+    }));
+    const models = new Map(symbols.filter((s) => s.modelKind).map((s) => [s.qualifiedName, s.modelKind]));
+    expect(models.get(`${PKG}.Order`)).toBe('gorm');
+    expect(models.get(`${PKG}.Summary`)).toBe('json');
   });
 
   it('places go.mod and vendored Go files into the snapshot directory', () => {

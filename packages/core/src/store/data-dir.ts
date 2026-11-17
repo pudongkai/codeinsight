@@ -43,6 +43,11 @@ export function scipPath(layout: DataDirLayout, contentKey: string): string {
   return path.join(layout.scipDir, `${contentKey}.scip`);
 }
 
+/** scip-go 索引缓存（各 module 的索引合并后，文档路径相对快照根目录） */
+export function goScipPath(layout: DataDirLayout, contentKey: string): string {
+  return path.join(layout.scipDir, `${contentKey}.go.scip`);
+}
+
 /**
  * 初始化数据目录。目录里写一个内容为 `*` 的 .gitignore，git 不会把数据目录列为未跟踪文件，
  * 也不需要改用户的 .gitignore。
@@ -355,6 +360,7 @@ export async function cleanupSnapshots(store: Store, layout: DataDirLayout, opts
     store.deleteSnapshot(snap.id);
     await rm(snapshotDir(layout, snap.contentKey), { recursive: true, force: true });
     await rm(scipPath(layout, snap.contentKey), { force: true });
+    await rm(goScipPath(layout, snap.contentKey), { force: true });
     removed.push(snap.id);
   }
   if (removed.length > 0) log.info('snapshots_cleaned', { removed: removed.length });

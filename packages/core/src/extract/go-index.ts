@@ -1,5 +1,5 @@
 import { ownValue, resolveChain, splitQualified, type GoTypeLookup } from './go-types.js';
-import type { ExtractedFile, ExtractedSymbol } from './types.js';
+import type { ExtractedFile, ExtractedSymbol, GoFileFacts, GoFuncRef } from './types.js';
 
 /** 包导入路径和名字拼成查找键 */
 const key = (...parts: string[]): string => parts.join('\0');
@@ -13,6 +13,19 @@ function pickRepresentative(files: ExtractedFile[]): ExtractedFile {
   const sorted = [...files].sort(byName);
   const nonTest = sorted.filter((f) => !f.symbols[0]?.isTest);
   return nonTest.find((f) => /^Package\s/.test(f.symbols[0]?.docstring ?? '')) ?? nonTest[0] ?? sorted[0]!;
+}
+
+/** 外部测试包（`package xxx_test`，和被测包在同一目录）：包路径和被测包相同，但看不到被测包的未导出名字 */
+export function isGoExternalTest(go: Pick<GoFileFacts, 'packagePath' | 'packageName'>, filePath: string): boolean {
+  return go.packageName.endsWith('_test') && filePath.endsWith('_test.go');
+}
+
+/**
+ * 按名字查找函数时用的包键：外部测试包加上 `_test` 后缀，和被测包分开，
+ * 这样被测包里不带包名的调用不会连到测试包的函数，反过来也一样
+ */
+export function goLookupPackage(f: ExtractedFile): string {
+  return isGoExternalTest(f.go!, f.path) ? `${f.go!.packagePath}_test` : f.go!.packagePath;
 }
 
 /**
@@ -35,14 +48,15 @@ export class GoSymbolIndex implements GoTypeLookup {
   private addFile(f: ExtractedFile): void {
     const pkg = f.go!.packagePath;
     this.packages.set(pkg, [...(this.packages.get(pkg) ?? []), f]);
-    for (const s of f.symbols) this.addSymbol(pkg, s);
+    for (const s of f.symbols) this.addSymbol(pkg, goLookupPackage(f), s);
     for (const [t, fields] of Object.entries(f.go!.structFields)) this.structFields.set(key(pkg, t), fields);
     for (const [fn, result] of Object.entries(f.go!.funcResults)) this.funcResults.set(key(pkg, fn), result);
   }
 
-  private addSymbol(pkg: string, s: ExtractedSymbol): void {
+  /** pkg 是 qualifiedName 的前缀；funcPkg 是函数的查找键（外部测试包带 `_test` 后缀） */
+  private addSymbol(pkg: string, funcPkg: string, s: ExtractedSymbol): void {
     const local = s.qualifiedName.slice(pkg.length + 1);
-    if (s.kind === 'function') this.funcs.set(key(pkg, local), s);
+    if (s.kind === 'function') this.funcs.set(key(funcPkg, local), s);
     else if (s.kind === 'class' || s.kind === 'interface') this.types.set(key(pkg, local), s);
     else if (s.kind === 'method') {
       const [type, name] = splitQualified(local);
@@ -86,6 +100,19 @@ export class GoSymbolIndex implements GoTypeLookup {
   funcResult(funcName: string): string | undefined {
     return this.funcResults.get(key(...splitQualified(funcName)));
   }
+}
+
+/**
+ * 按名字引用的函数或方法对应的符号（pkg 为引用所在文件的 goLookupPackage）：函数名找同包函数，`pkg.Func` 找该包的函数，
+ * 方法值有接收者类型时按类型找方法，没有时只在同名方法唯一时取它
+ */
+export function findGoFunc(index: GoSymbolIndex, ref: GoFuncRef, pkg: string): ExtractedSymbol | undefined {
+  if (ref.form === 'ident') return index.func(pkg, ref.name);
+  if (ref.form === 'pkg') return ref.qualifier ? index.func(ref.qualifier, ref.name) : undefined;
+  const type = ref.receiverType ?? (ref.receiverChain ? resolveChain(ref.receiverChain, index) : undefined);
+  if (type) return index.method(...splitQualified(type), ref.name);
+  const same = index.methodsNamed(ref.name);
+  return same.length === 1 ? same[0] : undefined;
 }
 
 /** 本文件里找不到接收者类型的方法，父符号改为同包其他文件里的类型符号 */

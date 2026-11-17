@@ -1,4 +1,5 @@
 import { isHttpApi } from '../model/entry.js';
+import { detectLanguage } from '../model/language.js';
 import type { EdgeRow, EntryRow, SymbolRow } from '../model/types.js';
 import type { EntryInfo, SymbolRef } from '../report/types.js';
 import { symbolRef } from '../review/impact.js';
@@ -200,7 +201,29 @@ export function rankedOwnModels(g: OverviewGraph, moduleId: string): SymbolRow[]
     .slice(0, MAX_MODELS);
 }
 
+/** Go 的导出名：首字母大写 */
+function isGoExported(name: string): boolean {
+  return /^\p{Lu}/u.test(name);
+}
+
+const GO_TYPE_KINDS: ReadonlySet<string> = new Set(['class', 'interface']);
+
+/**
+ * Go 的公开符号：函数和类型（struct、interface）名字首字母大写；方法的名字和所属类型名都要大写。
+ * 接收者类型不在本文件时方法的父符号是 module，类型名从 qualifiedName（`包.类型.方法`）取
+ */
+function isGoPublic(g: OverviewGraph, s: SymbolRow): boolean {
+  if (!isGoExported(s.name)) return false;
+  const parent = s.parentId === null ? undefined : g.symbols.get(s.parentId);
+  if (s.kind === 'function' || GO_TYPE_KINDS.has(s.kind)) return parent?.kind === 'module';
+  if (s.kind !== 'method') return false;
+  if (parent && GO_TYPE_KINDS.has(parent.kind)) return isGoExported(parent.name);
+  const parts = s.qualifiedName.split('.');
+  return parent?.kind === 'module' && parts.length >= 3 && isGoExported(parts[parts.length - 2]!);
+}
+
 function isPublic(g: OverviewGraph, s: SymbolRow): boolean {
+  if (detectLanguage(s.path) === 'go') return isGoPublic(g, s);
   if (s.name.startsWith('_')) return false;
   if (s.parentId === null) return s.kind === 'function' || s.kind === 'class';
   const parent = g.symbols.get(s.parentId);
@@ -210,7 +233,7 @@ function isPublic(g: OverviewGraph, s: SymbolRow): boolean {
 const CALL_ONLY: ReadonlySet<string> = new Set(['call']);
 
 /**
- * 本模块的公开符号（非 `_` 开头的顶层函数、类和公开类的公开方法）加上 HTTP 接口，
+ * 本模块的公开符号（Python 为非 `_` 开头的顶层函数、类和公开类的公开方法，Go 见 isGoPublic）加上 HTTP 接口，
  * 按“HTTP 接口优先 → 本模块内的调用方数 → key”排序。只看本模块的代码，其他模块的改动不影响结果。
  * 源码片段和模块摘要输入共用这个顺序。
  */

@@ -1,12 +1,16 @@
+import path from 'node:path';
 import type { Node } from 'web-tree-sitter';
+import { collectGoEnvReads, collectGoImports } from '../extract/go.js';
+import { goModuleEntry } from '../extract/go-module.js';
 import { languageSupport } from '../extract/languages.js';
 import { collectImportModules, type ImportedModule } from '../extract/python.js';
 import { log } from '../log.js';
+import { detectLanguage, type Language } from '../model/language.js';
 import type { FileRow } from '../model/types.js';
 import { readFailureReason } from '../snapshot/source.js';
 import type { Warning } from '../report/types.js';
 import { addToSet, pushTo } from '../util/collections.js';
-import { classifyExternal, EXTERNAL_CATEGORIES } from './external-table.js';
+import { classifyExternal, classifyGoImport, EXTERNAL_CATEGORIES } from './external-table.js';
 import type { ExternalCategory, ExternalCategorySummary, ModuleEnvVar, ModuleExternal } from './types.js';
 import { compareStrings } from '../util/compare.js';
 
@@ -123,17 +127,55 @@ function settingsFields(root: Node): string[] {
 
 // ---------- 按模块汇总 ----------
 
-async function fileFacts(input: ExternalInput, packages: ReadonlySet<string>, file: string): Promise<FileFacts> {
+/** 外部依赖判断需要的项目信息 */
+interface ProjectInfo {
+  /** Python 项目内的包名 */
+  packages: ReadonlySet<string>;
+  /** 项目里 go.mod 的 module 路径 */
+  goModules: readonly string[];
+}
+
+/** Python 文件：import 按分类表归类；环境变量来自 os.environ / os.getenv 和 pydantic BaseSettings 字段 */
+function pythonFacts(root: Node, project: ProjectInfo, table: ExternalInput['table']): FileFacts {
+  const imports = collectImportModules(root);
+  return { libs: externalLibs(imports, project.packages, table), envVars: [...envReads(root, imports), ...settingsFields(root)] };
+}
+
+/** Go 文件：import 按 Go 分类表归类（标准库、项目内包不列出）；环境变量来自 os.Getenv / os.LookupEnv */
+function goFacts(root: Node, project: ProjectInfo): FileFacts {
+  const libs = collectGoImports(root).flatMap((imp) => classifyGoImport(imp.path, project.goModules) ?? []);
+  return { libs, envVars: collectGoEnvReads(root) };
+}
+
+/** 概览重新读源码的语言 */
+const FACT_LANGUAGES: ReadonlySet<Language> = new Set(['python', 'go']);
+
+async function fileFacts(input: ExternalInput, project: ProjectInfo, file: string): Promise<FileFacts> {
+  const language = detectLanguage(file);
   const source = await input.read(file);
-  const parser = await languageSupport('python')!.getParser();
+  const parser = await languageSupport(language)!.getParser();
   const tree = parser.parse(source);
   if (!tree) throw new Error('tree-sitter failed to parse');
   try {
-    const imports = collectImportModules(tree.rootNode);
-    return { libs: externalLibs(imports, packages, input.table), envVars: [...envReads(tree.rootNode, imports), ...settingsFields(tree.rootNode)] };
+    return language === 'go' ? goFacts(tree.rootNode, project) : pythonFacts(tree.rootNode, project, input.table);
   } finally {
     tree.delete();
   }
+}
+
+/** 从快照里的 go.mod 读出 module 路径；读不到的跳过并记日志 */
+async function goModulePaths(input: ExternalInput): Promise<string[]> {
+  const out: string[] = [];
+  for (const f of input.files) {
+    if (path.posix.basename(f.path) !== 'go.mod') continue;
+    try {
+      const entry = goModuleEntry(f.path, await input.read(f.path));
+      if (entry) out.push(entry[1]);
+    } catch (err) {
+      log.warn('overview_go_mod_skipped', { path: f.path, reason: readFailureReason(err) });
+    }
+  }
+  return out;
 }
 
 function sortedFiles(m: Map<string, Set<string>>): [string, string[]][] {
@@ -171,18 +213,18 @@ function summarize(byModule: Map<string, ModuleExternalFacts>): ExternalCategory
 }
 
 /**
- * 外部依赖和环境变量（概览第 3 步）：从快照重新解析模块里的全部 Python 文件（含没有符号的文件）。
+ * 外部依赖和环境变量（概览第 3 步）：从快照重新解析模块里的全部 Python 和 Go 文件（含没有符号的文件）。
  * 单个文件读不到或解析失败时跳过并记日志，结果里加一条 warning。
  */
 export async function collectExternal(input: ExternalInput): Promise<ExternalResult> {
-  const packages = projectPackages(input.files);
+  const project: ProjectInfo = { packages: projectPackages(input.files), goModules: await goModulePaths(input) };
   const byModule = new Map<string, ModuleExternalFacts>();
   const skipped: string[] = [];
   for (const m of input.modules) {
     const perFile = new Map<string, FileFacts>();
-    for (const file of m.files.filter((f) => /\.pyi?$/.test(f))) {
+    for (const file of m.files.filter((f) => FACT_LANGUAGES.has(detectLanguage(f)))) {
       try {
-        perFile.set(file, await fileFacts(input, packages, file));
+        perFile.set(file, await fileFacts(input, project, file));
       } catch (err) {
         skipped.push(file);
         log.warn('overview_external_file_skipped', { path: file, reason: readFailureReason(err) });

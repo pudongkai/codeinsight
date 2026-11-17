@@ -78,3 +78,92 @@ export function classifyExternal(
   const top = module.split('.')[0]!;
   return isStdlib(top) ? undefined : { lib: top, category: 'other' };
 }
+
+// ---------- Go ----------
+
+/** Go 第三方库分类表：import 路径前缀（不含 `/vN` 主版本段）→ 类别 */
+const GO_BUILTIN: Record<Exclude<ExternalCategory, 'other' | 'subprocess'>, string[]> = {
+  database: [
+    'gorm.io/gorm', 'gorm.io/driver', 'github.com/jmoiron/sqlx', 'github.com/go-sql-driver/mysql', 'github.com/lib/pq',
+    'github.com/jackc/pgx', 'go.mongodb.org/mongo-driver', 'github.com/mattn/go-sqlite3', 'modernc.org/sqlite', 'entgo.io/ent',
+    'github.com/uptrace/bun', 'xorm.io/xorm', 'github.com/Masterminds/squirrel', 'github.com/elastic/go-elasticsearch',
+    'github.com/olivere/elastic', 'github.com/gocql/gocql', 'github.com/ClickHouse/clickhouse-go', 'go.etcd.io/bbolt',
+    'github.com/dgraph-io/badger', 'github.com/denisenkomssqldb/go-mssqldb', 'github.com/microsoft/go-mssqldb',
+  ],
+  cache: [
+    'github.com/redis/go-redis', 'github.com/go-redis/redis', 'github.com/gomodule/redigo', 'github.com/bradfitz/gomemcache',
+    'github.com/patrickmn/go-cache', 'github.com/allegro/bigcache', 'github.com/coocood/freecache', 'github.com/dgraph-io/ristretto',
+  ],
+  http_client: ['github.com/go-resty/resty', 'github.com/imroc/req', 'github.com/hashicorp/go-retryablehttp', 'github.com/parnurzeal/gorequest'],
+  message_queue: [
+    'github.com/segmentio/kafka-go', 'github.com/IBM/sarama', 'github.com/Shopify/sarama', 'github.com/confluentinc/confluent-kafka-go',
+    'github.com/nats-io/nats.go', 'github.com/rabbitmq/amqp091-go', 'github.com/streadway/amqp', 'github.com/apache/pulsar-client-go',
+    'github.com/apache/rocketmq-client-go', 'github.com/nsqio/go-nsq', 'github.com/hibiken/asynq', 'cloud.google.com/go/pubsub',
+  ],
+  email: ['gopkg.in/gomail.v2', 'github.com/go-gomail/gomail', 'github.com/jordan-wright/email', 'github.com/wneessen/go-mail', 'github.com/sendgrid/sendgrid-go'],
+  payment: ['github.com/stripe/stripe-go', 'github.com/smartwalle/alipay', 'github.com/wechatpay-apiv3/wechatpay-go', 'github.com/go-pay/gopay'],
+  storage: [
+    'github.com/aws/aws-sdk-go', 'github.com/aws/aws-sdk-go-v2', 'cloud.google.com/go/storage', 'github.com/Azure/azure-sdk-for-go',
+    'github.com/minio/minio-go', 'github.com/aliyun/aliyun-oss-go-sdk', 'github.com/tencentyun/cos-go-sdk-v5', 'github.com/qiniu/go-sdk',
+  ],
+  auth_crypto: [
+    'github.com/golang-jwt/jwt', 'github.com/dgrijalva/jwt-go', 'github.com/lestrrat-go/jwx', 'golang.org/x/crypto', 'golang.org/x/oauth2',
+    'github.com/coreos/go-oidc', 'github.com/casbin/casbin',
+  ],
+  llm: ['github.com/sashabaranov/go-openai', 'github.com/openai/openai-go', 'github.com/anthropics/anthropic-sdk-go', 'github.com/tmc/langchaingo'],
+  // RPC 框架也算对外提供接口的服务框架
+  web_framework: [
+    'github.com/gin-gonic/gin', 'github.com/labstack/echo', 'github.com/go-chi/chi', 'github.com/gofiber/fiber', 'github.com/gorilla/mux',
+    'github.com/julienschmidt/httprouter', 'github.com/valyala/fasthttp', 'github.com/beego/beego', 'github.com/astaxie/beego',
+    'github.com/kataras/iris', 'github.com/emicklei/go-restful', 'google.golang.org/grpc', 'github.com/grpc-ecosystem/grpc-gateway',
+    'connectrpc.com/connect', 'github.com/bufbuild/connect-go', 'github.com/go-kratos/kratos', 'github.com/zeromicro/go-zero',
+    'github.com/go-kit/kit', 'go-micro.dev', 'github.com/cloudwego/kitex', 'github.com/cloudwego/hertz',
+  ],
+};
+
+/** 内置的 Go 分类表 */
+export const GO_EXTERNAL_TABLE: ReadonlyMap<string, ExternalCategory> = new Map(
+  Object.entries(GO_BUILTIN).flatMap(([category, paths]) => paths.map((p): [string, ExternalCategory] => [p, category as ExternalCategory])),
+);
+
+/** 托管站点下的仓库路径固定为三段：`github.com/<owner>/<repo>` */
+const THREE_SEGMENT_HOSTS = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'gitee.com', 'golang.org']);
+
+/** 去掉 `/vN` 主版本段：`github.com/jackc/pgx/v5/pgxpool` → `github.com/jackc/pgx/pgxpool` */
+function withoutMajorVersion(importPath: string): string[] {
+  return importPath.split('/').filter((seg, i) => i === 0 || !/^v\d+$/.test(seg));
+}
+
+/** 没在分类表里的第三方 import 的库名：按常见托管站点的路径规则推测 module 根路径 */
+function goLibName(parts: readonly string[]): string {
+  const n = THREE_SEGMENT_HOSTS.has(parts[0]!) || (parts[0] === 'gopkg.in' && !parts[1]?.includes('.')) ? 3 : 2;
+  return parts.slice(0, n).join('/');
+}
+
+/** Go 标准库：路径第一段不含 `.`（含 cgo 的 `C`） */
+export function isGoStdlib(importPath: string): boolean {
+  return !importPath.split('/')[0]!.includes('.');
+}
+
+/** 是项目里某个 go.mod 的 module 或其子包 */
+export function isGoProjectImport(importPath: string, modulePaths: Iterable<string>): boolean {
+  for (const m of modulePaths) if (importPath === m || importPath.startsWith(`${m}/`)) return true;
+  return false;
+}
+
+/**
+ * 一条 Go import 的分类：标准库和项目内包返回 undefined；其余按路径段的最长前缀匹配分类表（忽略 `/vN`），
+ * 都没匹配上时归 `other`，库名取推测的 module 根路径
+ */
+export function classifyGoImport(
+  importPath: string, modulePaths: Iterable<string>, table: ReadonlyMap<string, ExternalCategory> = GO_EXTERNAL_TABLE,
+): { lib: string; category: ExternalCategory } | undefined {
+  if (isGoStdlib(importPath) || isGoProjectImport(importPath, modulePaths)) return undefined;
+  const parts = withoutMajorVersion(importPath);
+  for (let n = parts.length; n > 0; n--) {
+    const prefix = parts.slice(0, n).join('/');
+    const category = table.get(prefix);
+    if (category) return { lib: prefix, category };
+  }
+  return { lib: goLibName(parts), category: 'other' };
+}
