@@ -2,7 +2,7 @@ import { cpSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  applyFeatureNames, buildSnapshot, classifyExternal, classifyGoImport, collectExternal, collectImportModules, computeStructure, externalLibs,
+  applyFeatureNames, buildSnapshot, classifyExternal, classifyGoImport, classifyRustRoot, rustDepRoots, collectExternal, collectImportModules, computeStructure, externalLibs,
   externalTable, firstPathSegment, getPythonParser, initDataDir, loadConfig, makeFeature, moduleMarkdown, moduleSnippets,
   overviewMarkdown, projectPackages, Store, structureReport,
 } from '../src/index.js';
@@ -394,6 +394,91 @@ describe('Go overview facts', () => {
     const { structure } = await structureOf(repo, {});
     const names = [...structure.ranked.values()].flat().map((s) => s.name).sort();
     expect(names).toEqual(['Create', 'Find', 'New', 'Repo', 'Service']);
+    expect(structure.external).toEqual([]);
+  }, 120_000);
+});
+
+describe('Rust overview facts', () => {
+  const CARGO = [
+    '[package]', 'name = "shop"', 'version = "0.1.0"', 'edition = "2021"', '',
+    '[dependencies]',
+    'sqlx = "0.7"', 'reqwest = "0.11"', 'tokio = { version = "1", features = ["full"] }', 'serde = "1"', 'tracing = "0.1"',
+    'axum = "0.7"', 'shop-core = { path = "core" }', 'aws-sdk-s3 = "1"', '',
+  ].join('\n');
+  const CORE_CARGO = '[package]\nname = "shop-core"\nversion = "0.1.0"\nedition = "2021"\n';
+  const MAIN_RS = [
+    'use std::env;', 'use serde::Serialize;', 'use shop_core::order;', 'mod cfg;', '',
+    '#[tokio::main]',
+    'async fn main() {',
+    '    let port = env::var("APP_PORT").unwrap();',
+    '    let key = std::env::var("API_KEY");',
+    '    let v = env!("CARGO_PKG_VERSION");',
+    '    let o = option_env!("OPT_FLAG");',
+    '    let body = reqwest::get("http://x").await;',
+    '    sqlx::query!("select 1");',
+    '    tracing::info!("started");',
+    '    let c = aws_sdk_s3::Client::new(&conf);',
+    '    let x = crate::cfg::load();',
+    '    let y = order::create();',
+    '    let z = port.len();',
+    '}', '',
+    '#[derive(Serialize)]', 'struct Out;', '',
+  ].join('\n');
+
+  it('classifies Rust path roots by the package dependencies; std, local modules and workspace crates are not listed', () => {
+    const deps = new Map([['sqlx', 'sqlx'], ['aws_sdk_s3', 'aws-sdk-s3'], ['tracing', 'tracing']]);
+    expect(classifyRustRoot('sqlx', deps)).toEqual({ lib: 'sqlx', category: 'database' });
+    expect(classifyRustRoot('aws_sdk_s3', deps)).toEqual({ lib: 'aws-sdk-s3', category: 'storage' });
+    expect(classifyRustRoot('tracing', deps)).toEqual({ lib: 'tracing', category: 'other' });
+    expect(classifyRustRoot('std', deps)).toBeUndefined();
+    expect(classifyRustRoot('order', deps)).toBeUndefined();
+  });
+
+  it('classifies crates whose library name differs from the dependency name', () => {
+    const deps = new Map(['async-stripe', 'rust-s3'].flatMap((d) => rustDepRoots(d).map((r) => [r, d] as const)));
+    expect(classifyRustRoot('stripe', deps)).toEqual({ lib: 'async-stripe', category: 'payment' });
+    expect(classifyRustRoot('s3', deps)).toEqual({ lib: 'rust-s3', category: 'storage' });
+  });
+
+  it('groups Rust third-party crates from use, path expressions, macros and attributes, and lists environment variables', async () => {
+    const files = { 'Cargo.toml': CARGO, 'core/Cargo.toml': CORE_CARGO, 'core/src/lib.rs': '', 'src/main.rs': MAIN_RS };
+    const { byModule } = await collectExternal({
+      modules: [{ id: 'app', files: ['src/main.rs'] }],
+      files: Object.keys(files).map((p) => ({ path: p, language: p.endsWith('.rs') ? 'rust' : 'unknown' }) as FileRow),
+      read: async (p) => files[p as keyof typeof files],
+      table: externalTable(),
+    });
+    expect(byModule.get('app')!.external).toEqual([
+      { category: 'database', libs: ['sqlx'], files: ['src/main.rs'] },
+      { category: 'http_client', libs: ['reqwest'], files: ['src/main.rs'] },
+      { category: 'storage', libs: ['aws-sdk-s3'], files: ['src/main.rs'] },
+      { category: 'other', libs: ['serde', 'tokio', 'tracing'], files: ['src/main.rs'] },
+    ]);
+    expect(byModule.get('app')!.envVars.map((e) => e.name)).toEqual(['API_KEY', 'APP_PORT', 'CARGO_PKG_VERSION', 'OPT_FLAG']);
+  });
+
+  it('counts pub items at file level, trait methods with their trait and trait impl methods with their type as public', async () => {
+    const repo = initRepo({
+      'Cargo.toml': '[package]\nname = "shop"\nversion = "0.1.0"\nedition = "2021"\n',
+      'src/lib.rs': [
+        'pub struct Service;', 'struct Hidden;', '',
+        'pub(crate) fn internal() -> u8 {', '    1', '}', '',
+        'fn private() -> u8 {', '    2', '}', '',
+        'pub fn helper() -> u8 {', '    fn nested() -> u8 { 3 }', '    nested()', '}', '',
+        'pub trait Repo {', '    fn find(&self) -> u8;', '    fn dflt(&self) -> u8 {', '        1', '    }', '}', '',
+        'impl Service {', '    pub fn create(&self) -> u8 {', '        helper()', '    }', '    fn validate(&self) -> bool {', '        true', '    }', '}', '',
+        'impl Repo for Service {', '    fn find(&self) -> u8 {', '        3', '    }', '}', '',
+        'impl Repo for Hidden {', '    fn find(&self) -> u8 {', '        4', '    }', '}', '',
+        'impl std::fmt::Display for Service {',
+        '    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {', '        Ok(())', '    }', '}', '',
+        'mod inner {', '    pub fn in_private_mod() {}', '}', '',
+        'pub mod a {', '    pub fn f() {}', '    mod c {', '        pub fn h() {}', '    }', '    pub(crate) mod d {', '        pub fn k() {}', '    }', '}', '',
+        'mod b {', '    pub fn g() {}', '}', '',
+      ].join('\n'),
+    });
+    const { structure } = await structureOf(repo, {});
+    const names = [...structure.ranked.values()].flat().map((s) => s.name).sort();
+    expect(names).toEqual(['Repo', 'Service', 'create', 'dflt', 'f', 'find', 'find', 'fmt', 'helper']);
     expect(structure.external).toEqual([]);
   }, 120_000);
 });

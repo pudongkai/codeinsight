@@ -154,7 +154,10 @@ describe('sensitive paths', () => {
       '.gitlab-ci.yml', '.claude/settings.json', '.claude/hooks/pre.sh', '.Claude/Settings.local.json', '.vscode/tasks.json', '.vscode/settings.json',
       '.envrc', 'package.json', 'web/package.json', 'Makefile', 'GNUmakefile', '.pre-commit-config.yaml', 'pyproject.toml', 'setup.py', '.devcontainer/devcontainer.json',
     ]) expect(isSensitivePath(p), p).toBe(true);
-    for (const p of ['src/app.py', '.github/README.md', '.vscode/extensions.json', 'docs/package.json.md', 'workflows/ci.yml', 'claude/settings.json', 'notes/Makefile.txt']) {
+    for (const p of ['Cargo.toml', 'crates/core/Cargo.toml', 'Cargo.lock', 'build.rs', '.cargo/config.toml', 'sub/.cargo/config', '.cargo/credentials.toml', 'rust-toolchain.toml', 'rust-toolchain']) {
+      expect(isSensitivePath(p), p).toBe(true);
+    }
+    for (const p of ['src/app.py', 'src/cargo.rs', '.cargo/registry/x.toml', '.github/README.md', '.vscode/extensions.json', 'docs/package.json.md', 'workflows/ci.yml', 'claude/settings.json', 'notes/Makefile.txt']) {
       expect(isSensitivePath(p), p).toBe(false);
     }
   });

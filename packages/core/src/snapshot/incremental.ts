@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { link, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { GENERATED_HEAD_CHARS, isGeneratedContent, isGeneratedPath, isTestPath, type ClassifyOptions } from '../classify/index.js';
@@ -7,11 +7,11 @@ import {
   deserializeExtractedFile, extractCacheKey, extractCodeHash, serializeExtractedFile,
 } from '../extract/cache.js';
 import {
-  emptyExtractContext, extractSource, goModuleEntry, goModuleOf, languageSupport, loadParsers, resolveCrossFile,
-  type ExtractContext, type ExtractedFile, type ExtractResult, type LanguageSourceFile,
+  cargoLockDirs, emptyExtractContext, extractSource, goModuleEntry, goModuleOf, isCargoInput, languageSupport, loadParsers, resolveCrossFile,
+  rustCratesFromManifests, rustFileUnit, type ExtractContext, type ExtractedFile, type ExtractResult, type LanguageSourceFile, type RustPackage,
 } from '../extract/index.js';
 import { log } from '../log.js';
-import { detectLanguage, supportLevelOf } from '../model/language.js';
+import { detectLanguage, inRustExcludedDir, rustExcludedDirs, supportLevelOf } from '../model/language.js';
 import type { FileRow, SnapshotKind, SnapshotRow } from '../model/types.js';
 import { snapshotDir, type DataDirLayout } from '../store/data-dir.js';
 import type { ExtractCacheEntry } from '../store/extract-cache.js';
@@ -33,20 +33,25 @@ export function throwIfCancelled(signal: AbortSignal | undefined, stage: BuildSt
   if (signal?.aborted) throw new SnapshotCancelledError(stage);
 }
 
-/** Go 的项目配置：go 命令可能改写它们，放进快照目录时复制，不硬链接到上一个快照 */
-const GO_CONFIG_FILES = new Set(['go.mod', 'go.sum', 'go.work', 'go.work.sum']);
+/** go 命令、cargo 可能改写的项目配置：放进快照目录时复制，不硬链接到上一个快照 */
+const COPIED_CONFIG_FILES = new Set(['go.mod', 'go.sum', 'go.work', 'go.work.sum', 'Cargo.toml', 'Cargo.lock']);
 
-/** 工作区快照除源码外还要放进快照目录的项目配置，scip-python、scip-go 会读取它们 */
-const PROJECT_CONFIG_FILES = new Set(['pyproject.toml', 'setup.cfg', 'pyrightconfig.json', ...GO_CONFIG_FILES]);
+/** 工作区快照除源码外还要放进快照目录的项目配置，scip-python、scip-go、rust-analyzer 会读取它们 */
+const PROJECT_CONFIG_FILES = new Set([
+  'pyproject.toml', 'setup.cfg', 'pyrightconfig.json', 'rust-toolchain', 'rust-toolchain.toml', ...COPIED_CONFIG_FILES,
+]);
 
 /**
- * 需要放进快照目录（交给 scip-python、scip-go）的文件：支持的语言、项目配置，
- * 以及 vendor、testdata 下的 Go 文件和 vendor/modules.txt（支持级别为 none，但 go 命令加载包时要用）
+ * 需要放进快照目录（交给 scip-python、scip-go、rust-analyzer）的文件：支持的语言、项目配置，
+ * 以及 vendor、testdata 下的 Go 文件和 vendor/modules.txt（支持级别为 none，但 go 命令加载包时要用）。
+ * rustExcluded 为 rustExcludedDirs 的结果：这些目录下的 Rust 文件和 Cargo 配置不放入
  */
-export function isPlaced(rel: string): boolean {
+export function isPlaced(rel: string, rustExcluded: ReadonlySet<string> = new Set()): boolean {
   const language = detectLanguage(rel);
-  if (supportLevelOf(language, rel) !== 'none' || language === 'go') return true;
-  return PROJECT_CONFIG_FILES.has(path.posix.basename(rel)) || rel === 'vendor/modules.txt' || rel.endsWith('/vendor/modules.txt');
+  if (supportLevelOf(language, rel, rustExcluded) !== 'none' || language === 'go') return true;
+  const base = path.posix.basename(rel);
+  if (PROJECT_CONFIG_FILES.has(base)) return !(base.startsWith('Cargo.') && inRustExcludedDir(rel, rustExcluded));
+  return rel === 'vendor/modules.txt' || rel.endsWith('/vendor/modules.txt');
 }
 
 // ---- 上一个快照 ----
@@ -83,6 +88,10 @@ export interface ReadResult {
   failed: Set<string>;
   /** 清单里的 go.mod：所在目录 → module 路径 */
   goModules: Map<string, string>;
+  /** 清单里的 Cargo.toml 解析出的包：包目录 → 包信息 */
+  rustCrates: Map<string, RustPackage>;
+  /** 清单算出的 Rust 排除目录（rustExcludedDirs） */
+  rustExcluded: Set<string>;
 }
 
 export interface ReadOptions {
@@ -96,11 +105,11 @@ export interface ReadOptions {
   signal?: AbortSignal;
 }
 
-function fileRow(rel: string, data: Buffer, classify: ClassifyOptions): Omit<FileRow, 'snapshotId'> {
+function fileRow(rel: string, data: Buffer, classify: ClassifyOptions, rustExcluded: ReadonlySet<string>): Omit<FileRow, 'snapshotId'> {
   const language = detectLanguage(rel);
   const isGenerated = isGeneratedPath(rel, classify) || isGeneratedContent(language, data.subarray(0, GENERATED_HEAD_CHARS).toString('utf8'));
   return {
-    path: rel, language, supportLevel: supportLevelOf(language, rel), contentHash: sha1(data),
+    path: rel, language, supportLevel: supportLevelOf(language, rel, rustExcluded), contentHash: sha1(data),
     isTest: isTestPath(rel, classify), isGenerated,
   };
 }
@@ -120,10 +129,17 @@ function isExtracted(row: Omit<FileRow, 'snapshotId'>): boolean {
 }
 
 class SnapshotWriter {
-  readonly result: ReadResult = { rows: [], sources: [], symlinks: new Map(), linked: 0, written: 0, failed: new Set(), goModules: new Map() };
+  readonly result: ReadResult;
   private readonly dirs = new Set<string>();
+  /** 读到的 Cargo.toml、rust-toolchain(.toml)：路径 → 内容 */
+  private readonly cargoTexts = new Map<string, string>();
 
-  constructor(private readonly o: ReadOptions) {}
+  constructor(private readonly o: ReadOptions) {
+    this.result = {
+      rows: [], sources: [], symlinks: new Map(), linked: 0, written: 0, failed: new Set(), goModules: new Map(),
+      rustCrates: new Map(), rustExcluded: rustExcludedDirs(o.files),
+    };
+  }
 
   private async ensureDir(dest: string): Promise<void> {
     const dir = path.dirname(dest);
@@ -146,7 +162,7 @@ class SnapshotWriter {
     const dest = path.join(this.o.destDir!, rel);
     try {
       await this.ensureDir(dest);
-      if (!GO_CONFIG_FILES.has(path.posix.basename(rel)) && await linkFromPrevious(this.o.prev, rel, hash, dest)) {
+      if (!COPIED_CONFIG_FILES.has(path.posix.basename(rel)) && await linkFromPrevious(this.o.prev, rel, hash, dest)) {
         this.result.linked++;
         return;
       }
@@ -166,7 +182,7 @@ class SnapshotWriter {
 
   async add(rel: string): Promise<void> {
     const src = path.join(this.o.srcRoot, rel);
-    const placed = isPlaced(rel);
+    const placed = isPlaced(rel, this.result.rustExcluded);
     const st = await lstat(src).catch((err: Error) => log.warn('snapshot_read_failed', { path: rel, error: err.message }));
     if (!st) return;
     if (st.isSymbolicLink() && placed) {
@@ -177,16 +193,31 @@ class SnapshotWriter {
     }
     const data = await readFile(src).catch((err: Error) => log.warn('snapshot_read_failed', { path: rel, error: err.message }));
     if (!data) return;
-    const row = fileRow(rel, data, this.o.classify);
+    const row = fileRow(rel, data, this.o.classify, this.result.rustExcluded);
     this.result.rows.push(row);
     const goModule = path.posix.basename(rel) === 'go.mod' ? goModuleEntry(rel, data.toString('utf8')) : undefined;
     if (goModule) this.result.goModules.set(...goModule);
+    // 符号链接形式的 Cargo 配置不读：链接目标可能是仓库里的其他文件（如 .env），内容会进解析错误和日志
+    if (!st.isSymbolicLink() && isCargoInput(rel, this.result.rustExcluded)) this.cargoTexts.set(rel, data.toString('utf8'));
     if (isExtracted(row)) {
       this.result.sources.push({
         path: rel, language: row.language, source: data.toString('utf8'), isTest: row.isTest, isGenerated: row.isGenerated, contentHash: row.contentHash,
       });
     }
     if (placed && !st.isSymbolicLink() && this.o.destDir !== undefined) await this.placeFile(rel, data, row.contentHash);
+  }
+
+  /**
+   * 全部文件读完后解析 Cargo.toml。按默认布局找目标文件用读到的文件（files 行），
+   * 和重试解析时从快照的 files 行重建的结果一致
+   */
+  finishRust(): void {
+    const manifests = new Map([...this.cargoTexts].filter(([p]) => path.posix.basename(p) === 'Cargo.toml'));
+    const toolchains = new Map([...this.cargoTexts].filter(([p]) => path.posix.basename(p) !== 'Cargo.toml'));
+    this.result.rustCrates = rustCratesFromManifests({
+      manifests, toolchains, files: this.result.rows.map((r) => r.path),
+      onParseError: (p, err) => log.warn('cargo_toml_invalid', { path: p, error: (err as Error).message }),
+    });
   }
 }
 
@@ -197,7 +228,30 @@ export async function readAndPlace(o: ReadOptions): Promise<ReadResult> {
     throwIfCancelled(o.signal, 'copy');
     await writer.add(rel);
   }
+  writer.finishRust();
   return writer.result;
+}
+
+/**
+ * 快照目录里放 Cargo.lock 的目录（工作区根目录、独立包目录）缺 Cargo.lock、而工作区对应位置有（通常被 .gitignore 忽略）时，
+ * 从工作区复制一份进来，cargo 不必从头解析依赖版本；复制失败只记日志
+ */
+export async function supplementCargoLocks(crates: ReadonlyMap<string, RustPackage>, snapshotDir: string, workRoot: string): Promise<number> {
+  let copied = 0;
+  for (const dir of cargoLockDirs(crates)) {
+    const rel = dir ? `${dir}/Cargo.lock` : 'Cargo.lock';
+    const dest = path.join(snapshotDir, rel);
+    const src = path.join(workRoot, rel);
+    if (existsSync(dest) || !existsSync(src)) continue;
+    try {
+      await copyFile(src, dest);
+      copied++;
+    } catch (err) {
+      log.warn('cargo_lock_copy_failed', { path: rel, error: (err as Error).message });
+    }
+  }
+  if (copied > 0) log.info('cargo_lock_supplemented', { files: copied });
+  return copied;
 }
 
 // ---- 按文件复用提取结果 ----
@@ -236,8 +290,17 @@ function putCache(store: Store, entries: readonly ExtractCacheEntry[]): void {
   }
 }
 
-/** Go 文件的缓存 key 并入所属 module（go.mod 位置或 module 行变了才失效）；其他语言为 undefined */
+/**
+ * Go 文件的缓存 key 并入所属 module（go.mod 位置或 module 行变了才失效），Rust 文件并入所属包、crate 名、目标根文件和
+ * 包的依赖名（入口识别按依赖判断框架）；
+ * 其他语言为 undefined
+ */
 function cacheModule(s: LanguageSourceFile, ctx: ExtractContext): string | undefined {
+  if (s.language === 'rust') {
+    const unit = rustFileUnit(s.path, ctx.rustCrates);
+    const deps = unit.packageDir !== undefined ? (ctx.rustCrates.get(unit.packageDir)?.deps ?? []) : [];
+    return `${unit.packageDir ?? ''}\0${unit.crate}\0${unit.target}\0${deps.join(',')}`;
+  }
   if (s.language !== 'go') return undefined;
   const mod = goModuleOf(s.path, ctx.goModules);
   return mod ? `${mod.dir}\0${mod.module}` : '';
@@ -294,7 +357,7 @@ function rowSignature(row: Omit<FileRow, 'snapshotId'> | undefined): string {
 /** 本次放进快照目录的每个文件 */
 function currentPlaced(read: ReadResult): Map<string, PlacedInfo> {
   const out = new Map<string, PlacedInfo>();
-  for (const r of read.rows) if (isPlaced(r.path)) out.set(r.path, { row: rowSignature(r), target: undefined });
+  for (const r of read.rows) if (isPlaced(r.path, read.rustExcluded)) out.set(r.path, { row: rowSignature(r), target: undefined });
   for (const [p, target] of read.symlinks) out.set(p, { row: out.get(p)?.row ?? '-', target });
   return out;
 }
@@ -306,7 +369,8 @@ function currentPlaced(read: ReadResult): Map<string, PlacedInfo> {
 export async function sameResolverInput(prev: PreviousSnapshot, read: ReadResult): Promise<boolean> {
   if (prev.snap.resolverStatus !== 'ok' || read.failed.size > 0) return false;
   const current = currentPlaced(read);
-  const prevPlaced = [...prev.files.values()].filter((f) => isPlaced(f.path));
+  const prevExcluded = rustExcludedDirs(prev.files.keys());
+  const prevPlaced = [...prev.files.values()].filter((f) => isPlaced(f.path, prevExcluded));
   if (prevPlaced.length !== current.size) return false;
   if (prevPlaced.some((f) => current.get(f.path)?.row !== rowSignature(f))) return false;
   for (const f of prevPlaced) {

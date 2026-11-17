@@ -72,7 +72,7 @@ function Brand() {
   );
 }
 
-const LANGUAGE_LABELS: Record<string, string> = { python: 'Python', go: 'Go' };
+const LANGUAGE_LABELS: Record<string, string> = { python: 'Python', go: 'Go', rust: 'Rust' };
 
 /** 解析没有成功时的提示：只有部分语言失败时说明是哪些语言，其他语言的邻居图照常可用 */
 function resolverWarning(snapshot: SnapshotView): string | undefined {
@@ -82,30 +82,60 @@ function resolverWarning(snapshot: SnapshotView): string | undefined {
   return `${failed.map((l) => LANGUAGE_LABELS[l] ?? l).join('、')} 调用关系解析失败，这部分的邻居图不可用`;
 }
 
-/** scip-go 的安装命令，和 core 的 SCIP_GO_INSTALL 一致 */
-const SCIP_GO_INSTALL = 'go install github.com/scip-code/scip-go/cmd/scip-go@latest';
+/** 各语言调用关系改用名称匹配时的提示文字：原因说明和安装命令（与 core 的 SCIP_GO_INSTALL、RUST_ANALYZER_INSTALL 一致） */
+interface NameMatchText {
+  reasons: Partial<Record<NonNullable<EdgeSourceView['reason']>, string>>;
+  install: string;
+  installTestId: string;
+}
 
-/** 名称匹配提示括号里的原因；选项关闭时不提示 */
-const NAME_MATCH_REASONS: Partial<Record<NonNullable<EdgeSourceView['reason']>, string>> = {
-  not_found: '未找到 scip-go',
-  failed: 'scip-go 运行失败',
-  no_module: '项目没有 go.mod',
+const NAME_MATCH_TEXTS: Record<string, NameMatchText> = {
+  go: {
+    reasons: { not_found: '未找到 scip-go', failed: 'scip-go 运行失败', no_module: '项目没有 go.mod' },
+    install: 'go install github.com/scip-code/scip-go/cmd/scip-go@latest',
+    installTestId: 'scip-go-install',
+  },
+  rust: {
+    reasons: { not_found: '未找到 rust-analyzer', failed: 'rust-analyzer 运行失败', no_module: '项目没有 Cargo.toml' },
+    install: 'rustup component add rust-analyzer rust-src',
+    installTestId: 'rust-analyzer-install',
+  },
 };
 
 /**
- * Go 的调用关系改用名称匹配时的提示（找不到 scip-go、scip-go 运行失败、项目没有 go.mod）；
+ * 一种语言的调用关系改用名称匹配时的提示（找不到工具、运行失败、没有项目配置文件；选项关闭时不提示）；
  * 找不到时附上安装命令，失败时悬停显示原因
  */
-function NameMatchHint({ snapshot }: { snapshot: SnapshotView }) {
-  const go = snapshot.edgeSources?.go;
-  const label = go?.source === 'name_match' && go.reason ? NAME_MATCH_REASONS[go.reason] : undefined;
-  if (!go || !label) return null;
-  const notFound = go.reason === 'not_found';
+function NameMatchHint({ language, source }: { language: string; source: EdgeSourceView }) {
+  const text = NAME_MATCH_TEXTS[language];
+  const label = source.source === 'name_match' && source.reason ? text?.reasons[source.reason] : undefined;
+  if (!text || !label) return null;
   return (
-    <span className="warn" data-testid="name-match-hint" title={go.note}>
-      Go 调用关系来自名称匹配（{label}），可能不完整
-      {notFound && <>，安装：<code data-testid="scip-go-install">{SCIP_GO_INSTALL}</code></>}
+    <span className="warn" data-testid="name-match-hint" data-language={language} title={source.note}>
+      {LANGUAGE_LABELS[language] ?? language} 调用关系来自名称匹配（{label}），可能不完整
+      {source.reason === 'not_found' && <>，安装：<code data-testid={text.installTestId}>{text.install}</code></>}
     </span>
+  );
+}
+
+/** 没装 rust-src 时的提示：标准库相关的调用可能不完整 */
+function RustSrcHint({ source }: { source: EdgeSourceView | undefined }) {
+  if (!source?.warnings?.includes('rust_src_missing')) return null;
+  return (
+    <span className="warn" data-testid="rust-src-hint">
+      未安装 rust-src，标准库相关的调用可能不完整，安装：<code>{NAME_MATCH_TEXTS.rust!.install}</code>
+    </span>
+  );
+}
+
+/** 边来源相关的提示：各语言的名称匹配提示和 rust-src 缺失提示 */
+function EdgeSourceHints({ snapshot }: { snapshot: SnapshotView }) {
+  const sources = Object.entries(snapshot.edgeSources ?? {});
+  return (
+    <>
+      {sources.map(([language, source]) => <NameMatchHint key={language} language={language} source={source} />)}
+      <RustSrcHint source={snapshot.edgeSources?.rust} />
+    </>
   );
 }
 
@@ -116,7 +146,7 @@ function IndexBar({ status, onReindex }: { status: StatusResponse | undefined; o
     <div className="indexbar">
       {status.snapshot && <IndexSource status={status} />}
       {status.snapshot && status.snapshot.resolverStatus !== 'ok' && <span className="warn" data-testid="resolver-warning">{resolverWarning(status.snapshot)}</span>}
-      {status.snapshot && <NameMatchHint snapshot={status.snapshot} />}
+      {status.snapshot && <EdgeSourceHints snapshot={status.snapshot} />}
       <IndexState status={status} />
       <CodeChanged status={status} onReindex={onReindex} />
     </div>

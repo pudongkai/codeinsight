@@ -15,9 +15,12 @@ export const FINGERPRINT_EXTRA_MODULES = ['model/language', 'model/symbol-key', 
 /** 不影响缓存内容、不进指纹的模块：只写日志，或只有类型 */
 export const FINGERPRINT_IGNORED_MODULES = ['log', 'model/types'] as const;
 
-/** 解析结果随语法版本变化的依赖包（各语言的语法包和 web-tree-sitter），版本号进指纹 */
+/** 语法包以外、影响提取结果的其他依赖包（如解析 Cargo.toml 的 smol-toml） */
+const EXTRA_EXTRACT_PACKAGES = ['smol-toml'] as const;
+
+/** 解析结果随版本变化的依赖包（各语言的语法包、web-tree-sitter 和 EXTRA_EXTRACT_PACKAGES），版本号进指纹 */
 function grammarPackages(): string[] {
-  return [...allLanguageSupports().map((s) => s.grammarPackage), 'web-tree-sitter'];
+  return [...allLanguageSupports().map((s) => s.grammarPackage), 'web-tree-sitter', ...EXTRA_EXTRACT_PACKAGES];
 }
 
 /** 运行时的源码根目录：构建后是 dist/，vitest 下是 src/ */
@@ -84,7 +87,7 @@ export interface ExtractCacheKeyParts {
   contentHash: string;
   isTest: boolean;
   isGenerated: boolean;
-  /** Go 文件所属 module 的 `目录\0module 路径`（决定包导入路径）；其他语言不传 */
+  /** Go 文件所属 module 的 `目录\0module 路径`、Rust 文件的 `包目录\0crate 名\0目标根文件\0依赖名`；其他语言不传 */
   module?: string;
 }
 

@@ -3,7 +3,9 @@ import { throwIfCancelled } from '../llm/index.js';
 import { log } from '../log.js';
 import type { ReviewReport, SymbolChange, Warning } from '../report/types.js';
 import type { Store } from '../store/db.js';
-import { fileChanges, groupByModule, resolverWarnings, symbolChange, unsupportedWarnings, type SymbolFacts } from './assemble.js';
+import {
+  fileChanges, groupByModule, resolverWarnings, snapshotSupportLevels, symbolChange, unsupportedWarnings, type SymbolFacts,
+} from './assemble.js';
 import { callerSummaries, edgeChanges, impactSummaries, loadGraphSide, type GraphSide } from './impact.js';
 import { checkIntent, findReviewDuplicates } from './llm-steps.js';
 import { diffSymbols, type SymbolDiff } from './symbol-diff.js';
@@ -99,9 +101,10 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewReport> {
   const v = await resolveVersions(opts);
   log.info('review_start', { base: v.base.ref, baseSha: v.base.sha, head: v.head.ref, headSha: v.head.sha, working: v.head.working });
   const changed = await changedFiles(v, opts.config);
-  const files = fileChanges(changed, { testGlobs: opts.config.testGlobs, generatedGlobs: opts.config.generatedGlobs });
   progress('snapshots');
   const snaps = await prepareSnapshots(opts, v, changed);
+  const classify = { testGlobs: opts.config.testGlobs, generatedGlobs: opts.config.generatedGlobs };
+  const files = fileChanges(changed, classify, snapshotSupportLevels(opts.store, snaps));
   const snapshotsMs = Date.now() - started;
   progress('analysis');
   const paths = new Set(changed.flatMap((f) => (f.oldPath ? [f.path, f.oldPath] : [f.path])));

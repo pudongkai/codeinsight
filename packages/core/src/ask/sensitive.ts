@@ -13,14 +13,17 @@ export const SENSITIVE_FILES: ReadonlySet<string> = new Set([
   'makefile', 'gnumakefile', 'justfile',
   'pyproject.toml', 'setup.py', 'setup.cfg', 'tox.ini', 'noxfile.py', 'conftest.py',
   'go.mod', 'go.sum', 'go.work',
+  'cargo.toml', 'cargo.lock', 'rust-toolchain', 'rust-toolchain.toml',
   'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradlew', 'pom.xml', 'mvnw', 'build.rs',
 ].map((n) => n.toLowerCase()));
 
 /** 目录（任意深度，按规范化后的路径比较）：下面的文件都标出，如 CI 流水线、Claude Code 的设置和钩子 */
 export const SENSITIVE_DIRS: readonly string[] = ['.github/workflows', '.github/actions', '.circleci', '.buildkite', '.claude', '.devcontainer'];
 
-/** 目录下的特定文件：编辑器会自动执行或据此执行命令 */
-export const SENSITIVE_DIR_FILES: readonly string[] = ['.vscode/tasks.json', '.vscode/settings.json', '.vscode/launch.json'];
+/** 目录下的特定文件：编辑器、cargo 会自动执行或据此执行命令、读取凭据 */
+export const SENSITIVE_DIR_FILES: readonly string[] = [
+  '.vscode/tasks.json', '.vscode/settings.json', '.vscode/launch.json', '.cargo/config.toml', '.cargo/config', '.cargo/credentials.toml', '.cargo/credentials',
+];
 
 /** 规范化后的路径 p 里是否有 segs 这一串完整的路径段；atEnd 为 true 时必须在末尾 */
 function hasSegments(p: string, segs: string, atEnd: boolean): boolean {

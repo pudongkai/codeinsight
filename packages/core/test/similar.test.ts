@@ -10,6 +10,7 @@ import {
   minhash,
   nameTokens,
   runReview,
+  rustCratesFromManifests,
   shingles,
   signatureShape,
   similarToCode,
@@ -412,6 +413,124 @@ describe('Go functions', () => {
       const anonymous = await similarToCode(store, snap.id, body, { minScore: 0.5, language: 'go' });
       expect(anonymous.queries.map((q) => q.name)).toEqual(['snippet']);
       expect(anonymous.findings[0]!.candidates.map((c) => c.symbol.path)).toEqual(['users/users.go']);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('Rust functions', () => {
+  async function rustSymbolsOf(files: Record<string, string>): Promise<SymbolRow[]> {
+    const sources = Object.entries(files).map(([p, source]) => ({ path: p, source, language: 'rust' as const, isTest: false, isGenerated: false }));
+    const { files: extracted } = await extractFiles(sources);
+    return extracted.flatMap((f) => f.symbols.map((s) => ({ ...s, snapshotId: 0 })));
+  }
+
+  /** 结构相同、只有名字和字段不同的查询函数 */
+  const lookup = (name: string, field: string) => [
+    `pub fn ${name}(conn: &Connection, id: i64) -> Result<String, Error> {`,
+    `    let mut stmt = conn.prepare("SELECT ${field} FROM users WHERE id = ?")?;`,
+    '    let v: String = stmt.query_row([id], |row| row.get(0))?;',
+    '    if v.is_empty() {',
+    '        return Err(Error::Empty);',
+    '    }',
+    '    Ok(v)',
+    '}',
+    '',
+  ].join('\n');
+  const TOTAL = ['pub fn total(items: &[i64]) -> i64 {', '    let mut sum = 0;', '    for it in items {', '        sum += it;', '    }', '    sum', '}', ''].join('\n');
+  const USERS = ['use rusqlite::Connection;', '', lookup('email_of', 'email'), TOTAL].join('\n');
+  const ACCOUNTS = ['use rusqlite::Connection;', '', lookup('phone_of', 'phone')].join('\n');
+
+  it('reads the Rust signature shape without self, with generics, lifetimes and nested generic arguments', async () => {
+    const syms = await rustSymbolsOf({
+      'm/m.rs': [
+        'pub struct S;', '',
+        'pub trait R {', '    fn find(&self, id: u64) -> Option<S>;', '}', '',
+        'impl S {',
+        "    pub fn r#do<'a, F: Fn(u8) -> u8>(&'a mut self, a: &'a str, m: HashMap<String, Vec<u8>>, f: F) -> Result<(), String> where F: Clone {",
+        '        Ok(())', '    }',
+        '    fn unit(self: Box<Self>) -> () {}',
+        '    fn none(&self) {}',
+        '}', '',
+        'pub async fn top(x: (u8, u8)) -> impl Fn(u8) -> u8 {', '    move |a| a', '}', '',
+      ].join('\n'),
+    });
+    const by = new Map(syms.map((s) => [s.name, s]));
+    expect(signatureShape(by.get('do')!)).toEqual({ params: 3, returnsValue: true });
+    expect(signatureShape(by.get('unit')!)).toEqual({ params: 0, returnsValue: false });
+    expect(signatureShape(by.get('none')!)).toEqual({ params: 0, returnsValue: false });
+    expect(signatureShape(by.get('find')!)).toEqual({ params: 1, returnsValue: true });
+    expect(signatureShape(by.get('top')!)).toEqual({ params: 1, returnsValue: true });
+  });
+
+  it('ranks the structurally identical Rust function first and never compares Rust with Go or Python', async () => {
+    const syms = [
+      ...(await rustSymbolsOf({ 'users/users.rs': USERS, 'accounts/accounts.rs': ACCOUNTS })),
+      ...(await symbolsOf({ 'pkg/repo.py': REPO_PY })),
+    ];
+    const q = syms.find((s) => s.name === 'email_of')!;
+    const { findings } = findDuplicates({ symbols: syms, queryIds: [q.id], linkedPairs: new Set(), minScore: 0.3 });
+    const c = findings[0]!.candidates;
+    expect(c[0]!.symbol).toMatchObject({ path: 'accounts/accounts.rs', name: 'phone_of' });
+    expect(c.every((x) => x.symbol.path.endsWith('.rs'))).toBe(true);
+  });
+
+  it('never counts methods (new, fmt, trait methods), conventional names or closures as same-name duplicates', async () => {
+    const module = (type: string) => [
+      `pub struct ${type} { n: i32 }`, '',
+      `impl ${type} {`, '    pub fn new() -> Self {', `        ${type} { n: 0 }`, '    }', '}', '',
+      `impl std::fmt::Display for ${type} {`,
+      '    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {', '        write!(f, "x")', '    }', '}', '',
+      'pub trait Named {', '    fn name(', '        &self,', '        a: i32,', '        b: i32,', '    ) -> String;', '}', '',
+      'fn main() {', '}', '',
+      'pub fn from(n: i32) -> i32 {', '    n', '}', '',
+      'pub fn helper(n: i32) -> i32 {', '    n + 1', '}', '',
+    ].join('\n');
+    const syms = await rustSymbolsOf({ 'a/a.rs': module('A'), 'b/b.rs': module('B') });
+    const sameNameOf = (symbols: SymbolRow[]) =>
+      findDuplicates({ symbols, linkedPairs: new Set(), minScore: 0.99 }).findings
+        .flatMap((f) => f.candidates.filter((c) => c.reasons.includes('same-name duplicate')).map(() => f.symbol.name));
+    // 只有普通函数 helper 按同名重复报告
+    expect(sameNameOf(syms)).toEqual(['helper']);
+    // trait 里没有函数体的方法不参与任何比较
+    const all = findDuplicates({ symbols: syms, linkedPairs: new Set(), minScore: 0 }).findings;
+    expect(all.filter((f) => f.symbol.name === 'name' || f.candidates.some((c) => c.symbol.name === 'name'))).toEqual([]);
+    // 闭包符号（closureN）的编号名字不算同名
+    const closures = syms.map((s) => (s.name === 'helper' ? { ...s, name: 'closure1', qualifiedName: s.qualifiedName.replace(/helper$/, 'closure1') } : s));
+    expect(sameNameOf(closures)).toEqual([]);
+  });
+
+  it('counts same-name functions only across module paths', async () => {
+    const fn = ['pub fn open(n: i32) -> i32 {', '    n', '}', ''].join('\n');
+    const crates = rustCratesFromManifests({
+      manifests: new Map([['Cargo.toml', '[package]\nname = "app"\nversion = "0.1.0"\n']]),
+      files: ['Cargo.toml', 'src/lib.rs', 'src/main.rs', 'src/x.rs', 'src/bin/tool.rs'],
+    });
+    const sources = { 'src/lib.rs': fn, 'src/main.rs': fn, 'src/x.rs': fn };
+    const { files: extracted } = await extractFiles(
+      Object.entries(sources).map(([p, source]) => ({ path: p, source, language: 'rust' as const, isTest: false, isGenerated: false })),
+      { goModules: new Map(), rustCrates: crates },
+    );
+    const syms = extracted.flatMap((f) => f.symbols.map((s) => ({ ...s, snapshotId: 0 })));
+    const { findings } = findDuplicates({ symbols: syms, linkedPairs: new Set(), minScore: 0.99 });
+    const pairs = findings.flatMap((f) => f.candidates.filter((c) => c.reasons.includes('same-name duplicate')).map((c) => `${f.symbol.qualifiedName} -> ${c.symbol.qualifiedName}`));
+    // lib.rs 是 `app`，main.rs 是 bin `app`：模块路径相同，不算；x.rs 是 `app::x`
+    expect(pairs.sort()).toEqual(['app::open -> app::x::open', 'app::open -> app::x::open']);
+  });
+
+  it('finds Rust functions for a Rust snippet, named or body-only', async () => {
+    const store = new Store(path.join(tempDir('ci-similar-rust-'), 'index.db'));
+    const snap = store.createSnapshot('commit', 'x', 'x');
+    store.insertSymbols([...(await rustSymbolsOf({ 'users/users.rs': USERS })), ...(await symbolsOf({ 'pkg/repo.py': REPO_PY }))].map((s) => ({ ...s, snapshotId: snap.id })));
+    try {
+      const named = await similarToCode(store, snap.id, lookup('address_of', 'address'), { minScore: 0.6, language: 'rust' });
+      expect(named.queries.map((q) => q.path)).toEqual(['<snippet>/snippet.rs']);
+      expect(named.findings[0]!.candidates[0]!.symbol).toMatchObject({ path: 'users/users.rs', name: 'email_of' });
+      const body = lookup('x', 'address').split('\n').slice(1, -2).join('\n');
+      const anonymous = await similarToCode(store, snap.id, body, { minScore: 0.5, language: 'rust' });
+      expect(anonymous.queries.map((q) => q.name)).toEqual(['snippet']);
+      expect(anonymous.findings[0]!.candidates.map((c) => c.symbol.path)).toEqual(['users/users.rs']);
     } finally {
       store.close();
     }

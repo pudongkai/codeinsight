@@ -14,6 +14,7 @@ import {
   readPyprojectPyrightExclude,
   snapshotDir,
 } from '../src/index.js';
+import { rustRunBaseCandidates } from '../src/store/data-dir.js';
 import { git, initRepo, tempDir } from './helpers/git-repo.js';
 
 describe('data dir', () => {
@@ -171,6 +172,20 @@ describe('snapshot locks', () => {
     store.close();
   });
 
+  it('cleanup removes the SCIP caches of every language for a removed snapshot', async () => {
+    const layout = await initDataDir(tempDir());
+    const store = new Store(layout.dbPath);
+    const old = Date.now() - 60 * 60 * 1000;
+    for (let i = 0; i < 10; i++) store.createSnapshot('commit', `k${i}`, `k${i}`, old + i);
+    const names = ['k0.scip', 'k0.go.scip', 'k0.rust.scip', 'k0.rust.json', 'k1.rust.scip', 'k1.rust.json'];
+    const kept = ['k10.rust.scip', 'k2.rust.json', 'k2.scip'];
+    for (const n of [...names, ...kept]) writeFileSync(path.join(layout.scipDir, n), '');
+    await cleanupSnapshots(store, layout);
+    expect(names.filter((n) => existsSync(path.join(layout.scipDir, n)))).toEqual([]);
+    expect(kept.filter((n) => existsSync(path.join(layout.scipDir, n)))).toEqual(kept);
+    store.close();
+  });
+
   it('cleanup keeps snapshots used recently even beyond the newest 8', async () => {
     const layout = await initDataDir(tempDir());
     const store = new Store(layout.dbPath);
@@ -179,5 +194,13 @@ describe('snapshot locks', () => {
     expect(await cleanupSnapshots(store, layout, { now })).toHaveLength(0);
     expect(store.listSnapshots()).toHaveLength(12);
     store.close();
+  });
+});
+
+describe('rust run base candidates', () => {
+  it('tries an absolute XDG_CACHE_HOME first and ~/.cache after it', () => {
+    expect(rustRunBaseCandidates({ XDG_CACHE_HOME: '/x/cache' }, '/h')).toEqual(['/x/cache/codeinsight/rust-run', '/h/.cache/codeinsight/rust-run']);
+    expect(rustRunBaseCandidates({ XDG_CACHE_HOME: 'relative' }, '/h')).toEqual(['/h/.cache/codeinsight/rust-run']);
+    expect(rustRunBaseCandidates({ XDG_CACHE_HOME: '/h/.cache' }, '/h')).toEqual(['/h/.cache/codeinsight/rust-run']);
   });
 });

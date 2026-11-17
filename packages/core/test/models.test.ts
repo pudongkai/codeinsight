@@ -174,3 +174,38 @@ type Labeled struct {
     expect(r.models).toBe(4);
   });
 });
+
+describe('rust data model recognition', () => {
+  it('classifies structs by derives and attributes: diesel, sqlx, sea_orm, json, and plain structs and enums', async () => {
+    const source = `use diesel::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Queryable, Selectable)]
+pub struct User { pub id: i32 }
+
+#[derive(Debug)]
+#[diesel(table_name = posts)]
+pub struct Post { pub id: i32 }
+
+#[derive(sqlx::FromRow, Serialize)]
+pub struct Row { pub id: i64 }
+
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+#[sea_orm(table_name = "cake")]
+pub struct Model { pub id: i32 }
+
+#[derive(serde::Deserialize)]
+pub(crate) struct Dto { count: u32 }
+
+#[derive(Serialize)]
+pub enum Status { Active }
+
+#[derive(Debug, Clone)]
+pub struct Service;
+`;
+    const r = await extractFiles([{ path: 'src/lib.rs', source, language: 'rust', isTest: false, isGenerated: false }]);
+    const kinds = Object.fromEntries(r.files[0]!.symbols.filter((s) => s.kind === 'class').map((s) => [s.name, s.modelKind]));
+    expect(kinds).toEqual({ User: 'diesel', Post: 'diesel', Row: 'sqlx', Model: 'sea_orm', Dto: 'json', Status: null, Service: null });
+    expect(r.models).toBe(5);
+  });
+});

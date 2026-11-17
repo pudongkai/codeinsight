@@ -31,3 +31,13 @@ export function mayNeedReresolve(sources: EdgeSources | null | undefined, now = 
   return Object.values(sources ?? {}).some((s) => s.source === 'name_match'
     && (s.reason === 'not_found' || (s.reason === 'failed' && now - (s.at ?? 0) >= FAILED_RERESOLVE_AFTER_MS)));
 }
+
+/**
+ * 一种语言的边来自名称匹配时，现在外部工具可用（toolsOk）的情况下要不要重新解析：之前找不到工具，
+ * 或之前运行失败且已过去 FAILED_RERESOLVE_AFTER_MS。disabled、no_module 时装了工具也用不上，不重新解析
+ */
+export function toolNeedsReresolve(source: EdgeSource | undefined, toolsOk: boolean, now = Date.now()): boolean {
+  if (source?.source !== 'name_match' || !toolsOk) return false;
+  if (source.reason === 'not_found') return true;
+  return source.reason === 'failed' && now - (source.at ?? 0) >= FAILED_RERESOLVE_AFTER_MS;
+}

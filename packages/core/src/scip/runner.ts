@@ -73,6 +73,26 @@ export interface ProcessRun {
   signal?: AbortSignal;
   /** 收集标准输出（如 go list 的结果）；默认丢弃 */
   captureStdout?: boolean;
+  /** 标准错误按行逐行交给调用方（不受只保留末尾 64KB 的限制） */
+  onStderr?: (line: string) => void;
+}
+
+const STDERR_KEEP_BYTES = 64 * 1024;
+
+/** 按行切分分段到达的文字，每凑齐一行交给 onLine；flush 交出最后不带换行的部分 */
+function lineSplitter(onLine: (line: string) => void): { push(text: string): void; flush(): void } {
+  let pending = '';
+  return {
+    push(text) {
+      const parts = (pending + text).split('\n');
+      pending = parts.pop()!;
+      for (const line of parts) onLine(line.replace(/\r$/, ''));
+    },
+    flush() {
+      if (pending) onLine(pending.replace(/\r$/, ''));
+      pending = '';
+    },
+  };
 }
 
 /** 在单独的进程组里运行一个索引命令并等它结束；超时或中止时结束整组。不因退出码抛错，结果在返回值里 */
@@ -88,8 +108,11 @@ export function runProcess(run: ProcessRun): Promise<ExitInfo> {
     let stderr = '';
     let timedOut = false;
     let aborted = false;
-    child.stderr?.on('data', (d: Buffer) => {
-      stderr = (stderr + d.toString('utf8')).slice(-64 * 1024);
+    const lines = run.onStderr ? lineSplitter(run.onStderr) : undefined;
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (d: string) => {
+      stderr = (stderr + d).slice(-STDERR_KEEP_BYTES);
+      lines?.push(d);
     });
     const timer = setTimeout(() => {
       timedOut = true;
@@ -111,6 +134,7 @@ export function runProcess(run: ProcessRun): Promise<ExitInfo> {
     });
     child.on('close', (code, signal) => {
       done();
+      lines?.flush();
       resolve({ code, signal, timedOut, aborted, stderr, stdout: Buffer.concat(stdout).toString('utf8') });
     });
   });
@@ -244,6 +268,62 @@ export async function runScipGo(opts: ScipGoRunOptions): Promise<void> {
     log.info('scip_go_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, aborted: exit.aborted, ms: Date.now() - started });
     checkExit('scip-go', exit, opts.timeoutMs);
     await keepOutput('scip-go', tmp, opts.output, exit);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
+
+/** 运行 Rust 的命令；启动失败（程序或 cwd 不存在等）时改抛 ScipRunError，调用方按这次运行失败处理 */
+async function runRustProcess(run: ProcessRun): Promise<ExitInfo> {
+  try {
+    return await runProcess(run);
+  } catch (err) {
+    throw new ScipRunError(`${path.basename(run.bin)} failed to start: ${(err as Error).message}`);
+  }
+}
+
+export interface RustCommandOptions {
+  /** 可执行文件的绝对路径 */
+  bin: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  onStderr?: (line: string) => void;
+}
+
+/**
+ * 运行 `cargo metadata` 检查包和依赖能否解析（输出丢弃）。offline 时加 `--offline`。
+ * 被中止时抛出 ScipRunError；超时和退出码不为 0 时返回 ExitInfo 由调用方判断
+ */
+export async function runCargoMetadata(opts: RustCommandOptions & { offline: boolean }): Promise<ExitInfo> {
+  if (opts.signal?.aborted) throw new ScipRunError('cargo metadata cancelled');
+  const args = ['metadata', '--format-version', '1', '--all-features', ...(opts.offline ? ['--offline'] : [])];
+  const started = Date.now();
+  const exit = await runRustProcess({ ...opts, args });
+  log.info('cargo_metadata_exit', { cwd: opts.cwd, offline: opts.offline, code: exit.code, timedOut: exit.timedOut, ms: Date.now() - started });
+  if (exit.aborted) throw new ScipRunError('cargo metadata cancelled');
+  return exit;
+}
+
+/** rust-analyzer scip 的运行参数；output 为索引文件，configPath 为 rust-analyzer 的 JSON 配置 */
+export interface RustAnalyzerScipOptions extends RustCommandOptions {
+  output: string;
+  configPath: string;
+}
+
+/** 在 cwd 运行 `rust-analyzer scip .` 生成索引（文档路径相对 cwd）。先写临时文件，成功后再改名；失败、超时、中止时抛出 ScipRunError */
+export async function runRustAnalyzerScip(opts: RustAnalyzerScipOptions): Promise<void> {
+  if (opts.signal?.aborted) throw new ScipRunError('rust-analyzer cancelled');
+  const tmp = `${opts.output}.${process.pid}.tmp`;
+  const args = ['scip', '.', '--output', tmp, '--config-path', opts.configPath];
+  log.info('rust_analyzer_scip_start', { cwd: opts.cwd, timeoutMs: opts.timeoutMs });
+  const started = Date.now();
+  try {
+    const exit = await runRustProcess({ ...opts, args, tmp });
+    log.info('rust_analyzer_scip_exit', { code: exit.code, signal: exit.signal, timedOut: exit.timedOut, aborted: exit.aborted, ms: Date.now() - started });
+    checkExit('rust-analyzer', exit, opts.timeoutMs);
+    await keepOutput('rust-analyzer', tmp, opts.output, exit);
   } finally {
     await rm(tmp, { force: true });
   }

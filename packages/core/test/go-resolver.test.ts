@@ -9,7 +9,7 @@ import { LanguageResolver } from '../src/resolve/language-resolver.js';
 import { FAILED_RERESOLVE_AFTER_MS, mayNeedReresolve } from '../src/resolve/edge-sources.js';
 import { goContinuedLines } from '../src/resolve/scip-rules-go.js';
 import { goListError, runScipGo, ScipRunError } from '../src/scip/runner.js';
-import { goScipPath, snapshotDir } from '../src/store/data-dir.js';
+import { languageScipPath, snapshotDir } from '../src/store/data-dir.js';
 import { findCommand } from '../src/util/command.js';
 import { commitAll, git, tempDir } from './helpers/git-repo.js';
 
@@ -156,7 +156,7 @@ describe.skipIf(!HAS_SCIP_GO)('Go resolver with scip-go', () => {
     const snap = result.snapshot;
     expect(snap).toMatchObject({ resolverStatus: 'ok', resolverError: null });
     expect(snap.edgeSources?.go).toEqual({ source: 'scip' });
-    expect(existsSync(goScipPath(env.layout, snap.contentKey))).toBe(true);
+    expect(existsSync(languageScipPath(env.layout, snap.contentKey, 'go'))).toBe(true);
     const edges = env.store.getEdges(snap.id);
     const text = describeEdges(edges, env.store.getSymbols(snap.id));
     expect(text).toContain(`call backend/cmd/server/main.go#example.com/gobasic/cmd/server.main.func1 -> backend/internal/order/service.go#${PKG}.Service.Create`);

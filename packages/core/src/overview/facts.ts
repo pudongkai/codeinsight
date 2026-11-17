@@ -1,9 +1,11 @@
 import { isHttpApi } from '../model/entry.js';
 import { detectLanguage } from '../model/language.js';
 import type { EdgeRow, EntryRow, SymbolRow } from '../model/types.js';
+import { stripDedupSuffix } from '../model/symbol-key.js';
 import type { EntryInfo, SymbolRef } from '../report/types.js';
 import { symbolRef } from '../review/impact.js';
 import { addToSet } from '../util/collections.js';
+import { isRustTraitImplMethod } from '../extract/rust-syntax.js';
 import { moduleDir } from './module-id.js';
 import type { ModuleIndex, PartitionModule } from './partition.js';
 import type { EdgeSample, ModuleEdge, ModuleEdgeKind, ModuleInterface, ModuleModel, OverviewStats } from './types.js';
@@ -222,8 +224,45 @@ function isGoPublic(g: OverviewGraph, s: SymbolRow): boolean {
   return parent?.kind === 'module' && parts.length >= 3 && isGoExported(parts[parts.length - 2]!);
 }
 
-function isPublic(g: OverviewGraph, s: SymbolRow): boolean {
-  if (detectLanguage(s.path) === 'go') return isGoPublic(g, s);
+/** `pub` 开头的声明；`pub(crate)`、`pub(super)`、`pub(in ..)` 这类受限可见性不算 */
+function hasRustPub(s: SymbolRow): boolean {
+  return /^pub\s/.test(s.displaySignature);
+}
+
+/** Rust 文件 → 对外公开的内联 mod 路径（`a::b`） */
+export type RustPublicMods = ReadonlyMap<string, ReadonlySet<string>>;
+
+/**
+ * 写在文件模块里、模块外看得到的项：直接在文件模块里，或者包着它的内联 mod 都是 `pub`。
+ * 内联 mod 路径取 qualifiedName 去掉模块前缀和名字后剩下的部分
+ */
+function isRustModuleLevelVisible(s: SymbolRow, parent: SymbolRow, mods: RustPublicMods): boolean {
+  if (parent.kind !== 'module') return false;
+  const qn = stripDedupSuffix(s.qualifiedName);
+  const prefix = `${parent.qualifiedName}::`;
+  const suffix = `::${s.name}`;
+  if (qn === `${prefix}${s.name}`) return true;
+  if (!qn.startsWith(prefix) || !qn.endsWith(suffix)) return false;
+  return mods.get(s.path)?.has(qn.slice(prefix.length, qn.length - suffix.length)) ?? false;
+}
+
+/**
+ * Rust 的公开符号：函数、类型、trait 是 `pub` 且直接在文件模块里或在都是 `pub` 的内联 mod 里；trait 里的方法跟随 trait；
+ * trait impl 的方法跟随实现的类型；固有 impl 的方法要 `pub` 且所属类型公开。函数体里的函数和闭包不算
+ */
+function isRustPublic(g: OverviewGraph, s: SymbolRow, mods: RustPublicMods): boolean {
+  const parent = s.parentId === null ? undefined : g.symbols.get(s.parentId);
+  if (!parent) return false;
+  if (s.kind !== 'method') return hasRustPub(s) && isRustModuleLevelVisible(s, parent, mods);
+  if (parent.kind === 'interface') return isRustPublic(g, parent, mods);
+  if (parent.kind !== 'class') return false;
+  return (isRustTraitImplMethod(s) || hasRustPub(s)) && isRustPublic(g, parent, mods);
+}
+
+function isPublic(g: OverviewGraph, s: SymbolRow, rustMods: RustPublicMods): boolean {
+  const language = detectLanguage(s.path);
+  if (language === 'go') return isGoPublic(g, s);
+  if (language === 'rust') return isRustPublic(g, s, rustMods);
   if (s.name.startsWith('_')) return false;
   if (s.parentId === null) return s.kind === 'function' || s.kind === 'class';
   const parent = g.symbols.get(s.parentId);
@@ -233,14 +272,14 @@ function isPublic(g: OverviewGraph, s: SymbolRow): boolean {
 const CALL_ONLY: ReadonlySet<string> = new Set(['call']);
 
 /**
- * 本模块的公开符号（Python 为非 `_` 开头的顶层函数、类和公开类的公开方法，Go 见 isGoPublic）加上 HTTP 接口，
+ * 本模块的公开符号（Python 为非 `_` 开头的顶层函数、类和公开类的公开方法，Go 见 isGoPublic，Rust 见 isRustPublic）加上 HTTP 接口，
  * 按“HTTP 接口优先 → 本模块内的调用方数 → key”排序。只看本模块的代码，其他模块的改动不影响结果。
  * 源码片段和模块摘要输入共用这个顺序。
  */
-export function rankedOwnSymbols(g: OverviewGraph, moduleId: string): SymbolRow[] {
+export function rankedOwnSymbols(g: OverviewGraph, moduleId: string, rustMods: RustPublicMods = new Map()): SymbolRow[] {
   const own = ownCallers(g, moduleId, CALL_ONLY);
   const rows = moduleSymbols(g, moduleId)
-    .filter((s) => isHttpHandler(g, s.id) || isPublic(g, s))
+    .filter((s) => isHttpHandler(g, s.id) || isPublic(g, s, rustMods))
     .map((s) => ({ s, http: isHttpHandler(g, s.id), callers: own.get(s.id)?.size ?? 0 }));
   rows.sort((a, b) => Number(b.http) - Number(a.http) || b.callers - a.callers || byKey(a.s, b.s));
   return rows.map((r) => r.s);

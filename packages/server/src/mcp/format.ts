@@ -14,10 +14,10 @@ export function candidatesText(query: string, rows: SymbolRow[]): string {
 }
 
 export function notFoundText(query: string): string {
-  return `No symbol named \`${query}\` in the working tree index. Pass a function name, a qualified name such as \`Class.method\`, or a symbol key.`;
+  return `No symbol named \`${query}\` in the working tree index. Pass a function name, a qualified name such as \`Class.method\` (Rust: \`<crate>::module::Type::method\`, \`crate::module::Type::method\` or \`Type::method\`), or a symbol key.`;
 }
 
-const LANGUAGE_LABELS: Partial<Record<Language, string>> = { python: 'Python', go: 'Go' };
+const LANGUAGE_LABELS: Partial<Record<Language, string>> = { python: 'Python', go: 'Go', rust: 'Rust' };
 
 /**
  * 解析失败时调用关系为空，要明确告知而不是给出 0 个调用方。只有部分语言失败时按语言说明，

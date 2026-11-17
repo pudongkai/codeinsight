@@ -160,7 +160,8 @@ export interface RouteCollection {
   cobraCommands: GoCobraCommand[];
 }
 
-function joinRoute(prefix: string, path: string): string {
+/** 路由前缀和路径拼接，去掉重复的 `/` */
+export function joinRoute(prefix: string, path: string): string {
   if (!prefix) return path;
   if (!path) return prefix;
   return prefix.replace(/\/+$/, '') + (path.startsWith('/') ? path : `/${path}`);

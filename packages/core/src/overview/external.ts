@@ -1,6 +1,8 @@
 import type { Node } from 'web-tree-sitter';
 import { collectGoEnvReads, collectGoImports } from '../extract/go.js';
 import { collectGoModules } from '../extract/go-module.js';
+import { collectRustCrates, rustCrateName, rustFileUnit, type RustPackage } from '../extract/rust-cargo.js';
+import { collectRustEnvReads, collectRustPathRoots, collectRustPublicMods, expandRustUses } from '../extract/rust-facts.js';
 import { languageSupport } from '../extract/languages.js';
 import { collectImportModules, type ImportedModule } from '../extract/python.js';
 import { log } from '../log.js';
@@ -9,7 +11,7 @@ import type { FileRow } from '../model/types.js';
 import { readFailureReason } from '../snapshot/source.js';
 import type { Warning } from '../report/types.js';
 import { addToSet, pushTo } from '../util/collections.js';
-import { classifyExternal, classifyGoImport, EXTERNAL_CATEGORIES } from './external-table.js';
+import { classifyExternal, classifyGoImport, classifyRustRoot, EXTERNAL_CATEGORIES, rustDepRoots } from './external-table.js';
 import type { ExternalCategory, ExternalCategorySummary, ModuleEnvVar, ModuleExternal } from './types.js';
 import { compareStrings } from '../util/compare.js';
 
@@ -35,6 +37,8 @@ export interface ModuleExternalFacts {
 export interface ExternalResult {
   byModule: Map<string, ModuleExternalFacts>;
   summary: ExternalCategorySummary[];
+  /** Rust 文件 → 对外公开的内联 mod 路径（见 collectRustPublicMods），公开符号判断用 */
+  rustPublicMods: Map<string, ReadonlySet<string>>;
   warnings: Warning[];
 }
 
@@ -42,6 +46,8 @@ export interface ExternalResult {
 interface FileFacts {
   libs: { lib: string; category: ExternalCategory }[];
   envVars: string[];
+  /** Rust 文件里对外公开的内联 mod */
+  publicMods?: string[];
 }
 
 const CATEGORY_ORDER: readonly ExternalCategory[] = [...EXTERNAL_CATEGORIES, 'other'];
@@ -132,6 +138,10 @@ interface ProjectInfo {
   packages: ReadonlySet<string>;
   /** 项目里 go.mod 的 module 路径 */
   goModules: readonly string[];
+  /** 项目里的 cargo 包：包目录 → 包信息 */
+  rustCrates: ReadonlyMap<string, RustPackage>;
+  /** 工作区内各包的 crate 名 */
+  rustLocal: ReadonlySet<string>;
 }
 
 /** Python 文件：import 按分类表归类；环境变量来自 os.environ / os.getenv 和 pydantic BaseSettings 字段 */
@@ -146,8 +156,40 @@ function goFacts(root: Node, project: ProjectInfo): FileFacts {
   return { libs, envVars: collectGoEnvReads(root) };
 }
 
+/** 工作区内各包的 crate 名（包名和 lib 名，`-` 换成 `_`） */
+function workspaceCrateNames(crates: ReadonlyMap<string, RustPackage>): Set<string> {
+  const out = new Set<string>();
+  for (const p of crates.values()) {
+    out.add(rustCrateName(p.name));
+    if (p.libName) out.add(p.libName);
+  }
+  return out;
+}
+
+/** 文件所在包的第三方依赖：代码里的 crate 名（见 rustDepRoots）→ Cargo.toml 里的依赖名；工作区内的 crate 不算 */
+function rustDeps(file: string, project: ProjectInfo): Map<string, string> {
+  const dir = rustFileUnit(file, project.rustCrates).packageDir;
+  const pkg = dir === undefined ? undefined : project.rustCrates.get(dir);
+  const pairs = (pkg?.deps ?? []).flatMap((d) => rustDepRoots(d).map((root) => [root, d] as const));
+  return new Map(pairs.filter(([key]) => !project.rustLocal.has(key)));
+}
+
+/** Rust 文件：路径第一段在所在包依赖里的按 Rust 分类表归类；环境变量来自 std::env::var 等和 env!/option_env! */
+function rustFacts(root: Node, project: ProjectInfo, file: string): FileFacts {
+  const uses = expandRustUses(root);
+  const deps = rustDeps(file, project);
+  const libs = collectRustPathRoots(root, uses).flatMap((r) => classifyRustRoot(r, deps) ?? []);
+  return { libs, envVars: collectRustEnvReads(root, uses), publicMods: collectRustPublicMods(root) };
+}
+
 /** 概览重新读源码的语言 */
-const FACT_LANGUAGES: ReadonlySet<Language> = new Set(['python', 'go']);
+const FACT_LANGUAGES: ReadonlySet<Language> = new Set(['python', 'go', 'rust']);
+
+function languageFacts(language: Language, root: Node, project: ProjectInfo, input: ExternalInput, file: string): FileFacts {
+  if (language === 'go') return goFacts(root, project);
+  if (language === 'rust') return rustFacts(root, project, file);
+  return pythonFacts(root, project, input.table);
+}
 
 async function fileFacts(input: ExternalInput, project: ProjectInfo, file: string): Promise<FileFacts> {
   const language = detectLanguage(file);
@@ -156,7 +198,7 @@ async function fileFacts(input: ExternalInput, project: ProjectInfo, file: strin
   const tree = parser.parse(source);
   if (!tree) throw new Error('tree-sitter failed to parse');
   try {
-    return language === 'go' ? goFacts(tree.rootNode, project) : pythonFacts(tree.rootNode, project, input.table);
+    return languageFacts(language, tree.rootNode, project, input, file);
   } finally {
     tree.delete();
   }
@@ -170,6 +212,15 @@ async function goModulePaths(input: ExternalInput): Promise<string[]> {
     (p, err) => log.warn('overview_go_mod_skipped', { path: p, reason: readFailureReason(err) }),
   );
   return [...modules.values()];
+}
+
+/** 从快照里的 Cargo.toml 读出包信息；读不到的跳过并记日志 */
+function rustCratesOf(input: ExternalInput): Promise<Map<string, RustPackage>> {
+  return collectRustCrates(
+    input.files.map((f) => f.path),
+    (p) => input.read(p),
+    (p, err) => log.warn('overview_cargo_toml_skipped', { path: p, reason: readFailureReason(err) }),
+  );
 }
 
 function sortedFiles(m: Map<string, Set<string>>): [string, string[]][] {
@@ -207,18 +258,24 @@ function summarize(byModule: Map<string, ModuleExternalFacts>): ExternalCategory
 }
 
 /**
- * 外部依赖和环境变量（概览第 3 步）：从快照重新解析模块里的全部 Python 和 Go 文件（含没有符号的文件）。
+ * 外部依赖和环境变量（概览第 3 步）：从快照重新解析模块里的全部 Python、Go 和 Rust 文件（含没有符号的文件）。
  * 单个文件读不到或解析失败时跳过并记日志，结果里加一条 warning。
  */
 export async function collectExternal(input: ExternalInput): Promise<ExternalResult> {
-  const project: ProjectInfo = { packages: projectPackages(input.files), goModules: await goModulePaths(input) };
+  const rustCrates = await rustCratesOf(input);
+  const project: ProjectInfo = {
+    packages: projectPackages(input.files), goModules: await goModulePaths(input), rustCrates, rustLocal: workspaceCrateNames(rustCrates),
+  };
   const byModule = new Map<string, ModuleExternalFacts>();
+  const rustPublicMods = new Map<string, ReadonlySet<string>>();
   const skipped: string[] = [];
   for (const m of input.modules) {
     const perFile = new Map<string, FileFacts>();
     for (const file of m.files.filter((f) => FACT_LANGUAGES.has(detectLanguage(f)))) {
       try {
-        perFile.set(file, await fileFacts(input, project, file));
+        const facts = await fileFacts(input, project, file);
+        perFile.set(file, facts);
+        if (facts.publicMods) rustPublicMods.set(file, new Set(facts.publicMods));
       } catch (err) {
         skipped.push(file);
         log.warn('overview_external_file_skipped', { path: file, reason: readFailureReason(err) });
@@ -232,5 +289,5 @@ export async function collectExternal(input: ExternalInput): Promise<ExternalRes
     code: 'external_files_skipped', level: 'warning',
     message: `${skipped.length} file(s) could not be read from the snapshot; their imports and environment variables are not included (e.g. ${skipped[0]})`,
   }];
-  return { byModule, summary: summarize(byModule), warnings };
+  return { byModule, summary: summarize(byModule), rustPublicMods, warnings };
 }

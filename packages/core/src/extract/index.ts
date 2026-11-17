@@ -9,7 +9,14 @@ export * from './types.js';
 export { bodySimilarity, normalizeTokens, shingles, SHINGLE_SIZE } from './normalize.js';
 export { collectImportModules, extractPythonFile, moduleDottedName, restoreExtractedFile } from './python.js';
 export type { ImportedModule } from './python.js';
-export { getGoParser, getPythonParser } from './parser.js';
+export { getGoParser, getPythonParser, getRustParser } from './parser.js';
+export { extractRustFile, restoreRustFile } from './rust.js';
+export {
+  cargoLockDirs, cargoRootDir, collectRustCrates, isCargoInput, parseToolchainChannel, rustCratesFromManifests, rustFileUnit,
+} from './rust-cargo.js';
+export type { RustFileUnit, RustPackage, RustTarget } from './rust-cargo.js';
+export { collectRustEnvReads, collectRustPathRoots, collectRustPublicMods } from './rust-facts.js';
+export { completeRustFiles, RUST_STD_CRATES, RustSymbolIndex, type ResolvedPath } from './rust-index.js';
 export { collectGoEnvReads, collectGoImports, extractGoFile, restoreGoFile } from './go.js';
 export type { GoImport } from './go.js';
 export { completeGoFiles, findGoFunc, GoSymbolIndex } from './go-index.js';

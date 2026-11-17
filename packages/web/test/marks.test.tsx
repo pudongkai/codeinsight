@@ -22,6 +22,8 @@ describe('symbol marks', () => {
   it('derives 接口 / 模型 / 方法 marks; middleware and plain functions get none', () => {
     expect(symbolMarks({ kind: 'function', entry: http })).toEqual([{ kind: 'api', label: '接口', title: 'HTTP 接口（fastapi） GET /users/{id}' }]);
     expect(symbolMarks({ kind: 'class', modelKind: 'sqlalchemy' }).map((m) => m.title)).toEqual(['数据模型（SQLAlchemy）']);
+    expect(symbolMarks({ kind: 'class', modelKind: 'diesel' }).map((m) => m.title)).toEqual(['数据模型（Diesel）']);
+    expect(symbolMarks({ kind: 'class', modelKind: 'sea_orm' }).map((m) => m.title)).toEqual(['数据模型（SeaORM）']);
     expect(symbolMarks({ kind: 'method', entry: http }).map((m) => m.label)).toEqual(['接口', '方法']);
     expect(symbolMarks({ kind: 'function', entry: { kind: 'http', framework: 'fastapi', detail: { middleware: 'http' } } })).toEqual([]);
     expect(symbolMarks({ kind: 'function' })).toEqual([]);

@@ -7,18 +7,25 @@ import { extractGoFile, restoreGoFile } from './go.js';
 import { resolveGoEntries } from './go-entries.js';
 import { completeGoFiles } from './go-index.js';
 import { resolveGoModels } from './go-models.js';
-import { getGoParser, getPythonParser } from './parser.js';
+import { getGoParser, getPythonParser, getRustParser } from './parser.js';
 import { extractPythonFile, restoreExtractedFile, type FileFlags } from './python.js';
+import { extractRustFile, restoreRustFile } from './rust.js';
+import { resolveRustEntries } from './rust-entries.js';
+import { completeRustFiles } from './rust-index.js';
+import { resolveRustModels } from './rust-models.js';
+import type { RustPackage } from './rust-cargo.js';
 import type { ExtractedEntry, ExtractedFile } from './types.js';
 
 /** 提取时需要的仓库级信息 */
 export interface ExtractContext {
   /** Go module 所在目录（相对仓库根目录）→ module 路径；其他语言忽略 */
   goModules: ReadonlyMap<string, string>;
+  /** cargo 包所在目录（相对仓库根目录）→ 包信息；其他语言忽略 */
+  rustCrates: ReadonlyMap<string, RustPackage>;
 }
 
 export function emptyExtractContext(): ExtractContext {
-  return { goModules: new Map() };
+  return { goModules: new Map(), rustCrates: new Map() };
 }
 
 export interface CrossFileResult {
@@ -69,7 +76,22 @@ const go: LanguageSupport = {
   },
 };
 
-const SUPPORTS: readonly LanguageSupport[] = [python, go];
+const rust: LanguageSupport = {
+  language: 'rust',
+  grammarPackage: 'tree-sitter-rust',
+  getParser: getRustParser,
+  extractFile: (parser, path, source, flags, ctx) => extractRustFile(parser, path, source, flags, ctx.rustCrates),
+  restoreFile: (parser, path, source, rows, ctx) => restoreRustFile(parser, path, source, rows, ctx.rustCrates),
+  completeForResolve: (files) => {
+    completeRustFiles(files);
+  },
+  resolveCrossFile: (files) => {
+    const index = completeRustFiles(files);
+    return { entries: resolveRustEntries(files, index), models: resolveRustModels(files) };
+  },
+};
+
+const SUPPORTS: readonly LanguageSupport[] = [python, go, rust];
 
 export function languageSupport(lang: Language): LanguageSupport | undefined {
   return SUPPORTS.find((s) => s.language === lang);

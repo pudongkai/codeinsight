@@ -4,18 +4,18 @@ import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { GoSymbolIndex } from '../extract/go-index.js';
-import type { ExtractedFile } from '../extract/types.js';
 import { log } from '../log.js';
-import type { EdgeRow, FallbackReason } from '../model/types.js';
+import type { FallbackReason } from '../model/types.js';
 import { decodeScipIndex } from '../scip/reader.js';
-import { goScipPath } from '../store/data-dir.js';
+import { languageScipPath } from '../store/data-dir.js';
 import { findCommand, type FoundCommand } from '../util/command.js';
 import { resolverCodeHash, SHARED_SCIP_RESOLVER_MODULES } from './code-hash.js';
-import { FAILED_RERESOLVE_AFTER_MS } from './edge-sources.js';
+import { toolNeedsReresolve } from './edge-sources.js';
 import { goNameMatchEdges } from './go-name-match.js';
 import { buildGoScipIndex, goModuleDirs, type GoModuleDir } from './go-scip.js';
 import { scipToEdges } from './scip-edges.js';
 import { goRules, prepareGoIndex } from './scip-rules-go.js';
+import { edgeCounts, readSnapshotSources, ToolFallback } from './tool-fallback.js';
 import type { EdgeSources, ResolveInput, ResolveResult, Resolver } from './types.js';
 
 /** scip-go 的安装命令（状态栏提示里也写这一条） */
@@ -80,19 +80,6 @@ async function findGoTools(): Promise<GoTools> {
   return { ok: true, scipGo: scipGo.path, go: go.path, version };
 }
 
-async function readSources(root: string, files: readonly ExtractedFile[]): Promise<Map<string, string>> {
-  const sources = new Map<string, string>();
-  for (const f of files) sources.set(f.path, await readFile(path.join(root, f.path), 'utf8'));
-  return sources;
-}
-
-/** scip-go 回退到名称匹配的原因 */
-class GoFallback extends Error {
-  constructor(readonly reason: FallbackReason, message: string) {
-    super(message);
-  }
-}
-
 /**
  * Go 解析器：找得到 scip-go 和 go 且能加载项目时用 scip-go 的结果；找不到、运行失败或超时时改用名称匹配，
  * 自己不抛异常（被中止时除外）。version 为 `scip-go@<版本>` 或 `name-match` 加上 Go 解析代码的指纹
@@ -116,14 +103,14 @@ export class GoResolver implements Resolver {
   }
 
   async resolve(input: ResolveInput): Promise<ResolveResult> {
-    const sources = await readSources(input.root, input.files);
+    const sources = await readSnapshotSources(input.root, input.files);
     const index = new GoSymbolIndex(input.files);
     try {
-      if (!this.tools.ok) throw new GoFallback(this.tools.reason, this.tools.detail);
+      if (!this.tools.ok) throw new ToolFallback(this.tools.reason, this.tools.detail);
       return await this.resolveWithScip(input, this.tools, sources, index);
     } catch (err) {
       if (input.signal?.aborted) throw err;
-      const reason = err instanceof GoFallback ? err.reason : 'failed';
+      const reason = err instanceof ToolFallback ? err.reason : 'failed';
       const note = (err as Error).message.split('\n')[0]!;
       if (reason === 'failed') log.warn('scip_go_failed', { contentKey: input.contentKey, error: note });
       log.info('go_name_match_fallback', { reason, note });
@@ -141,8 +128,8 @@ export class GoResolver implements Resolver {
     input: ResolveInput, tools: Extract<GoTools, { ok: true }>, sources: Map<string, string>, symbols: GoSymbolIndex,
   ): Promise<ResolveResult> {
     const modules = await goModuleDirs(input.root, input.files);
-    if (modules.length === 0) throw new GoFallback('no_module', 'no go.mod in snapshot');
-    const output = goScipPath(input.layout, input.contentKey);
+    if (modules.length === 0) throw new ToolFallback('no_module', 'no go.mod in snapshot');
+    const output = languageScipPath(input.layout, input.contentKey, 'go');
     if (existsSync(output)) log.info('scip_go_cache_hit', { contentKey: input.contentKey });
     else await this.runScip(input, tools, modules, output);
     const raw = decodeScipIndex(await readFile(output));
@@ -165,15 +152,6 @@ export class GoResolver implements Resolver {
    * 并且现在工具可用时重新解析。没有 go.mod（no_module）时装了工具也用不上，不重新解析
    */
   async needsReresolve(sources: EdgeSources, now = Date.now()): Promise<boolean> {
-    const go = sources.go;
-    if (go?.source !== 'name_match' || !this.tools.ok) return false;
-    if (go.reason === 'not_found') return true;
-    return go.reason === 'failed' && now - (go.at ?? 0) >= FAILED_RERESOLVE_AFTER_MS;
+    return toolNeedsReresolve(sources.go, this.tools.ok, now);
   }
-}
-
-function edgeCounts(edges: readonly EdgeRow[]): Record<string, number> {
-  const out: Record<string, number> = { edges: edges.length, call: 0, import: 0, reference: 0 };
-  for (const e of edges) out[e.kind] = (out[e.kind] ?? 0) + 1;
-  return out;
 }

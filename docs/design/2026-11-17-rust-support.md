@@ -1,6 +1,6 @@
 # CodeInsight Rust 语言支持技术方案
 
-开发状态: TODO
+开发状态: DONE
 方案评审: 通过（2026-11-17）
 需求来源: 2026-11-17 用户需求：“增加rust语言支持”。参照已完成的 Go 支持（`docs/design/2026-11-16-go-support.md`），第一版覆盖符号和调用关系、入口识别、数据模型和外部依赖、相似代码和测试文件识别。2026-11-17 已确认：cargo features 用 `all`；先离线运行、失败再联网（超时 300 秒）；工具链读 `rust-toolchain(.toml)` 的 `channel`，已安装且带 rust-analyzer 就用，否则用 rustup 默认；serde 的 struct 标为 `json`；clap 子命令写进 `main` 入口的 `detail.subcommands`
 作者: dongkai@zbyte-inc.com　　日期: 2026-11-17
@@ -114,7 +114,7 @@ Go 支持做完后，提取层（`LanguageSupport`）和解析层（`LanguageRes
                     ├─ go     → GoResolver
                     └─ rust   → RustResolver
                                  ├─ 查找工具、确定工具链（在临时目录里运行，带 RUSTUP_TOOLCHAIN）
-                                 ├─ 在 os.tmpdir() 下建运行目录，只放 .rs、Cargo.toml、Cargo.lock
+                                 ├─ 在用户私有缓存目录下建运行目录，只放 .rs、Cargo.toml、Cargo.lock
                                  ├─ 每个 cargo 根目录：cargo metadata（先离线后联网）→ rust-analyzer scip → 检查依赖加载
                                  │     成功 → 合并索引 → prepareRustIndex → scipToEdges(rustRules) → 来源 scip
                                  └─ 找不到工具 / 失败的根目录里的文件 → rustNameMatchEdges → 来源 name_match + 原因
@@ -154,7 +154,7 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 **文件 → crate 目标和模块路径**（提取时按路径计算，不看 `mod` 声明，也不看根文件内容）：
 - 文件就是某个目标的根文件 → 该目标，模块路径为空。
 - `src/` 下的其他文件：包有 lib 目标时归 lib，否则归 `src/main.rs` 的 bin；`src/bin/<name>/` 下的归该 bin。模块路径为相对目标根目录的路径，`a/b.rs`、`a/b/mod.rs` 都是 `a::b`。
-- `tests/<dir>/...`、`benches/<dir>/...`、`examples/<dir>/...` 子目录里的文件：一律按目录名建一个虚拟目标（如 `tests/common/mod.rs` 归虚拟目标 `tests/common`）。
+- `tests/<dir>/...`、`benches/<dir>/...`、`examples/<dir>/...`、`src/bin/<dir>/...` 子目录里的文件：有 `<dir>/main.rs` 时归该目标，否则按目录名建一个虚拟目标（如 `tests/common/mod.rs` 归虚拟目标 `tests/common`，多个 bin 共用的 `src/bin/common/mod.rs` 归 `src/bin/common`）。
 - 不在任何包里的 `.rs` 文件：crate 名用所在目录名，模块路径为空。
 
 **符号命名**（crate 名中的 `-` 换成 `_`，用 `::` 分隔）：
@@ -183,7 +183,7 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 
 - `extract/languages.ts` 加 `rust` 的 `LanguageSupport`：`grammarPackage: 'tree-sitter-rust'`，`extractFile` / `restoreFile` 用 `ctx.rustCrates`，`completeForResolve` 补跨文件的 impl 方法 parentId 和类型信息，`resolveCrossFile` 做 parentId 补全、入口和模型。
 - `extract/cache.ts`：指纹除语法包外，加上 `smol-toml` 的版本（新增一个“影响提取结果的其他依赖包”列表）。
-- `extract/rust-index.ts`：`RustSymbolIndex` 和 `resolvePath(file, segments): ResolvedPath | undefined`——第一段按顺序解析 `crate`/`self`/`super`/`Self`、`uses` 绑定、工作区内的 crate 名、当前模块里的同名项、`globUses` 指向的模块里的同名项；经过 `pub use` 再导出时最多跟三层；返回项内路径和对应符号（函数、类型、trait、模块文件），解析到外部 crate 或标准库返回 `{ external: crateName }`。名称匹配、入口处理函数查找、import 边都用它。
+- `extract/rust-index.ts`：`RustSymbolIndex` 和 `resolvePath(file, segments): ResolvedPath | undefined`——第一段按顺序解析 `crate`/`self`/`super`/`Self`、`uses` 绑定（按调用点所在的内联 mod 和函数取）、当前模块里的同名项和子模块、工作区内的 crate 名、`globUses` 指向的模块里的同名项；经过 `pub use` 再导出时最多跟三层；返回项内路径和对应符号（函数、类型、trait、模块文件），解析到外部 crate 或标准库返回 `{ external: crateName }`。名称匹配、入口处理函数查找、import 边都用它。
 - `resolve/types.ts`：`ResolveInput` 加 `rustTimeoutMs`，`build.ts:190` 传入 `config.scipRustTimeoutMs`。
 - `resolve/rust-tools.ts`：`findRustTools(): Promise<RustTools>`，见 4.4 第 1 步；`RustTools` 含 `rustAnalyzer`、`cargo`、`rustc`（绝对路径）、`toolchain`（rustup 工具链名，没有 rustup 时为空）、`version`、`rustSrc`（是否有 rust-src）。
 - `resolve/rust-scip.ts`：`buildRustScipIndex({ snapshotDir, files, packages, tools, output, timeoutMs, signal, keepRunDir? }): Promise<RustScipResult>`，返回每个运行根目录的成功/失败和原因；`keepRunDir` 只给测试用（保留运行目录以便检查）。
@@ -192,9 +192,9 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 - `resolve/scip-rules.ts`：`ScipLanguageRules` 加可选的 `callRest?(rest: string): string`，在 `isCallAt` 判断 `(` 之前去掉语言特有的前缀；Rust 用它去掉 turbofish（`::<T>`）。Python、Go 不设置，行为不变。
 - `scip/merge.ts`：`prefixDocument`、`appendScipDocuments` 从 `resolve/go-scip.ts` 移过来，Go 改 import；加进 `resolve/code-hash.ts` 的 `SHARED_SCIP_RESOLVER_MODULES`。
 - `scip/runner.ts`：`runProcess` 加可选 `onStderr(line: string)`，按行切分后逐行交给调用方（末尾 64KB 的保留不变）；新增 `runCargoMetadata(...)`、`runRustAnalyzerScip({ bin, cwd, out, configPath, env, timeoutMs, signal })`，都用 `runProcess`。
-- `store/data-dir.ts`：`goScipPath` 改为 `languageScipPath(layout, contentKey, language)`（文件名 `<contentKey>.<language>.scip`，Go 的文件名不变），清理快照时删除所有语言的文件。`removeStaleScipTemps` 同时扫描 `os.tmpdir()` 里的 Rust 运行目录（命名见 4.4），进程不在且目录属于当前用户时递归删除。
+- `store/data-dir.ts`：`goScipPath` 改为 `languageScipPath(layout, contentKey, language)`（文件名 `<contentKey>.<language>.scip`，Go 的文件名不变），清理快照时删除所有语言的文件。`removeStaleScipTemps` 同时扫描 Rust 运行目录的上级目录（见 4.4 第 4 步），进程不在且目录属于当前用户时递归删除。
 - `config/index.ts`：新配置项 `scipRustTimeoutMs`，环境变量 `CODEINSIGHT_SCIP_RUST_TIMEOUT_MS`，默认 300 秒。
-- server：MCP `similar` 工具 `language` 加 `'rust'`，`SnippetLanguage` 加 `'rust'`；`mcp/lookup.ts`：含 `#` 时仍按 symbol_key 处理（Rust 的符号名不含 `#`，只有和 Python、Go 一样的去重后缀 `#2` 出现在 symbol_key 里）；否则含 `::` 时按 `::` 拆、取最后一段为名字，再按 `baseQualifiedName` 全等过滤；含 `.` 的行为不变。
+- server：MCP `similar` 工具 `language` 加 `'rust'`，`SnippetLanguage` 加 `'rust'`；`mcp/lookup.ts`：含 `#` 时仍按 symbol_key 处理（Rust 的符号名不含 `#`，只有和 Python、Go 一样的去重后缀 `#2` 出现在 symbol_key 里）；否则含 `::` 时按 `::` 拆、取最后一段为名字，再按 `baseQualifiedName` 全等过滤，开头的 `crate::` 当作任意 crate 名，全等查不到时按 `::<查询>` 后缀匹配（多个结果返回候选列表）；含 `.` 的行为不变。
 - web：`StatusBar.tsx` 的名称匹配提示改为遍历 `edgeSources` 里所有 `name_match` 的语言，原因和安装命令按语言给（Go 现有文案不变；Rust 为“未找到 rust-analyzer”“rust-analyzer 运行失败”“项目没有 Cargo.toml”，安装命令 `rustup component add rust-analyzer rust-src`）；`edgeSources.rust.warnings` 含 `rust_src_missing` 时提示“未安装 rust-src，标准库相关的调用可能不完整”和同一条安装命令。
 
 ### 4.4 关键流程
@@ -208,16 +208,16 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 
 **rust-analyzer 运行**（`resolve/rust-tools.ts`、`resolve/rust-scip.ts`）：
 
-1. **查找工具和工具链**（在 `prepare` 里做）。所有子进程（包括 `--version`、`rustup which`、`rustup default`、`rustup toolchain list`、`rustc --print sysroot`）都显式传 `cwd=os.tmpdir()`，确定工具链后的每一次调用都带 `RUSTUP_TOOLCHAIN`，不受当前目录里 `rust-toolchain.toml` 的影响：
-   - `findCommand('cargo', { envVar: 'CODEINSIGHT_CARGO', extraDirs: ['~/.cargo/bin'] })`、`rust-analyzer`（`CODEINSIGHT_RUST_ANALYZER`）同样查找，`rustup` 可选。
+1. **查找工具和工具链**（在 `prepare` 里做）。所有子进程（包括 `--version`、`rustup which`、`rustup default`、`rustup toolchain list`、`rustc --print sysroot`）都显式传 `cwd`（第 4 步的私有目录），都带 `RUSTUP_AUTO_INSTALL=0`，确定工具链后的每一次调用都带 `RUSTUP_TOOLCHAIN`，不受当前目录里 `rust-toolchain.toml` 的影响：
+   - `findCommand('cargo', { envVar: 'CODEINSIGHT_CARGO', extraDirs: ['~/.cargo/bin'] })`、`rust-analyzer`（`CODEINSIGHT_RUST_ANALYZER`）同样查找，`rustup` 可选。明确设了 `CODEINSIGHT_RUST_ANALYZER` 且它不是 rustup 代理时直接用它（不经 `rustup which`），rustc 和 rust-src 仍按工具链取。
    - 有 rustup：不带 `RUSTUP_TOOLCHAIN` 跑 `rustup default` 取默认工具链名，失败按 `not_found`。cargo 的 realpath 是 rustup 代理（文件名为 `rustup` 或 `rustup-init`）却找不到 rustup 时，按 `not_found`。
    - 工具链（运行时按根目录确定，`prepare` 只确定默认工具链）：从运行根目录往上到快照根目录，找最近的 `rust-toolchain.toml`（`[toolchain] channel`）或旧格式 `rust-toolchain`（整个文件就是 channel），只读 `channel`，其余字段（`path`、`components` 等）忽略；channel 只接受 `^[A-Za-z0-9._-]+$`，且出现在 `rustup toolchain list` 里、该工具链有 rust-analyzer 组件时才用，否则用默认工具链（日志 `rust_toolchain_fallback` 记原因）。用非默认工具链的根目录，rust-analyzer、rustc 路径和 rust-src 检查按该工具链重新取。
    - `RUSTUP_TOOLCHAIN=<工具链> rustup which rust-analyzer`、`rustup which rustc` 得到绝对路径；`rust-analyzer --version` 报 `Unknown binary` 时按 `not_found`，note 写安装命令。没有 rustup 时 rustc 取和 cargo 同目录的 `rustc` 的绝对路径。
    - `rustc --print sysroot` 下没有 `lib/rustlib/src/rust/library` 时记 `rustSrc=false`：仍然运行（项目内的定义和引用不依赖 rust-src），结果的 `warnings` 带 `rust_src_missing`。
    - Windows 上直接按 `not_found`（见本次不做）。
-2. 快照目录里没有 `Cargo.toml` → 名称匹配，`reason=no_module`。
+2. 快照目录里没有 `Cargo.toml`，或没有可作为运行根目录的包（见第 3 步） → 名称匹配，`reason=no_module`。
 3. **运行根目录**：带 `[workspace]` 的 Cargo.toml 所在目录，加上不属于任何工作区成员的包目录；以下不作为运行根目录（文件照常提取，调用边用名称匹配）：路径中含 `tests`、`fixtures`、`testdata`、`examples` 目录、又没列进某个工作区 members 的包。
-4. **运行目录**：在 `os.tmpdir()` 下建 `codeinsight-rust-<contentKey 前 16 位>.<pid>.<随机 6 位>/`，权限 0700。按快照里的相对路径放入：所有 Rust 文件（排除目录下的除外）、所有 `Cargo.toml`、`Cargo.lock`（都复制；`.rs` 先尝试硬链接，跨文件系统时复制）。不放其他任何文件，所以仓库里的 `.cargo/config.toml`、`rust-toolchain.toml`、`rust-analyzer.toml` 都不在运行目录里；运行目录的上级是系统临时目录，不会读到用户仓库根目录的 `.cargo/config.toml` 或带 `[workspace]` 的 Cargo.toml。cargo 仍会读 `CARGO_HOME` 下的配置，那是用户自己的。仓库 `.cargo/config.toml` 里的 credential-provider、registry 等配置因此不可达；依赖私有 registry 的项目会失败回退名称匹配（写进风险）。运行结束（成功、失败、超时、中止）都删除运行目录；进程被强行结束留下的由 `removeStaleScipTemps` 按名字里的 pid 清理。
+4. **运行目录**：在用户私有目录 `$XDG_CACHE_HOME/codeinsight/rust-run`（没设时 `~/.cache/codeinsight/rust-run`）下建 `codeinsight-rust-<contentKey 前 16 位>.<pid>.<随机 6 位>/`，权限 0700。`XDG_CACHE_HOME`（或 `~/.cache`）本身和它的每一级上级目录要求属主是当前用户或 root、组和其他用户不可写（有 sticky 位也不算），缓存目录本身不是符号链接，`XDG_CACHE_HOME` 不满足时改用 `~/.cache`；上级目录逐级建好后设为 0700，并检查不是符号链接、属主是当前用户；再检查它和它的每一级上级目录里有没有 `.cargo/config`、`.cargo/config.toml`、`Cargo.toml`（CARGO_HOME 本身除外），任一检查不过时整次 Rust scip 按 `failed` 处理、不运行 cargo，原因里写明是哪个文件或目录和处理办法；每次运行 `cargo metadata`、`rust-analyzer scip` 前再检查一次上级目录的 cargo 配置（Linux 上 `os.tmpdir()` 常是所有用户可写的 `/tmp`，别的用户可以在那里放 cargo 配置，所以不用系统临时目录）。工具查找的子进程也以这个目录为 `cwd`。只放普通文件，符号链接和放不进去的文件跳过并记日志。按快照里的相对路径放入：所有 Rust 文件（排除目录下的除外）、所有 `Cargo.toml`、`Cargo.lock`（都复制；`.rs` 先尝试硬链接，跨文件系统时复制）。不放其他任何文件，所以仓库里的 `.cargo/config.toml`、`rust-toolchain.toml`、`rust-analyzer.toml` 都不在运行目录里；运行目录的上级是用户私有的缓存目录，不会读到用户仓库根目录的 `.cargo/config.toml` 或带 `[workspace]` 的 Cargo.toml。cargo 仍会读 `CARGO_HOME` 下的配置，那是用户自己的。仓库 `.cargo/config.toml` 里的 credential-provider、registry 等配置因此不可达；依赖私有 registry 的项目会失败回退名称匹配（写进风险）。运行结束（成功、失败、超时、中止）都删除运行目录；进程被强行结束留下的由 `removeStaleScipTemps` 按名字里的 pid 清理。
 5. 每个根目录（运行目录里对应的子目录）单独运行、单独记录结果，共用总超时：
    - `cargo metadata --format-version 1 --all-features --offline`（输出丢弃）；成功则本根目录后续都离线运行（`CARGO_NET_OFFLINE=true`）；失败则去掉 `--offline` 再跑一次，仍失败按 `failed` 处理。
    - `rust-analyzer scip . --output <运行目录>/<序号>.scip --config-path <运行目录>/ra-config.json`，配置为 `{"cargo":{"buildScripts":{"overrideCommand":["true"]},"features":"all"}}`。`true` 用 `findCommand` 得到的绝对路径（`/usr/bin/true` 或 `/bin/true`）。
@@ -227,7 +227,7 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
    - `RUSTUP_TOOLCHAIN=<第 1 步定的工具链>`（没有 rustup 时不设）、`RUSTUP_AUTO_INSTALL=0`；
    - `RUSTC=<第 1 步得到的 rustc 绝对路径>`；`RUSTC_WRAPPER=`、`RUSTC_WORKSPACE_WRAPPER=`（设为空串，cargo 把空串当作不使用 wrapper，并覆盖配置文件里的 `build.rustc-wrapper`）；
    - 从环境里删除 `CARGO_BUILD_RUSTC`、`CARGO_BUILD_RUSTC_WRAPPER`、`CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`、`CARGO_BUILD_RUSTDOC`、`RUSTDOC`（直接删除，不设空串：`RUSTC`、`RUSTC_WRAPPER` 已经固定，这几个变量只需保证不存在）；
-   - `CARGO_TARGET_DIR=<运行目录>/target`、`CARGO_TERM_COLOR=never`；
+   - `CARGO=<第 1 步得到的 cargo 绝对路径>`（rust-analyzer 用同一个 cargo）、`CARGO_TARGET_DIR=<运行目录>/target`、`CARGO_TERM_COLOR=never`；
    - `GIT_TERMINAL_PROMPT=0`、`GIT_SSH_COMMAND="ssh -o BatchMode=yes"`；
    - `CARGO_HOME`、代理设置沿用用户环境。
 7. 超时 `scipRustTimeoutMs`（默认 300 秒，所有根目录共用），中止或超时时结束整个进程组。
@@ -277,12 +277,12 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 
 **数据模型**：struct 的 derive 和属性：`Queryable`/`Selectable`/`Insertable`/`AsChangeset`/`Identifiable` 或 `#[diesel(...)]` → `diesel`；`FromRow` → `sqlx`；`DeriveEntityModel` → `sea_orm`；否则 `Serialize`/`Deserialize` → `json`。enum 不算数据模型。derive 写成 `serde::Serialize` 这类路径时取最后一段。
 
-**分类**：测试路径加 `benches/`，这条规则只对 `.rs` 文件生效（Python、Go 不变；`tests/` 规则本来就对所有语言生效）。生成代码：前 2KB 内有 `// @generated` 行，或匹配 `^// Code generated .* DO NOT EDIT`（`isGeneratedContent` 加 Rust 分支）。
+**分类**：测试路径加 `benches/`，这条规则只对 `.rs` 文件生效（Python、Go 不变；`tests/` 规则本来就对所有语言生效）。生成代码：前 2KB 内有含 `@generated` 的 `//` 注释行（含 prost 的 `// This file is @generated by prost-build.`），或匹配 `^// Code generated .* DO NOT EDIT`（`isGeneratedContent` 加 Rust 分支）。
 
 **概览的 Rust 事实**：`overview/external.ts` 的 `FACT_LANGUAGES` 加 `rust`，用 `extract/rust-facts.ts` 导出的 `collectRustPathRoots`、`collectRustEnvReads`（阶段1 实现，提取时也用）。包信息从快照目录的 `Cargo.toml` 重新读（`collectRustCrates`）。
 - 依赖统计用的第一段来自：`use` 路径、代码里的路径表达式（`reqwest::get(..)`、`serde_json::from_str`）、宏路径（`sqlx::query!`、`tracing::info!`）、属性路径（`#[tokio::main]`、`#[derive(serde::Serialize)]`）。只写了 `#[derive(Serialize)]` 而 `use serde::Serialize` 的，经 `use` 计入。
 - `std`/`core`/`alloc`/`proc_macro`/`test` 为标准库不列出；`crate`/`self`/`super` 和工作区内 crate 名为项目内；其余在所在包 `deps`（`-` 换成 `_` 后比较）里的为第三方库，按 `RUST_EXTERNAL_TABLE` 分类（数据库：sqlx、diesel、sea-orm、rusqlite、postgres、tokio-postgres、mongodb、mysql；缓存：redis、deadpool-redis、moka；HTTP 客户端：reqwest、ureq、isahc、surf；消息队列：lapin、rdkafka、async-nats、pulsar；邮件：lettre；支付：async-stripe；存储：aws-sdk-s3、object_store、opendal、rust-s3；认证加密：jsonwebtoken、ring、argon2、bcrypt、openssl、rustls；LLM：async-openai；Web 框架：axum、actix-web、rocket、warp、poem、salvo、tonic、hyper），没匹配上的为“其他”；不在 deps 里的（如子模块名、局部变量开头的路径）忽略。
-- 环境变量：`std::env::var`/`var_os`、经 `use` 导入后的 `env::var`/`var`、`dotenvy::var` 的字面量参数，以及 `env!`、`option_env!` 的字面量参数。
+- 环境变量：`std::env::var`/`var_os`、经 `use` 导入后的 `env::var`/`var`、`dotenvy::var` 的字面量参数（写在其他宏参数里的按文字匹配），以及 `env!`、`option_env!` 的字面量参数。
 
 **相似代码**：
 - 签名形状按参数（不含 `self`）和返回类型算。
@@ -306,7 +306,7 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 
 - **只用 rust-analyzer，失败标 failed**：没装 rust-analyzer 的 Rust 项目就完全没有调用图。和 Go 一样加名称匹配后备。
 - **开启 build.rs 和过程宏**：索引更完整，但打开项目时会编译并运行项目代码，而且慢很多；`rust-analyzer scip` 也不认关闭它们的开关，只能用 `overrideCommand` 强制不执行，不提供开启的选项。
-- **在快照目录里运行 cargo、删除其中的危险配置文件**：数据目录默认在仓库里，cargo 向上查找时仍会读到用户仓库根目录的 `.cargo/config.toml` 和 Cargo.toml；而且要改动硬链接共享的快照目录。改为在系统临时目录里另建只含需要文件的运行目录。
+- **在快照目录里运行 cargo、删除其中的危险配置文件**：数据目录默认在仓库里，cargo 向上查找时仍会读到用户仓库根目录的 `.cargo/config.toml` 和 Cargo.toml；而且要改动硬链接共享的快照目录。改为在用户私有缓存目录里另建只含需要文件的运行目录。
 - **只靠环境变量覆盖配置**：`.cargo/config.toml` 里的项很多（`target.<triple>.linker`、`[alias]`、`[env]`、credential-provider 等），逐项覆盖容易漏。运行目录里没有这些文件，环境变量只作为第二道防线。
 - **提取时调用 `cargo metadata` 得到准确的 crate 目标**：提取阶段就要依赖外部工具，没装 cargo 时没法提取；按默认布局加 Cargo.toml 显式配置已经覆盖绝大多数项目。
 - **按 `mod` 声明计算模块树**：更准确（能处理 main.rs 自己声明的模块和 `#[path]`），但模块路径就变成跨文件信息，单文件的提取缓存会因为别的文件改动而失效。
@@ -326,7 +326,7 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 | 风险 | 影响 | 应对 |
 | --- | --- | --- |
 | rust-analyzer 编译运行 build.rs 和过程宏 | 打开仓库就执行项目代码 | `buildScripts.overrideCommand=["true"]`（已实测标记文件不出现）；阶段3 独立验证，fixture 带写标记文件的 build.rs 和本地 proc-macro，跑完检查标记文件不存在 |
-| 仓库里或其上级目录的 `.cargo/config.toml`（rustc-wrapper、linker、credential-provider）、`rust-toolchain.toml`（`path`）被执行 | 打开仓库就执行任意程序 | 在系统临时目录里另建运行目录，只放 `.rs`、Cargo.toml、Cargo.lock；固定 `RUSTUP_TOOLCHAIN`、`RUSTC`，`RUSTC_WRAPPER` 等设空串；所有子进程显式 `cwd`；测试覆盖提交快照里、仓库根目录（数据目录的上级）里放恶意配置 |
+| 仓库里或其上级目录的 `.cargo/config.toml`（rustc-wrapper、linker、credential-provider）、`rust-toolchain.toml`（`path`）被执行 | 打开仓库就执行任意程序 | 在用户私有缓存目录里另建运行目录并检查其上级目录没有 cargo 配置，只放 `.rs`、Cargo.toml、Cargo.lock；固定 `RUSTUP_TOOLCHAIN`、`RUSTC`，`RUSTC_WRAPPER` 等设空串；所有子进程显式 `cwd`；测试覆盖提交快照里、仓库根目录（数据目录的上级）里放恶意配置 |
 | `overrideCommand` 的行为随 rust-analyzer 版本变化 | build script 又被执行 | 安全测试在本机有 rust-analyzer 时每次都跑；版本号进解析器 version，升级后会重新解析，测试会先失败 |
 | 依赖加载失败时 rust-analyzer 仍退出 0、索引缺跨 crate 引用 | 调用图悄悄缺边 | 先跑 `cargo metadata`；逐行读 stderr 匹配 `--no-deps` 提示（不受 64KB 截断影响）；兜底按“代码用到了依赖、索引里却没有任何跨 crate 引用”判断 |
 | rust-analyzer 升级后提示文字变化 | 第一道检查失效 | 兜底检查不依赖文字；`cargo metadata` 检查不依赖 rust-analyzer |
@@ -334,7 +334,7 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 | cargo 需要下载依赖，离线或网络慢时失败或很慢 | 构建变慢 | 先离线跑；从工作区补 Cargo.lock；单独 300 秒超时；失败改名称匹配，1 小时内不重试；git 不交互；`RUSTUP_AUTO_INSTALL=0` |
 | 用户本机 cargo 正在编译，占着包缓存锁 | cargo 等锁直到超时 | 匹配 `Blocking waiting for file lock` 记日志，note 写明原因；超时后名称匹配，1 小时后重试 |
 | 没装 rust-src | 标准库类型上的方法调用解析不全 | 仍运行，`warnings` 带 `rust_src_missing`，状态栏提示安装命令；项目内的定义和引用不受影响 |
-| 运行目录残留在系统临时目录 | 占磁盘 | 每次运行结束删除；进程被强行结束的由 `removeStaleScipTemps` 按 pid 清理；运行目录只含 `.rs` 和 Cargo 文件，target 目录因 `overrideCommand` 基本为空 |
+| 运行目录残留在缓存目录 | 占磁盘 | 每次运行结束删除；进程被强行结束的由 `removeStaleScipTemps` 按 pid 清理；运行目录只含 `.rs` 和 Cargo 文件，target 目录因 `overrideCommand` 基本为空 |
 | 同一个包多个 crate 目标的符号重名 | 引用连到错误的 `main` 或文件 | 预处理时按目标区分重复符号，测试覆盖两个 bin 和集成测试 |
 | 模块路径按文件布局计算，与 `mod` 声明不一致（lib.rs 和 main.rs 各自声明模块、`#[path]`） | qualifiedName 的 crate 和模块部分不准；名称匹配可能找错或找不到；SCIP 路径下定义按位置对得上，但这些文件被算到错误的目标里，重复符号按目标区分时可能连到错误的定义 | 名称匹配找不到时不出边；测试用例覆盖 lib.rs 和 main.rs 各自声明 `mod` 的情况，记录实际结果 |
 | 部分根目录失败 | 成功根目录里指向失败根目录的调用缺失 | 失败根目录列进 note 和状态栏；1 小时后重试 |
@@ -363,43 +363,57 @@ Rust 和 Go 不同的地方主要有四点：模块路径由 Cargo.toml 和文�
 
 ## 8. 开发计划
 
-- [ ] 阶段1：Cargo 解析、文件归属、符号提取和快照接入
+- [x] 阶段1：Cargo 解析、文件归属、符号提取和快照接入
   - 涉及模块：packages/core/package.json、packages/core/src/extract（rust.ts、rust-facts.ts、rust-cargo.ts、parser.ts、normalize.ts、types.ts、languages.ts、cache.ts）、packages/core/src/model/language.ts、packages/core/src/classify、packages/core/src/snapshot（incremental.ts、build.ts 的提取上下文部分）、packages/core/src/review（assemble.ts、versions.ts）、packages/core/src/resolve/rust.ts（只放不出边的占位实现）、packages/core/test/fixtures/rust-basic
   - 依赖：无
   - 验证方式：独立
   - 内容：加依赖 `tree-sitter-rust@0.24.0`、`smol-toml`（版本进提取缓存指纹）；`getRustParser`；Cargo.toml 解析（含 workspace exclude）、`rust-toolchain(.toml)` channel 读取、文件 → 目标和模块路径（`tests/<dir>` 虚拟目标）、`rustExcludedDirs` 和 `supportLevelOf` 第三个参数，`incremental.ts` 传集合、`review/assemble.ts` 改用快照 FileRow 的 supportLevel、`versions.ts` 和 `isSupported` 不传；`ReadResult.rustCrates`、`build.ts` 两处提取上下文、缓存 key；Rust 提取器（4.2 的符号、命名含 trait 泛型参数规范化、`r#`、签名、文档注释、bodyHash、isTest、规范化 token 的 Rust 节点类型）；`pathRoots`、`envReads`、`derives`、`macroRanges`、`modDecls`、`useLeaves` 收集；`restoreFile`；`LANG_SUPPORT.rust='full'`；Cargo.toml/Cargo.lock 放入并复制、从工作区补 Cargo.lock；测试（`benches/` 只对 `.rs`）和生成代码识别；占位 `RustResolver`（来源 name_match/disabled，不触发重跑）并注册；rust-basic fixture（含 build.rs 和 pm crate）
   - 完成标准：新增 `rust-cargo.test.ts`、`extract-rust.test.ts` 和 classify 的 Rust 用例通过；rust-basic 快照构建测试能查到 `shop_core::order::service::Service::create`、`shop_core::order::repo::Repo::find`（父节点为 trait）、`shop_core::order::repo::<MemRepo as Repo>::find`、`<Foo as From<u8>>::from` 和 `<Foo as From<u16>>::from` 两个不同符号，`tests/it.rs` 和 `#[cfg(test)]` 里的函数 `isTest=true`，`crates/core/target/`、`vendor/` 下文件 `supportLevel='none'` 而 `src/vendor/mod.rs` 为 `full`，审查里 `target/` 下改动的 `.rs` 文件按快照记录显示为 none，Cargo.toml 复制不硬链接，提交快照里缺 Cargo.lock 时从工作区补上；重试解析时 `snapshotExtractContext` 得到的 `rustCrates` 和构建时相同；`pnpm --filter @codeinsight/core test`、`pnpm -r build` 通过且已有测试期望值未改
+  - 验证：`pnpm --filter @codeinsight/core test` 646 通过/10 跳过，`pnpm -r build`、`pnpm lint` 通过，server/web 测试通过；独立验证通过，提的 7 个低严重度问题已修（dyn impl 类型名、函数体内 impl/trait/mod 不当嵌套函数、cfg(test) 判断、exclude 规范化、重复的 dirOf/descendantsOfType、构建与重试的 Cargo 路径来源统一；同目录 `rust-toolchain` 优先于 `.toml`，按 rustup 实测）；改动 extract/rust*.ts、model/language.ts、snapshot/incremental.ts、snapshot/build.ts、review/assemble.ts、classify、resolve/rust.ts（占位）、test/fixtures/rust-basic
 
-- [ ] 阶段2：调用点、局部类型推断和路径解析
+- [x] 阶段2：调用点、局部类型推断和路径解析
   - 涉及模块：packages/core/src/extract（rust-facts.ts、rust-types.ts、rust-index.ts、languages.ts 的 completeForResolve 和 resolveCrossFile）
   - 依赖：阶段1
   - 内容：`use` 展开（`uses`、`globUses`、`pubUses`）、调用点收集、局部类型推断、字段和返回类型、泛型约束；`RustSymbolIndex`（按 crate、模块路径、名字找项；按类型找方法；trait 方法）和 `resolvePath`（crate/self/super/Self、uses、工作区 crate、同模块、globUses、`pub use` 三层）；跨文件的 impl 方法 parentId；`completeForResolve`
   - 完成标准：新增 `rust-types.test.ts`、`rust-index.test.ts` 通过，覆盖 `resolvePath` 各种第一段、`pub use` 再导出、外部 crate 返回 external、`self.repo` 经泛型约束推断为 trait、`let x = T::new()` 跨文件补返回类型；rust-basic 快照里 `Service::create` 的父节点为 Service struct、`<MemRepo as Repo>::find` 的父节点为 MemRepo；缓存读回后 `rust.uses` 不为空；`pnpm --filter @codeinsight/core test` 通过
+  - 验证：rust-types/rust-index/snapshot-rust 测试 29 个通过；与阶段3 合并后 `pnpm --filter @codeinsight/core test` 689 通过/10 跳过，`pnpm -r build`、`pnpm lint` 通过；`genericBounds` 不单独存，类型参数在提取时直接换成 trait 路径；合并时 STD crate 列表、cargo 根目录规则抽成一份（`RUST_STD_CRATES`、`cargoRootDir`）；改动 extract/rust-types.ts、rust-index.ts、rust-facts.ts、rust-syntax.ts、rust.ts、types.ts、languages.ts
 
-- [ ] 阶段3：rust-analyzer scip 运行与安全隔离
+- [x] 阶段3：rust-analyzer scip 运行与安全隔离
   - 涉及模块：packages/core/src/resolve（rust-tools.ts、rust-scip.ts、scip-rules-rust.ts、scip-rules.ts、scip-edges.ts、code-hash.ts、go-scip.ts 的 import）、packages/core/src/scip（merge.ts、runner.ts）、packages/core/src/store/data-dir.ts、packages/core/src/config
   - 依赖：阶段1
   - 验证方式：独立
-  - 内容：`scip/merge.ts` 抽出并加进共用模块列表；`languageScipPath` 和清理（含 `.rust.json`）；`ScipLanguageRules.callRest`；`runProcess.onStderr`；`findRustTools`（cargo/rust-analyzer/rustup 查找、所有子进程带 `cwd` 和 `RUSTUP_TOOLCHAIN`、rustup 代理和 `rustup default` 失败的判断、工具链 channel 选择、rustc 绝对路径、rust-src 检查、版本号按实际组件路径缓存、Windows 按 not_found）；运行根目录选择；`os.tmpdir()` 下的运行目录（命名、权限、只放需要的文件、结束时删除）和 `removeStaleScipTemps` 扩展；环境变量；每个根目录 `cargo metadata`（先离线后联网）、`rust-analyzer scip`（`overrideCommand` 配置）、依赖加载检查（stderr 逐行匹配和兜底）、等锁日志、前缀合并、超时、中止、缓存；`rustRules` 和 `prepareRustIndex`（重复符号、只留建了符号的定义、宏范围、路径中间段、use 叶子含 glob、`mod` 声明行）；`scipRustTimeoutMs`
+  - 内容：`scip/merge.ts` 抽出并加进共用模块列表；`languageScipPath` 和清理（含 `.rust.json`）；`ScipLanguageRules.callRest`；`runProcess.onStderr`；`findRustTools`（cargo/rust-analyzer/rustup 查找、所有子进程带 `cwd` 和 `RUSTUP_TOOLCHAIN`、rustup 代理和 `rustup default` 失败的判断、工具链 channel 选择、rustc 绝对路径、rust-src 检查、版本号按实际组件路径缓存、Windows 按 not_found）；运行根目录选择；用户私有缓存目录下的运行目录（命名、权限、只放需要的文件、结束时删除）和 `removeStaleScipTemps` 扩展；环境变量；每个根目录 `cargo metadata`（先离线后联网）、`rust-analyzer scip`（`overrideCommand` 配置）、依赖加载检查（stderr 逐行匹配和兜底）、等锁日志、前缀合并、超时、中止、缓存；`rustRules` 和 `prepareRustIndex`（重复符号、只留建了符号的定义、宏范围、路径中间段、use 叶子含 glob、`mod` 声明行）；`scipRustTimeoutMs`
   - 完成标准：`rust-scip.test.ts` 覆盖续行（原始字符串、生命周期、嵌套注释）、turbofish、重复符号按目标区分、路径中间段和 use 叶子过滤（含 `use super::*`）、多根目录前缀、运行根目录选择（fixtures/examples 下的包不作为根目录、exclude）、运行目录内容、环境变量构造、工具查找的三种 `not_found`、stderr 跨多段的 `--no-deps` 提示能匹配到、代码用到依赖而没有跨 crate 引用时按失败处理而没用到依赖时不按失败处理；本机有 rust-analyzer 时：rust-basic 的 `buildRustScipIndex` 加 `scipToEdges` 得到两个 `main` 各自文件里的调用边、app → shop-core 的调用边、属性宏标注的 `main` 里的调用边，快照目录文件 hash 不变，运行目录已删除；**build.rs 和 proc-macro 的标记文件不存在**；提交快照里的恶意 `.cargo/config.toml` 和 `rust-toolchain.toml`、祖先目录的恶意 `.cargo/config.toml` 和 `[workspace]` Cargo.toml、用户环境里的 `RUSTC_WRAPPER`/`CARGO_BUILD_RUSTC_WRAPPER` 都没有被执行，独立包 `cargo metadata` 成功；`keepRunDir` 保留的运行目录里没有 build script 产物；依赖加载失败时该根目录记 failed、另一个根目录成功；中止时进程组被结束、运行目录被删除；验证记录写明 rust-analyzer 版本和对上的定义比例；core 测试和 `pnpm -r build` 通过，已有测试期望值未改
+  - 验证：rust-analyzer 1.98.1，rust-basic 定义对上 27/27；`rust-scip.test.ts` 29 通过（含 build.rs/proc-macro 标记文件不出现、仓库内和祖先目录恶意配置、用户环境 wrapper 不执行、依赖加载失败、中止）；core 716 通过/10 跳过，`pnpm -r build`、`pnpm lint` 通过。独立验证驳回 1 次已修：运行目录从 `os.tmpdir()` 改到用户私有缓存目录并检查上级目录无 cargo 配置（已同步方案 4.4、风险表），建目录后立即进 try、单个文件放置失败跳过，只放普通文件不跟随符号链接，工具查找子进程也以私有目录为 cwd 并响应中止和共用超时，rust-analyzer 是 rustup 代理但找不到 rustup 时按 not_found；改动 resolve/rust-tools.ts、rust-scip.ts、rust-run-dir.ts、scip-rules-rust.ts、scip-rules.ts、scip-edges.ts，scip/merge.ts、runner.ts，store/data-dir.ts，config
 
-- [ ] 阶段4：Rust 名称匹配、RustResolver 组装和状态栏
+- [x] 阶段4：Rust 名称匹配、RustResolver 组装和状态栏
   - 涉及模块：packages/core/src/resolve（rust.ts、rust-name-match.ts、language-resolver.ts、types.ts）、packages/core/src/model/types.ts（EdgeSource.warnings）、packages/core/src/snapshot/build.ts（rustTimeoutMs）、packages/server/src/http/routes/status.ts 和 web 的 API 类型（如需透传 warnings）、packages/web/src/app/StatusBar.tsx
   - 依赖：阶段2、阶段3
   - 内容：名称匹配（path、method、import 边含 glob use，和 SCIP 路径一致）；`RustResolver` 替换占位实现：先 scip、失败根目录和不在根目录下的文件用名称匹配，`sources`（含部分失败、`warnings`）、`effectiveVersion`、`needsReresolve`；`build.ts:190` 传 `rustTimeoutMs`；状态栏按语言的名称匹配提示和 rust-src 缺失提示
   - 完成标准：`rust-name-match.test.ts` 覆盖 path（crate/self/super、use 别名、`pub use`、`Type::new`、`Self::m`）、有推断类型的 method、经 trait 约束字段调用、同名唯一、同名不唯一、import 边（含 `use super::*`，和 scip 路径得到的 import 边指向同一个文件）；rust-basic 在 `scip: false` 时 `edge_sources.rust.source='name_match'` 且有跨 crate 的 `call` 和 `import` 边；重试解析后边数相同；`needsReresolve` 三种情况；本机有 rust-analyzer 时完整快照构建 `edge_sources.rust.source='scip'`；一个根目录失败时 `reason=failed`、note 列出该根目录、另一个根目录的边 `provenance=scip`；`rust_src_missing` 时状态栏显示提示（web 测试）；core、server、web 测试和 `pnpm -r build` 通过，已有测试期望值未改
+  - 验证：`rust-name-match.test.ts` 8 个、`rust-resolver.test.ts` 7 个（2 个本机真跑 rust-analyzer：来源 scip、import 边与名称匹配一致；一个包依赖缺失时 `name_match/failed`、note 列出该根目录、其他根目录边仍为 scip）通过；core 731、server 195、web 186 通过，`pnpm -r build`、`pnpm lint` 通过；名称匹配的 import 边按源码重新展开 use 取完整路径，经 `pub use` 时连到定义所在文件（和 SCIP 一致）；测试 setup 设临时 `XDG_CACHE_HOME`；改动 resolve/rust.ts、rust-name-match.ts、types.ts，model/types.ts，snapshot/build.ts，web api/types.ts、StatusBar.tsx
 
-- [ ] 阶段5：Rust 入口和数据模型
+- [x] 阶段5：Rust 入口和数据模型
   - 涉及模块：packages/core/src/extract（rust.ts 的路由、clap 收集和闭包符号、rust-routes.ts、rust-entries.ts、rust-models.ts、languages.ts）、packages/core/src/model/types.ts、packages/web/src/marks
   - 依赖：阶段2
   - 内容：4.4 表里的入口写法收集和处理函数查找（axum 链式和 nest 前缀、actix-web 属性和 resource/scope、rocket 属性和 mount 前缀、按依赖区分框架）、作为处理函数的闭包建 `closure<N>` 符号、clap 子命令写进 main 入口 detail；数据模型识别；`ModelKind` 加 `diesel`、`sea_orm`；网页模型标签
   - 完成标准：新增 `rust-entries.test.ts` 覆盖 main（含 `#[tokio::main]`、两个 bin）、axum（多方法链、nest 前缀、闭包处理函数生成 `closure<N>` 符号且还原后 id 不变）、actix-web（属性、resource、scope 前缀）、rocket（属性、mount 前缀）、actix 和 rocket 同写法按依赖区分、clap derive 和 builder；`models.test.ts` 的 Rust 用例覆盖 diesel、sqlx、sea_orm、json 和不是模型的 struct；rust-basic 快照的 entries 里有两个 `cli/rust`；`pnpm --filter @codeinsight/core test`、`pnpm --filter @codeinsight/web test`、`pnpm --filter @codeinsight/web build` 通过
+  - 验证：`rust-entries.test.ts` 8 个用例、models/snapshot-rust/web marks 用例通过；core 715 通过、web 184 通过，web build、`pnpm lint` 通过；超出模块的改动：`snapshot/incremental.ts` 的 Rust 提取缓存 key 加入包的依赖名（框架按依赖判断）；rocket mount 前缀不限同一 crate（bin 挂 lib 的路由），clap 子命令包含同包非 bin 文件里的；改动 extract/rust-routes.ts、rust-entries.ts、rust-models.ts、rust.ts、rust-types.ts、languages.ts、types.ts，model/types.ts，web/src/marks
 
-- [ ] 阶段6：概览、相似代码、MCP、审查和其他 Rust 适配
+- [x] 阶段6：概览、相似代码、MCP、审查和其他 Rust 适配
   - 涉及模块：packages/core/src/overview（external.ts、external-table.ts、facts.ts）、packages/core/src/similar、packages/core/src/ask/sensitive.ts、packages/server/src/mcp（similar-tool.ts、lookup.ts）、packages/core/test（review 的 Rust 用例）
   - 依赖：阶段2
   - 内容：概览 Rust 事实（`collectRustPathRoots`、`collectRustEnvReads`、Cargo.toml 依赖、`RUST_EXTERNAL_TABLE`）；`isPublic` 的 Rust 规则；Rust 签名形状、同名重复规则、无函数体的 trait 方法不参与；`SnippetLanguage` 和 MCP `similar` 工具加 `rust`；`mcp/lookup.ts` 支持 `::` 限定名（`#` 判断在前）；`sensitive` 加 `Cargo.toml`、`Cargo.lock`、`.cargo/config.toml`、`.cargo/credentials.toml`、`rust-toolchain.toml`；Rust 审查用例
   - 完成标准：`overview.test.ts` 的 Rust 用例通过（第三方库按类别分组、只在路径表达式/宏/属性里出现的库也被列出、std 和工作区 crate 不出现、`env::var` 和 `env!` 被列出、`pub` 算公开而 `pub(crate)` 不算、trait impl 方法跟随类型）；`similar.test.ts` 的 Rust 用例通过（结构相同的两个函数相似度排第一，各类型的 `new()`、`fmt()` 不算同名重复，Rust 片段能搜到 Rust 函数）；server MCP `similar` 传 `language: "rust"`、按 `shop_core::order::service::Service::create` 查符号、按闭包符号的限定名查符号的测试通过，按 `.` 查 Python/Go 符号和按 symbol_key 查的已有测试不变；Rust 审查用例报告符号级变更和函数移动；`pnpm -r build`、`pnpm lint` 和全部测试通过
+  - 验证：overview/similar/review/write-scope 的 Rust 用例和 server `mcp-lookup.test.ts`、`mcp.test.ts` Rust 用例通过；core 716 通过/10 跳过，server 195 通过，`pnpm -r build`、`pnpm lint` 通过；内联 `pub mod` 的可见性由概览从源码重新解析时收集（`collectRustPublicMods`），不进提取缓存；固有 impl 方法另要求所属类型公开（和 Python、Go 一致）；无函数体的 trait 方法按 token 为空判断；改动 overview/external.ts、external-table.ts、facts.ts、structure.ts，similar/features.ts、index.ts，ask/sensitive.ts，server/src/mcp/lookup.ts、similar-tool.ts，extract/rust-facts.ts（`collectRustPublicMods`）
+
+- [x] 阶段7：代码审查第1轮修复
+  - 内容：match 分支条件不当绑定变量；路径解析时当前模块的项先于工作区 crate；内联 mod 和函数体里的 `use` 按所在作用域生效；`src/bin/<name>/` 下的文件归该 bin；顶层 `xxx!(...);` 计入宏范围；turbofish 路径第一段；`async-stripe`、`rust-s3` 按库名分类；axum 方法链跳过 `layer`/`with_state`；宏参数里的环境变量读取；生成代码识别含 `@generated` 的注释行；等锁超时不再联网重试且保留原因；有 rustup 时 `CODEINSIGHT_RUST_ANALYZER` 生效；cargo 启动失败只算本根目录失败；没有可运行根目录记 `no_module`；缓存用 `writeFileAtomic`；检查 `XDG_CACHE_HOME` 本身；Go/Rust 解析器公共部分抽到 `resolve/tool-fallback.ts`、`toolNeedsReresolve`；MCP 语言名和查找提示加 Rust
+  - 验证：`pnpm -r test` core 747 通过/10 跳过、server 197、web 186、cli 40 通过，`pnpm -r build`、`pnpm lint` 通过
+
+- [x] 阶段8：代码审查第2轮修复
+  - 内容：`src/bin/<dir>/` 没有 main.rs 时建虚拟目标；函数体里的 `use` 同时用于路由处理函数；模式变量遮蔽只在所在闭包/for/match 分支/if let 内；宏参数里嵌套的 `env!`/`option_env!`；函数体里 `mod` 的 `use` 不进模块绑定；Cargo.toml、rust-toolchain 只读普通文件，TOML 错误日志只记第一行和行列号（`util/regular-file.ts`）；缓存目录的每一级上级目录不能被他人写，每次运行 cargo/rust-analyzer 前再查上级 cargo 配置；MCP `::` 查找支持 `crate::` 开头和后缀匹配；`CARGO` 环境变量；全部失败命中缓存时沿用缓存的失败时间；工具查找意外错误按 failed 返回不影响其他语言；`RUST_RESOLVER_MODULES` 加 `extract/rust-cargo`
+  - 验证：`pnpm -r test` core 759 通过/10 跳过、server 199、web 186、cli 40 通过，`pnpm -r build`、`pnpm lint` 通过；测试后 `~/.cache/codeinsight` 不存在
 
 ## 9. 待确认问题
 

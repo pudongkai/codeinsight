@@ -10,7 +10,7 @@ import { addHandlerLiterals, routeEnv, routeVisitor, type RouteCollection, type 
 import { goDocComment } from './go-syntax.js';
 import { declareParams, fileTypeLookup, type GoTypeContext } from './go-types.js';
 import type { FileFlags } from './python.js';
-import { finalizeSymbols, type RawSymbol } from './symbols.js';
+import { finalizeSymbols, restoredSymbols, type RawSymbol } from './symbols.js';
 import type { ExtractedFile, ExtractedSymbol, GoCallSite, GoFileFacts, GoStructTags } from './types.js';
 
 export { collectGoEnvReads, collectGoImports } from './go-imports.js';
@@ -119,22 +119,12 @@ export function extractGoFile(
   }
 }
 
-/**
- * 用已入库的符号还原 Go 文件：重新解析源码得到 go 字段和名字位置，符号以库里为准（含跨文件补上的父符号）。
- * 名字位置按 id 对应，对不上时按 `名字@起始行` 对应
- */
+/** 用已入库的符号还原 Go 文件：重新解析源码得到 go 字段和名字位置，符号以库里为准（含跨文件补上的父符号） */
 export function restoreGoFile(
   parser: Parser, filePath: string, source: string, rows: Omit<SymbolRow, 'snapshotId'>[], goModules: ReadonlyMap<string, string>,
 ): ExtractedFile {
   const module = rows.find((r) => r.kind === 'module');
   const flags = { isTest: module?.isTest ?? false, isGenerated: module?.isGenerated ?? false };
   const fresh = extractGoFile(parser, filePath, source, flags, goModules);
-  const byId = new Map(fresh.symbols.map((s) => [s.id, s]));
-  const byName = new Map(fresh.symbols.map((s) => [`${s.name}@${s.startLine}`, s]));
-  const ordered = [...rows].sort((a, b) => (a.kind === 'module' ? -1 : b.kind === 'module' ? 1 : a.startLine - b.startLine));
-  const symbols = ordered.map((r): ExtractedSymbol => {
-    const f = byId.get(r.id) ?? byName.get(`${r.name}@${r.startLine}`);
-    return { ...r, nameLine: f?.nameLine ?? (r.kind === 'module' ? 0 : r.startLine - 1), nameCol: f?.nameCol ?? 0 };
-  });
-  return { ...fresh, symbols };
+  return { ...fresh, symbols: restoredSymbols(fresh.symbols, rows) };
 }

@@ -37,6 +37,8 @@ export interface CodeInsightConfig {
   scipTimeoutMs: number;
   /** scip-go（含 go list 检查）的超时，超时后 Go 改用名称匹配 */
   scipGoTimeoutMs: number;
+  /** rust-analyzer scip（含 cargo metadata，所有运行根目录合计）的超时，超时后 Rust 改用名称匹配 */
+  scipRustTimeoutMs: number;
   impactDepth: number;
   similarMinScore: number;
   /** 概览的划分、分层、外部库分类（仓库配置直接生效），以及费用和发送相关的上限（仓库配置只能调严） */
@@ -108,6 +110,7 @@ interface FileConfig {
   generatedGlobs?: string[];
   scipTimeoutMs?: number;
   scipGoTimeoutMs?: number;
+  scipRustTimeoutMs?: number;
   impactDepth?: number;
   similar?: { minScore?: number };
   overview?: FileOverviewConfig;
@@ -567,6 +570,7 @@ export async function loadConfig(repo: string, opts: LoadConfigOptions = {}): Pr
     generatedGlobs: file.generatedGlobs ?? [],
     scipTimeoutMs: Number(env.CODEINSIGHT_SCIP_TIMEOUT_MS ?? file.scipTimeoutMs ?? 300_000),
     scipGoTimeoutMs: Number(env.CODEINSIGHT_SCIP_GO_TIMEOUT_MS ?? file.scipGoTimeoutMs ?? 120_000),
+    scipRustTimeoutMs: Number(env.CODEINSIGHT_SCIP_RUST_TIMEOUT_MS ?? file.scipRustTimeoutMs ?? 300_000),
     impactDepth: file.impactDepth ?? 2,
     similarMinScore: file.similar?.minScore ?? 0.6,
     overview: overviewConfig(file, limits),

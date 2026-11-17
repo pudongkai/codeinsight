@@ -15,6 +15,8 @@ export interface EdgeSource {
   at?: number;
   /** 原因说明的第一行 */
   note?: string;
+  /** 不影响边来源的提示，如 Rust 缺 rust-src 时为 `rust_src_missing` */
+  warnings?: string[];
 }
 
 /** 各语言调用边的来源；旧快照没有记录时为 null，按全部来自 scip 处理 */
@@ -69,11 +71,12 @@ export interface SymbolRow {
 /**
  * 数据模型类的来源：pydantic BaseModel、SQLModel、SQLAlchemy 声明式模型（含 Flask-SQLAlchemy db.Model）、
  * Django models.Model、TypedDict、NamedTuple、dataclass、attrs。继承项目内模型类的子类沿用基类的类别。
- * Go 的 struct 按字段标签分：gorm（gorm 标签或嵌入 gorm.Model）、sqlx（db 标签）、json（只有 json 标签）
+ * Go 的 struct 按字段标签分：gorm（gorm 标签或嵌入 gorm.Model）、sqlx（db 标签）、json（只有 json 标签）。
+ * Rust 的 struct 按 derive 和属性分：diesel、sqlx（FromRow）、sea_orm（DeriveEntityModel）、json（只有 serde）
  */
 export type ModelKind =
   | 'pydantic' | 'sqlmodel' | 'sqlalchemy' | 'django' | 'typeddict' | 'namedtuple' | 'dataclass' | 'attrs'
-  | 'gorm' | 'sqlx' | 'json';
+  | 'gorm' | 'sqlx' | 'json' | 'diesel' | 'sea_orm';
 
 export type EdgeKind = 'call' | 'reference' | 'import' | 'inherit' | 'implement' | 'dispatch' | 'route_handler';
 export type Provenance = 'scip' | 'psi' | 'name_match' | 'framework';

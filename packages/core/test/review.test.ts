@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { GoResolver, initDataDir, loadConfig, reportToMarkdown, runReview, ScipPythonResolver, setLogSink, Store } from '../src/index.js';
+import { GoResolver, initDataDir, loadConfig, reportToMarkdown, runReview, RustResolver, ScipPythonResolver, setLogSink, Store } from '../src/index.js';
 import type { ResolveInput, Resolver, ReviewReport, SymbolChange } from '../src/index.js';
 import { commitAll, git, initRepo, tempDir, writeFiles } from './helpers/git-repo.js';
 
@@ -320,5 +320,38 @@ describe('review of a Go repository', () => {
     expect(byName(report, `${PKG}.Service.Create`)).toMatchObject([{ change: 'modified', kind: 'method', path: 'internal/order/service.go' }]);
     expect(byName(report, `${PKG}.Total`)).toMatchObject([{ change: 'moved', path: 'internal/order/util.go', movedFrom: `internal/order/service.go#function#${PKG}.Total#` }]);
     expect(report.warnings.map((w) => w.code)).not.toContain('language_unsupported');
+  }, 120_000);
+});
+
+describe('review of a Rust repository', () => {
+  const CARGO = '[package]\nname = "shop"\nversion = "0.1.0"\nedition = "2021"\n';
+  const SERVICE = (createBody: string) => [
+    'pub struct Service {', '    n: u64,', '}', '',
+    'impl Service {', '    pub fn create(&self, id: u64) -> u64 {', `        ${createBody}`, '    }', '}', '',
+  ].join('\n');
+  const TOTAL = ['pub fn total(items: &[u64]) -> u64 {', '    let mut sum = 0;', '    for it in items {', '        sum += it;', '    }', '    sum', '}', ''].join('\n');
+
+  it('reports a changed method and a function moved to another file as symbol-level changes', async () => {
+    const repo = initRepo({
+      'Cargo.toml': CARGO,
+      'src/lib.rs': 'pub mod order;\n',
+      'src/order/mod.rs': 'pub mod service;\npub mod util;\n',
+      'src/order/service.rs': `${SERVICE('id + self.n')}\n${TOTAL}`,
+      'src/order/util.rs': '',
+      'target/debug/gen.rs': 'pub fn generated() {}\n',
+    });
+    writeFiles(repo, {
+      'src/order/service.rs': SERVICE('id * 2 + self.n'),
+      'src/order/util.rs': TOTAL,
+      'target/debug/gen.rs': 'pub fn generated() -> u8 { 1 }\n',
+    });
+    commitAll(repo, 'v2: change create, move total');
+    const report = await (await setup(repo)).review({ head: 'HEAD', resolver: new RustResolver({ scip: false }) });
+    expect(byName(report, 'shop::order::service::Service::create')).toMatchObject([{ change: 'modified', kind: 'method', path: 'src/order/service.rs' }]);
+    expect(byName(report, 'shop::order::util::total')).toMatchObject([
+      { change: 'moved', path: 'src/order/util.rs', movedFrom: 'src/order/service.rs#function#shop::order::service::total#' },
+    ]);
+    // 只有 target/ 下的文件是文件级变更
+    expect(report.warnings.filter((w) => w.code === 'language_unsupported').map((w) => w.path)).toEqual(['target/debug/gen.rs']);
   }, 120_000);
 });

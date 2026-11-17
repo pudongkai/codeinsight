@@ -57,3 +57,8 @@ export function dedupeQualifiedNames<T extends SymbolKeyParts>(items: T[]): T[] 
     return n === 1 ? item : { ...item, qualifiedName: `${item.qualifiedName}#${n}` };
   });
 }
+
+/** 去掉 qualifiedName 的去重后缀（如 `#2`） */
+export function stripDedupSuffix(qualifiedName: string): string {
+  return qualifiedName.replace(/#\d+$/, '');
+}

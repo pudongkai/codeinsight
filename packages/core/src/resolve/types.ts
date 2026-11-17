@@ -16,6 +16,8 @@ export interface ResolveInput {
   timeoutMs: number;
   /** scip-go 的超时；不传时用 timeoutMs */
   goTimeoutMs?: number;
+  /** rust-analyzer 的超时（所有运行根目录共用）；不传时用 timeoutMs */
+  rustTimeoutMs?: number;
   /** 中止时结束正在运行的外部进程并抛出异常 */
   signal?: AbortSignal;
 }

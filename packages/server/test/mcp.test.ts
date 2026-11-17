@@ -211,3 +211,47 @@ describe('MCP find_similar on Go code', () => {
     }
   }, 120_000);
 });
+
+describe('MCP find_similar on Rust code', () => {
+  it('compares a Rust snippet with Rust functions and finds a Rust function by its `::` qualified name', async () => {
+    const repo = tempDir('ci-mcp-rust-');
+    const lookup = (name: string, field: string) => [
+      `pub fn ${name}(conn: &Connection, id: i64) -> Result<String, Error> {`,
+      `    let mut stmt = conn.prepare("SELECT ${field} FROM users WHERE id = ?")?;`,
+      '    let v: String = stmt.query_row([id], |row| row.get(0))?;',
+      '    if v.is_empty() {',
+      '        return Err(Error::Empty);',
+      '    }',
+      '    Ok(v)',
+      '}',
+      '',
+    ].join('\n');
+    writeFiles(repo, {
+      'Cargo.toml': '[package]\nname = "shop"\nversion = "0.1.0"\nedition = "2021"\n',
+      'src/lib.rs': 'pub mod users;\npub mod accounts;\n',
+      'src/users.rs': lookup('email_of', 'email'),
+      'src/accounts.rs': lookup('phone_of', 'phone'),
+    });
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-q', '-m', 'init');
+    const ws = await openWorkspace(repo, tempDir('ci-mcp-rust-data-'));
+    const server = createMcpServer({ workspace: ws });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: 'codeinsight-test', version: '0.0.0' });
+    await client.connect(clientSide);
+    try {
+      const code = await client.callTool({ name: 'find_similar', arguments: { code: lookup('address_of', 'address'), language: 'rust' } });
+      expect(code.isError).toBeFalsy();
+      expect(text(code)).toMatch(/`shop::users::email_of` at src\/users\.rs:\d+/);
+      const sym = await client.callTool({ name: 'find_similar', arguments: { symbol: 'shop::users::email_of' } });
+      expect(sym.isError).toBeFalsy();
+      expect(text(sym)).toMatch(/`shop::accounts::phone_of` at src\/accounts\.rs:\d+/);
+    } finally {
+      await client.close();
+      await server.close();
+      ws.store.close();
+    }
+  }, 120_000);
+});

@@ -21,7 +21,7 @@ export interface MarkSource {
 const MODEL_LABELS: Record<string, string> = {
   pydantic: 'Pydantic', sqlmodel: 'SQLModel', sqlalchemy: 'SQLAlchemy', django: 'Django',
   typeddict: 'TypedDict', namedtuple: 'NamedTuple', dataclass: 'dataclass', attrs: 'attrs',
-  gorm: 'GORM', sqlx: 'sqlx', json: 'JSON',
+  gorm: 'GORM', sqlx: 'sqlx', json: 'JSON', diesel: 'Diesel', sea_orm: 'SeaORM',
 };
 
 export function isModel(s: MarkSource): boolean {

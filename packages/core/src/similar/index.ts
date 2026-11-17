@@ -242,10 +242,12 @@ export function similarInSnapshot(store: Store, snapshotId: number, opts: Simila
 }
 
 /** 代码片段能用的语言 */
-export type SnippetLanguage = 'python' | 'go';
+export type SnippetLanguage = 'python' | 'go' | 'rust';
 
 /** 传入代码片段的虚拟路径（相似比较按路径判断语言），不会和仓库里的文件重名 */
-export const SNIPPET_PATHS: Readonly<Record<SnippetLanguage, string>> = { python: '<snippet>/snippet.py', go: '<snippet>/snippet.go' };
+export const SNIPPET_PATHS: Readonly<Record<SnippetLanguage, string>> = {
+  python: '<snippet>/snippet.py', go: '<snippet>/snippet.go', rust: '<snippet>/snippet.rs',
+};
 
 /** 片段在各语言里的写法：补齐能单独解析的文件头，只有函数体时包成名为 snippet 的函数 */
 const SNIPPET_SOURCE: Readonly<Record<SnippetLanguage, { file(code: string): string; wrap(code: string): string }>> = {
@@ -256,6 +258,10 @@ const SNIPPET_SOURCE: Readonly<Record<SnippetLanguage, { file(code: string): str
   go: {
     file: (code) => (/^\s*package\s/m.test(code) ? code : `package snippet\n\n${code}`),
     wrap: (code) => `package snippet\n\nfunc snippet() {\n${code}\n}\n`,
+  },
+  rust: {
+    file: (code) => code,
+    wrap: (code) => `fn snippet() {\n${code}\n}\n`,
   },
 };
 

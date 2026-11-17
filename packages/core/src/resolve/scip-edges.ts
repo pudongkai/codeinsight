@@ -104,7 +104,8 @@ function innermost(t: FileTable, row: number): ExtractedSymbol {
 function isCallAt(t: FileTable, r: ScipRange): boolean {
   for (let row = r.endLine; row < t.lines.length; row++) {
     const line = t.lines[row]!;
-    const rest = (row === r.endLine ? line.slice(r.endChar) : line).trim();
+    let rest = (row === r.endLine ? line.slice(r.endChar) : line).trim();
+    if (row === r.endLine && t.rules.callRest) rest = t.rules.callRest(rest);
     if (rest.length > 0 && !t.rules.skipsRest(rest)) return rest[0] === '(';
     if (!t.continued[row]) return false;
   }

@@ -103,6 +103,28 @@ describe('StatusBar resolver warning', () => {
     expect(screen.queryByTestId('name-match-hint')).toBeNull();
   });
 
+  it('gives Rust name-matching hints with the rustup command, next to the Go hint', () => {
+    const base = status();
+    const sources = {
+      go: { source: 'name_match' as const, reason: 'failed' as const },
+      rust: { source: 'name_match' as const, reason: 'not_found' as const, note: 'rust-analyzer: not found' },
+    };
+    renderBar({ ...base, snapshot: { ...base.snapshot!, edgeSources: sources } });
+    const hints = screen.getAllByTestId('name-match-hint').map((h) => [h.getAttribute('data-language'), h.textContent]);
+    expect(hints).toEqual([
+      ['go', 'Go 调用关系来自名称匹配（scip-go 运行失败），可能不完整'],
+      ['rust', 'Rust 调用关系来自名称匹配（未找到 rust-analyzer），可能不完整，安装：rustup component add rust-analyzer rust-src'],
+    ]);
+    expect(screen.getByTestId('rust-analyzer-install').textContent).toBe('rustup component add rust-analyzer rust-src');
+  });
+
+  it('warns that rust-src is missing even when Rust call edges come from rust-analyzer', () => {
+    const base = status();
+    renderBar({ ...base, snapshot: { ...base.snapshot!, edgeSources: { rust: { source: 'scip', warnings: ['rust_src_missing'] } } } });
+    expect(screen.queryByTestId('name-match-hint')).toBeNull();
+    expect(screen.getByTestId('rust-src-hint').textContent).toBe('未安装 rust-src，标准库相关的调用可能不完整，安装：rustup component add rust-analyzer rust-src');
+  });
+
   it('shows no warning when resolution succeeded', () => {
     renderBar(status());
     expect(screen.queryByTestId('resolver-warning')).toBeNull();

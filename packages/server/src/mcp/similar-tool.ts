@@ -8,9 +8,9 @@ import { lookupSymbol } from './lookup.js';
 import { runTool, textResult } from './tool-result.js';
 
 const inputSchema = {
-  symbol: z.string().min(1).optional().describe('Existing function: name, qualified name (Class.method) or symbol key'),
-  code: z.string().min(1).optional().describe('Python or Go code not yet written to the repo (one or more functions, or a function body)'),
-  language: z.enum(['python', 'go']).optional().describe('Language of code (default python); only functions in the same language are compared'),
+  symbol: z.string().min(1).optional().describe('Existing function: name, qualified name (Class.method, or <crate>::module::Type::method / Type::method for Rust) or symbol key'),
+  code: z.string().min(1).optional().describe('Python, Go or Rust code not yet written to the repo (one or more functions, or a function body)'),
+  language: z.enum(['python', 'go', 'rust']).optional().describe('Language of code (default python); only functions in the same language are compared'),
 };
 
 async function bySymbol(ctx: McpContext, query: string): Promise<CallToolResult> {

@@ -27,6 +27,13 @@ export const GO_TOKENS: TokenTable = {
   numbers: new Set(['int_literal', 'float_literal', 'imaginary_literal']),
 };
 
+export const RUST_TOKENS: TokenTable = {
+  comments: new Set(['line_comment', 'block_comment']),
+  strings: new Set(['string_literal', 'raw_string_literal', 'char_literal']),
+  identifiers: new Set(['identifier', 'field_identifier', 'type_identifier', 'shorthand_field_identifier']),
+  numbers: new Set(['integer_literal', 'float_literal']),
+};
+
 /**
  * tree-sitter token 归一化，similar 和 moved 判断共用：
  * 标识符替换为 ID，数字替换为 NUM，注释丢弃，字符串字面量保留原文

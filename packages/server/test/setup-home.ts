@@ -25,6 +25,8 @@ export function tempHomeEnv(): { CODEINSIGHT_HOME: string } {
 // 在 beforeAll 里建：整个文件被跳过时 beforeAll、afterAll 都不执行，不会留下没人删的目录
 beforeAll(() => {
   process.env.CODEINSIGHT_HOME = tempHome();
+  // Rust 解析的运行目录建在缓存目录下，测试不在本机真实的 ~/.cache 里建目录
+  process.env.XDG_CACHE_HOME = tempHome();
 });
 
 afterAll(() => {

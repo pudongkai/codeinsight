@@ -4,7 +4,7 @@ import { codeHash, DEFAULT_CODE_ROOT } from '../extract/cache.js';
 
 /** 各语言基于 SCIP 的解析共用的模块（相对源码根目录，不含扩展名）；language-resolver 负责按语言分组和合并各语言的边 */
 export const SHARED_SCIP_RESOLVER_MODULES = [
-  'resolve/types', 'resolve/language-resolver', 'resolve/scip-edges', 'resolve/scip-rules', 'scip/reader', 'scip/runner',
+  'resolve/types', 'resolve/language-resolver', 'resolve/scip-edges', 'resolve/scip-rules', 'scip/reader', 'scip/runner', 'scip/merge',
 ] as const;
 
 /**

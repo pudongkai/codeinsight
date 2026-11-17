@@ -9,6 +9,8 @@ export interface ScipLanguageRules {
   skipsRest(rest: string): boolean;
   /** 模块级定义：对应文件的 module 符号，没有 enclosing_range */
   isModuleDefinition(occ: ScipOccurrence): boolean;
+  /** 判断 `(` 之前去掉语言特有的前缀（如 Rust 的 turbofish `::<T>`）；不设置时不处理 */
+  callRest?(rest: string): string;
 }
 
 export const pythonRules: ScipLanguageRules = {

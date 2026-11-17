@@ -3,6 +3,7 @@ export { scipToEdges } from './scip-edges.js';
 export { pythonRules, type ScipLanguageRules } from './scip-rules.js';
 export { ScipPythonResolver, type ScipPythonResolverOptions } from './scip-python.js';
 export { GoResolver, SCIP_GO_INSTALL, type GoResolverOptions } from './go.js';
+export { RustResolver } from './rust.js';
 export { goNameMatchEdges } from './go-name-match.js';
 export { goRules } from './scip-rules-go.js';
 export { defaultResolver, LanguageResolver, type LanguageResolvers } from './language-resolver.js';

@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
+import { readRegularFileStrict } from '../util/regular-file.js';
 import path from 'node:path';
 import { dataDirInRepo, type CodeInsightConfig } from '../config/index.js';
 import { collectGoModules } from '../extract/go-module.js';
+import { collectRustCrates } from '../extract/rust-cargo.js';
 import { completeForResolve, loadParsers, type ExtractContext, type ExtractedFile, type ExtractResult } from '../extract/index.js';
 import { exportArchive, listCommitFiles, listWorkingFiles, repoRoot, resolveRef, workingContentKey } from '../git/index.js';
 import { log } from '../log.js';
@@ -14,7 +16,8 @@ import type { FailedLanguage, Resolver, ResolveResult } from '../resolve/types.j
 import { acquireSnapshotLock, cleanupSnapshots, snapshotDir, type DataDirLayout, type LockHandle } from '../store/data-dir.js';
 import type { Store } from '../store/db.js';
 import {
-  edgesCodeHash, extractWithCache, findPreviousSnapshot, readAndPlace, reuseEdges, sameResolverInput, SnapshotCancelledError, throwIfCancelled,
+  edgesCodeHash, extractWithCache, findPreviousSnapshot, readAndPlace, reuseEdges, sameResolverInput, SnapshotCancelledError, supplementCargoLocks,
+  throwIfCancelled,
   type PreviousSnapshot, type ReadResult,
 } from './incremental.js';
 import { readFailureReason } from './source.js';
@@ -92,6 +95,7 @@ async function prepareFiles(opts: BuildSnapshotOptions, t: Target, prev: Previou
     await rm(dir, { recursive: true, force: true });
     read = await readAndPlace({ files, srcRoot: t.root, destDir: dir, prev, classify, signal });
   }
+  await supplementCargoLocks(read.rustCrates, dir, t.root);
   log.info('snapshot_copied', {
     contentKey: t.contentKey, files: read.rows.length, linked: read.linked, written: read.written,
     fromSnapshot: prev?.snap.contentKey, ms: Date.now() - started,
@@ -187,7 +191,7 @@ async function runResolver(
   try {
     const result = await resolver.resolve({
       snapshotId: snap.id, contentKey: snap.contentKey, root: dir, layout, files,
-      timeoutMs: config.scipTimeoutMs, goTimeoutMs: config.scipGoTimeoutMs, signal,
+      timeoutMs: config.scipTimeoutMs, goTimeoutMs: config.scipGoTimeoutMs, rustTimeoutMs: config.scipRustTimeoutMs, signal,
     });
     saveResolveResult(store, snap, resolver, result);
     const failed = result.failed?.map((f) => f.language).join(',');
@@ -233,7 +237,7 @@ async function buildLocked(opts: BuildSnapshotOptions, t: Target, resolver: Reso
   const prev = findPreviousSnapshot(store, layout, t.kind, snap.id);
   const { dir, read } = await prepareFiles(opts, t, prev);
   const parseStarted = Date.now();
-  const extracted = await extractWithCache(store, read.sources, signal, { goModules: read.goModules });
+  const extracted = await extractWithCache(store, read.sources, signal, { goModules: read.goModules, rustCrates: read.rustCrates });
   saveExtraction(store, snap.id, read, extracted);
   const extractMs = Date.now() - started;
   const symbols = extracted.files.reduce((n, f) => n + f.symbols.length, 0);
@@ -256,14 +260,15 @@ function countByLanguage(files: ExtractedFile[]): Partial<Record<Language, numbe
   return out;
 }
 
-/** 从快照目录里的 go.mod 重新得到提取上下文；读不到的 go.mod 会让包路径和提取时不一致，跳过并记警告 */
+/**
+ * 从快照目录里的 go.mod、Cargo.toml 重新得到提取上下文；读不到的配置会让包路径、模块路径和提取时不一致，跳过并记警告
+ */
 async function snapshotExtractContext(files: FileRow[], dir: string): Promise<ExtractContext> {
-  const goModules = await collectGoModules(
-    files.map((f) => f.path),
-    (p) => readFile(path.join(dir, p), 'utf8'),
-    (p, err) => log.warn('snapshot_go_mod_skipped', { path: p, reason: readFailureReason(err) }),
-  );
-  return { goModules };
+  const paths = files.map((f) => f.path);
+  const read = (p: string): Promise<string> => readFile(path.join(dir, p), 'utf8');
+  const goModules = await collectGoModules(paths, read, (p, err) => log.warn('snapshot_go_mod_skipped', { path: p, reason: readFailureReason(err) }));
+  const rustCrates = await collectRustCrates(paths, (p) => readRegularFileStrict(path.join(dir, p)), (p, err) => log.warn('snapshot_cargo_toml_skipped', { path: p, reason: readFailureReason(err) }));
+  return { goModules, rustCrates };
 }
 
 /** 从库里的符号按语言还原解析层输入，再补齐跨文件信息；源码从快照目录读 */

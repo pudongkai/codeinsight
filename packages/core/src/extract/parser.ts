@@ -34,3 +34,8 @@ export function getPythonParser(): Promise<Parser> {
 export function getGoParser(): Promise<Parser> {
   return cachedParser('tree-sitter-go');
 }
+
+/** Rust 语法解析器（wasm 版） */
+export function getRustParser(): Promise<Parser> {
+  return cachedParser('tree-sitter-rust');
+}

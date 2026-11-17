@@ -36,6 +36,8 @@ export interface EdgeSourceView {
   reason?: 'not_found' | 'failed' | 'disabled' | 'no_module';
   at?: number;
   note?: string;
+  /** 不影响边来源的提示，如 `rust_src_missing` */
+  warnings?: string[];
 }
 
 export interface SnapshotView {

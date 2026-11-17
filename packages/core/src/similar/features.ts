@@ -38,13 +38,17 @@ export function nameTokens(name: string): Set<string> {
 /** Go 处理函数字面量的符号名（funcN、嵌套的 funcN.M，包级变量里的也是这个形式），由编号生成，不反映用途 */
 const GO_LITERAL_NAME = /^func\d+(\.\d+)*$/;
 
-function isGoLiteralName(f: FunctionFeatures): boolean {
-  return f.language === 'go' && GO_LITERAL_NAME.test(f.symbol.name);
+/** Rust 作为路由处理函数的闭包的符号名（closureN），由编号生成，不反映用途 */
+const RUST_CLOSURE_NAME = /^closure\d+$/;
+
+/** 按编号生成的名字（Go 函数字面量、Rust 闭包），不说明用途 */
+function isLiteralName(f: FunctionFeatures): boolean {
+  return (f.language === 'go' && GO_LITERAL_NAME.test(f.symbol.name)) || (f.language === 'rust' && RUST_CLOSURE_NAME.test(f.symbol.name));
 }
 
-/** 名字相同为 1，否则为切词后 token 集合的 Jaccard；Go 函数字面量的编号名字不说明相似，记 0 */
+/** 名字相同为 1，否则为切词后 token 集合的 Jaccard；Go 函数字面量、Rust 闭包的编号名字不说明相似，记 0 */
 export function nameSimilarity(a: FunctionFeatures, b: FunctionFeatures): number {
-  if (isGoLiteralName(a) || isGoLiteralName(b)) return 0;
+  if (isLiteralName(a) || isLiteralName(b)) return 0;
   if (a.symbol.name === b.symbol.name) return 1;
   return jaccard(a.nameTokens, b.nameTokens);
 }
@@ -137,9 +141,70 @@ function goSignatureShape(s: SymbolRow): SignatureShape {
   return { params: splitTopLevel(rest.slice(1, close)).length, returnsValue: rest.slice(close + 1).trim() !== '' };
 }
 
+/**
+ * 按 Rust 的括号和尖括号配对切分（`->` 里的 `>` 不算）：返回 `(` 之后到配对 `)` 之间的顶层逗号分段和 `)` 之后的文字。
+ * Rust 签名里的 `'a` 是生命周期，不按引号处理
+ */
+function rustParamsAndRest(sig: string, open: number): { params: string[]; rest: string } | undefined {
+  const params: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (let i = open + 1; i < sig.length; i++) {
+    const ch = sig[i]!;
+    if (ch === '-' && sig[i + 1] === '>') {
+      cur += '->';
+      i++;
+      continue;
+    }
+    if ('([{<'.includes(ch)) depth++;
+    else if ('}]>'.includes(ch)) depth--;
+    else if (ch === ')' && depth-- === 0) {
+      if (cur.trim()) params.push(cur.trim());
+      return { params, rest: sig.slice(i + 1).trim() };
+    } else if (ch === ',' && depth === 0) {
+      params.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  return undefined;
+}
+
+/** `fn 名字<类型参数>` 之后、尖括号外的第一个 `(`（类型参数里可能有 `Fn(A) -> B`） */
+function rustParamsOpen(sig: string): number {
+  const fn = /\bfn\s/.exec(sig);
+  if (!fn) return -1;
+  let depth = 0;
+  for (let i = fn.index + 3; i < sig.length; i++) {
+    const ch = sig[i]!;
+    if (ch === '-' && sig[i + 1] === '>') i++;
+    else if (ch === '<') depth++;
+    else if (ch === '>') depth--;
+    else if (ch === '(' && depth === 0) return i;
+  }
+  return -1;
+}
+
+const RUST_SELF_PARAM = /^(&\s*('\w+\s+)?)?(mut\s+)?self\b/;
+
+/** Rust 签名形状：参数不含 `self`（`&self`、`&mut self`、`self: Box<Self>` 等）；写了 `->` 且不是 `()` 就算有返回值 */
+function rustSignatureShape(s: SymbolRow): SignatureShape {
+  const sig = s.displaySignature;
+  const open = rustParamsOpen(sig);
+  const parsed = open < 0 ? undefined : rustParamsAndRest(sig, open);
+  if (!parsed) return { params: 0, returnsValue: false };
+  const params = parsed.params.filter((p) => !RUST_SELF_PARAM.test(p));
+  const ret = /^->\s*(.*?)(\s+where\b.*)?$/.exec(parsed.rest)?.[1]?.trim();
+  return { params: params.length, returnsValue: ret !== undefined && ret !== '' && ret !== '()' };
+}
+
 /** 签名形状：参数个数和是否有返回值，按符号所在文件的语言解析签名 */
 export function signatureShape(s: SymbolRow): SignatureShape {
-  return detectLanguage(s.path) === 'go' ? goSignatureShape(s) : pythonSignatureShape(s);
+  const language = detectLanguage(s.path);
+  if (language === 'go') return goSignatureShape(s);
+  if (language === 'rust') return rustSignatureShape(s);
+  return pythonSignatureShape(s);
 }
 
 /** 参数个数相似度（少的 / 多的，都为 0 时为 1）和返回值是否一致各占一半 */
@@ -204,11 +269,36 @@ function goPackageOf(s: SymbolRow): string {
 function goSameNameAllowed(a: FunctionFeatures, b: FunctionFeatures): boolean {
   if (a.symbol.kind === 'method' || b.symbol.kind === 'method') return false;
   if (goPackageOf(a.symbol) === goPackageOf(b.symbol)) return false;
-  return !isGoConventionalName(a.symbol.name) && !isGoLiteralName(a);
+  return !isGoConventionalName(a.symbol.name) && !isLiteralName(a);
+}
+
+/** Rust 里各类型、各 crate 惯用的同名函数：程序入口、构造和常见 trait 方法名，同名不说明重复 */
+const RUST_CONVENTIONAL_NAMES: ReadonlySet<string> = new Set(['main', 'new', 'default', 'fmt', 'from', 'drop']);
+
+/** Rust 符号所在的模块路径：qualifiedName 去掉最后一段 */
+function rustModuleOf(s: SymbolRow): string {
+  return s.qualifiedName.slice(0, s.qualifiedName.lastIndexOf('::'));
 }
 
 /**
- * 同名重复：不同文件里名字完全相同、签名形状也相同（参数个数相同、是否有返回值一致）；Go 另见 goSameNameAllowed。
+ * Rust 的同名重复额外条件：方法一律不算（各类型实现同一个 trait 方法是常态）；函数只有模块路径不同才算；
+ * main、new、default、fmt、from、drop 和闭包符号不算
+ */
+function rustSameNameAllowed(a: FunctionFeatures, b: FunctionFeatures): boolean {
+  if (a.symbol.kind === 'method' || b.symbol.kind === 'method') return false;
+  if (rustModuleOf(a.symbol) === rustModuleOf(b.symbol)) return false;
+  return !RUST_CONVENTIONAL_NAMES.has(a.symbol.name) && !isLiteralName(a);
+}
+
+/** 各语言在“名字和签名形状都相同”之外的同名重复条件 */
+function sameNameAllowed(a: FunctionFeatures, b: FunctionFeatures): boolean {
+  if (a.language === 'go') return goSameNameAllowed(a, b);
+  if (a.language === 'rust') return rustSameNameAllowed(a, b);
+  return true;
+}
+
+/**
+ * 同名重复：不同文件里名字完全相同、签名形状也相同（参数个数相同、是否有返回值一致）；Go、Rust 另见 goSameNameAllowed、rustSameNameAllowed。
  * 同一文件里的同名是重复定义（qualified_name 带 `#2`），不算。
  */
 export function isSameNameDuplicate(a: FunctionFeatures, b: FunctionFeatures): boolean {
@@ -217,15 +307,22 @@ export function isSameNameDuplicate(a: FunctionFeatures, b: FunctionFeatures): b
     a.symbol.path !== b.symbol.path &&
     a.shape.params === b.shape.params &&
     a.shape.returnsValue === b.shape.returnsValue &&
-    (a.language !== 'go' || goSameNameAllowed(a, b))
+    sameNameAllowed(a, b)
   );
 }
 
+/** Rust trait 里只有声明、没有函数体的方法：提取时没有函数体的规范化 token */
+function isRustDeclarationOnly(s: SymbolRow, language: string): boolean {
+  return language === 'rust' && s.kind === 'method' && s.normTokens.length === 0;
+}
+
+/** 比较用的特征；Rust trait 里没有函数体的方法不参与常规比较（方法也不参与同名重复，因此完全不参与） */
 export function functionFeatures(s: SymbolRow): FunctionFeatures {
+  const language = detectLanguage(s.path);
   return {
     symbol: s,
-    comparable: isComparableFunction(s),
-    language: detectLanguage(s.path),
+    comparable: isComparableFunction(s) && !isRustDeclarationOnly(s, language),
+    language,
     nameTokens: nameTokens(s.name),
     shingles: shingles(s.normTokens),
     shape: signatureShape(s),

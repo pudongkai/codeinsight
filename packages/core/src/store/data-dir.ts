@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { link, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Store } from './db.js';
@@ -43,9 +44,20 @@ export function scipPath(layout: DataDirLayout, contentKey: string): string {
   return path.join(layout.scipDir, `${contentKey}.scip`);
 }
 
-/** scip-go 索引缓存（各 module 的索引合并后，文档路径相对快照根目录） */
-export function goScipPath(layout: DataDirLayout, contentKey: string): string {
-  return path.join(layout.scipDir, `${contentKey}.go.scip`);
+/** 按语言的 SCIP 索引缓存 `<contentKey>.<language>.scip`（各根目录的索引合并后，文档路径相对快照根目录） */
+export function languageScipPath(layout: DataDirLayout, contentKey: string, language: string): string {
+  return path.join(layout.scipDir, `${contentKey}.${language}.scip`);
+}
+
+/** 一个快照在 scip 目录里的缓存文件：`<contentKey>.scip`，以及按语言的 `<contentKey>.<language>.scip` 和 `.json` */
+function isSnapshotScipFile(name: string, contentKey: string): boolean {
+  if (name === `${contentKey}.scip`) return true;
+  return name.startsWith(`${contentKey}.`) && /^[a-z]+\.(scip|json)$/.test(name.slice(contentKey.length + 1));
+}
+
+async function removeSnapshotScipFiles(layout: DataDirLayout, contentKey: string): Promise<void> {
+  const names = await readdir(layout.scipDir).catch(() => [] as string[]);
+  await Promise.all(names.filter((n) => isSnapshotScipFile(n, contentKey)).map((n) => rm(path.join(layout.scipDir, n), { force: true })));
 }
 
 /**
@@ -64,18 +76,59 @@ export async function initDataDir(root: string): Promise<DataDirLayout> {
   return layout;
 }
 
-/** scip-python 临时输出 `<key>.scip.<pid>.tmp`：写它的进程已不存在时删除（进程被强行结束时留下的） */
-export async function removeStaleScipTemps(layout: DataDirLayout): Promise<string[]> {
+/** Rust 解析的运行目录 `codeinsight-rust-<contentKey 前 16 位>.<pid>.<随机 6 位>`，建在 rustRunBaseCandidates() 之一下 */
+export const RUST_RUN_DIR_PREFIX = 'codeinsight-rust-';
+
+/**
+ * Rust 运行目录的上级候选，按优先顺序：`$XDG_CACHE_HOME/codeinsight/rust-run`（设了绝对路径时），
+ * `~/.cache/codeinsight/rust-run`。前一个所在的缓存目录不是当前用户私有时用后一个
+ */
+export function rustRunBaseCandidates(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string[] {
+  const caches = [env.XDG_CACHE_HOME && path.isAbsolute(env.XDG_CACHE_HOME) ? env.XDG_CACHE_HOME : undefined, path.join(home, '.cache')];
+  return [...new Set(caches.filter((c): c is string => c !== undefined))].map((c) => path.join(c, 'codeinsight', 'rust-run'));
+}
+const RUST_RUN_DIR = /^codeinsight-rust-[^.]*\.(\d+)\.[A-Za-z0-9]{6}$/;
+
+function isStalePid(pid: number): boolean {
+  return pid !== process.pid && !isProcessAlive(pid);
+}
+
+/** 数据目录里的临时输出 `<key>.scip.<pid>.tmp`：写它的进程已不存在时删除 */
+async function removeStaleScipTempFiles(layout: DataDirLayout): Promise<string[]> {
   const names = await readdir(layout.scipDir).catch(() => [] as string[]);
   const removed: string[] = [];
   for (const name of names) {
     const m = /\.scip\.(\d+)\.tmp$/.exec(name);
-    if (!m) continue;
-    const pid = Number(m[1]);
-    if (pid === process.pid || isProcessAlive(pid)) continue;
+    if (!m || !isStalePid(Number(m[1]))) continue;
     await rm(path.join(layout.scipDir, name), { force: true });
     removed.push(name);
   }
+  return removed;
+}
+
+/** Rust 运行目录：属于当前用户、建它的进程已不存在时递归删除 */
+async function removeStaleRustRunDirs(runBase: string): Promise<string[]> {
+  const names = await readdir(runBase).catch(() => [] as string[]);
+  const uid = process.getuid?.();
+  const removed: string[] = [];
+  for (const name of names) {
+    const m = RUST_RUN_DIR.exec(name);
+    if (!m || !isStalePid(Number(m[1]))) continue;
+    const st = await lstat(path.join(runBase, name)).catch(() => undefined);
+    if (!st?.isDirectory() || (uid !== undefined && st.uid !== uid)) continue;
+    await rm(path.join(runBase, name), { recursive: true, force: true });
+    removed.push(name);
+  }
+  return removed;
+}
+
+/**
+ * 删除进程被强行结束时留下的临时文件：数据目录里的 `<key>.scip.<pid>.tmp`，
+ * 以及 runBase（默认 rustRunBaseCandidates() 里的各目录）里的 Rust 运行目录
+ */
+export async function removeStaleScipTemps(layout: DataDirLayout, runBase?: string): Promise<string[]> {
+  const removed = await removeStaleScipTempFiles(layout);
+  for (const base of runBase === undefined ? rustRunBaseCandidates() : [runBase]) removed.push(...await removeStaleRustRunDirs(base));
   if (removed.length > 0) log.info('scip_temp_removed', { files: removed.length });
   return removed;
 }
@@ -359,8 +412,7 @@ export async function cleanupSnapshots(store: Store, layout: DataDirLayout, opts
     if (await isLocked(layout, snap.contentKey)) continue;
     store.deleteSnapshot(snap.id);
     await rm(snapshotDir(layout, snap.contentKey), { recursive: true, force: true });
-    await rm(scipPath(layout, snap.contentKey), { force: true });
-    await rm(goScipPath(layout, snap.contentKey), { force: true });
+    await removeSnapshotScipFiles(layout, snap.contentKey);
     removed.push(snap.id);
   }
   if (removed.length > 0) log.info('snapshots_cleaned', { removed: removed.length });

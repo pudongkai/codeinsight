@@ -1,3 +1,4 @@
+import { rustCrateName } from '../extract/rust-cargo.js';
 import type { ExternalCategory } from './types.js';
 
 /** 可以出现在分类表里的类别（`other` 是没匹配上时的归类，不进表） */
@@ -166,4 +167,44 @@ export function classifyGoImport(
     if (category) return { lib: prefix, category };
   }
   return { lib: goLibName(parts), category: 'other' };
+}
+
+const RUST_BUILTIN: Record<Exclude<ExternalCategory, 'other' | 'subprocess'>, string[]> = {
+  database: ['sqlx', 'diesel', 'sea-orm', 'rusqlite', 'postgres', 'tokio-postgres', 'mongodb', 'mysql'],
+  cache: ['redis', 'deadpool-redis', 'moka'],
+  http_client: ['reqwest', 'ureq', 'isahc', 'surf'],
+  message_queue: ['lapin', 'rdkafka', 'async-nats', 'pulsar'],
+  email: ['lettre'],
+  payment: ['async-stripe'],
+  storage: ['aws-sdk-s3', 'object_store', 'opendal', 'rust-s3'],
+  auth_crypto: ['jsonwebtoken', 'ring', 'argon2', 'bcrypt', 'openssl', 'rustls'],
+  llm: ['async-openai'],
+  web_framework: ['axum', 'actix-web', 'rocket', 'warp', 'poem', 'salvo', 'tonic', 'hyper'],
+};
+
+/** 内置的 Rust 分类表：crate 名（`-` 换成 `_`）→ 类别 */
+export const RUST_EXTERNAL_TABLE: ReadonlyMap<string, ExternalCategory> = new Map(
+  Object.entries(RUST_BUILTIN).flatMap(([category, crates]) => crates.map((c): [string, ExternalCategory] => [rustCrateName(c), category as ExternalCategory])),
+);
+
+/** 分类表里代码中的 crate 名和依赖名转下划线后不同的包：依赖名 → 代码里写的 crate 名 */
+const RUST_LIB_ALIASES: ReadonlyMap<string, string> = new Map([['async-stripe', 'stripe'], ['rust-s3', 's3']]);
+
+/** 依赖在代码里可能出现的 crate 名：依赖名转下划线，以及已知的库名 */
+export function rustDepRoots(dep: string): string[] {
+  const alias = RUST_LIB_ALIASES.get(dep);
+  return alias ? [rustCrateName(dep), alias] : [rustCrateName(dep)];
+}
+
+/**
+ * Rust 路径第一段的分类：deps 为代码里的 crate 名 → Cargo.toml 里的依赖名（见 rustDepRoots）；在依赖里的为第三方库
+ * （库名取依赖名），按分类表归类，没匹配上为 `other`；不在依赖里的（标准库、crate/self/super、工作区内的 crate、
+ * 子模块名、局部变量）返回 undefined
+ */
+export function classifyRustRoot(
+  root: string, deps: ReadonlyMap<string, string>, table: ReadonlyMap<string, ExternalCategory> = RUST_EXTERNAL_TABLE,
+): { lib: string; category: ExternalCategory } | undefined {
+  const lib = deps.get(root);
+  if (lib === undefined) return undefined;
+  return { lib, category: table.get(rustCrateName(lib)) ?? 'other' };
 }

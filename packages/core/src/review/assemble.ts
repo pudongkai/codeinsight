@@ -1,12 +1,29 @@
 import { isTestPath, type ClassifyOptions } from '../classify/index.js';
 import type { ChangedFile } from '../git/index.js';
-import { detectLanguage, supportLevelOf } from '../model/language.js';
-import type { SnapshotRow } from '../model/types.js';
+import { detectLanguage, supportLevelOf, type SupportLevel } from '../model/language.js';
+import type { FileRow, SnapshotRow } from '../model/types.js';
+import type { Store } from '../store/db.js';
 import type { CallerSummary, FileChange, ImpactSummary, ModuleChange, SymbolChange, Warning } from '../report/types.js';
 import { EMPTY_CALLERS, type GraphSide } from './impact.js';
 import type { SymbolDiff } from './symbol-diff.js';
 
-export function fileChanges(files: ChangedFile[], classify: ClassifyOptions): FileChange[] {
+/** 改动文件在快照里记录的支持级别：删除的文件看 base 快照，其余看 head 快照；快照里没有时为 undefined */
+export type SnapshotSupportLevels = (f: ChangedFile) => SupportLevel | undefined;
+
+/** 从两个版本的快照读出各文件的支持级别（每个快照只查一次） */
+export function snapshotSupportLevels(store: Store, snaps: { base?: SnapshotRow; head?: SnapshotRow }): SnapshotSupportLevels {
+  const levels = (snap: SnapshotRow | undefined): Map<string, SupportLevel> =>
+    new Map(snap ? store.getFiles(snap.id).map((r: FileRow) => [r.path, r.supportLevel]) : []);
+  const base = levels(snaps.base);
+  const head = snaps.head?.id === snaps.base?.id ? base : levels(snaps.head);
+  return (f) => (f.status === 'removed' ? base : head).get(f.path);
+}
+
+/**
+ * 改动文件列表；支持级别优先用快照里已算好的（Rust 的 target/、vendor/ 排除要用完整文件清单），
+ * 快照里查不到时按路径计算
+ */
+export function fileChanges(files: ChangedFile[], classify: ClassifyOptions, levels?: SnapshotSupportLevels): FileChange[] {
   return files
     .map((f): FileChange => {
       const language = detectLanguage(f.path);
@@ -15,7 +32,7 @@ export function fileChanges(files: ChangedFile[], classify: ClassifyOptions): Fi
         ...(f.oldPath !== undefined ? { oldPath: f.oldPath } : {}),
         status: f.status,
         language,
-        supportLevel: supportLevelOf(language, f.path),
+        supportLevel: levels?.(f) ?? supportLevelOf(language, f.path),
         additions: f.additions,
         deletions: f.deletions,
         isTest: isTestPath(f.path, classify),

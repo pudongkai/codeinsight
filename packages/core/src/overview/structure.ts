@@ -11,7 +11,7 @@ import { collectExternal } from './external.js';
 import { externalTable } from './external-table.js';
 import {
   buildGraph, httpApisByModule, moduleDirs, moduleEdges, moduleInterfaces, moduleLines, moduleModels, overviewStats, rankedOwnModels,
-  rankedOwnSymbols, type OverviewGraph,
+  rankedOwnSymbols, type OverviewGraph, type RustPublicMods,
 } from './facts.js';
 import { groupFeatures } from './features.js';
 import { defaultModuleName } from './module-id.js';
@@ -93,14 +93,14 @@ function snapshotReader(ctx: SnapshotFileContext, snapshot: SnapshotRow, files: 
 }
 
 async function rankAndSnippets(
-  g: OverviewGraph, modules: OverviewModule[], read: (p: string) => Promise<string>, limits: SnippetLimits,
+  g: OverviewGraph, modules: OverviewModule[], read: (p: string) => Promise<string>, limits: SnippetLimits, rustMods: RustPublicMods,
 ): Promise<Pick<OverviewStructure, 'ranked' | 'snippets' | 'ownModels' | 'modelHeads'>> {
   const ranked = new Map<string, SymbolRow[]>();
   const snippets = new Map<string, Snippet[]>();
   const ownModels = new Map<string, SymbolRow[]>();
   const heads = new Map<string, Snippet[]>();
   for (const m of modules) {
-    ranked.set(m.id, rankedOwnSymbols(g, m.id));
+    ranked.set(m.id, rankedOwnSymbols(g, m.id, rustMods));
     ownModels.set(m.id, rankedOwnModels(g, m.id));
     snippets.set(m.id, await moduleSnippets(m.id, ranked.get(m.id)!, read, limits));
     heads.set(m.id, await modelHeads(m.id, ownModels.get(m.id)!, read));
@@ -126,7 +126,7 @@ async function compute(opts: StructureOptions, record: PartitionRecord | undefin
   const s: OverviewStructure = {
     snapshot, partition: p, graph: g, modules, moduleEdges: edges, external: ext.summary, features: groupFeatures(g),
     issues: boundary.issues, stats: overviewStats(g, p.stats.files, p.stats.testFiles),
-    ...(await rankAndSnippets(g, modules, read, opts.snippetLimits ?? opts.config.overview.snippets)),
+    ...(await rankAndSnippets(g, modules, read, opts.snippetLimits ?? opts.config.overview.snippets, ext.rustPublicMods)),
     warnings: [...p.warnings, ...ext.warnings, ...boundary.warnings],
   };
   log.info('overview_structure_done', { snapshotId: snapshot.id, modules: modules.length, edges: edges.length, features: s.features.length, issues: s.issues.length, ms: Date.now() - started });
