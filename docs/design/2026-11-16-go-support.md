@@ -319,26 +319,27 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
   - 完成标准：core、server、web 的 `pnpm --filter <包> test` 全部通过且没有改已有测试的期望值；`pnpm -r build` 通过；新增 `language-resolver.test.ts` 覆盖：只跑出现的语言、一个语言失败时另一个语言的边入库且 `resolver_status=failed`、version 只含出现的语言、`edge_sources` 随边复用一起复制、`needsReresolve` 为真时走 `retryResolve`（用一个假的子解析器测试）；旧库启动后 `snapshots` 表有 `edge_sources` 列
   - 验证：`pnpm -r build` 通过；core 531 通过/10 跳过、server 190、web 183、cli 40 通过，已有测试期望值未改（web fixture 只补新字段）；新增 `language-resolver.test.ts`、`scip-reader.test.ts`（scip-go v0.2.9 真实索引 `test/fixtures/scip-go-mini`）、`find-command.test.ts`、`mcp-format.test.ts`；独立验证提的 6 条已修（快速复用路径只在可能需要重跑时进锁且不做清理、CLI index/similar 传中止信号、解析失败时清空 edge_sources、命令查找缓存命中不重复打日志、分组改 push、版本 hash 覆盖 language-resolver）。偏离：失败语言也记进 edge_sources（`source: 'failed'`）；scip-python 改在独立进程组运行后，CLI 的 index/similar 补了停止信号处理。改动 `resolve/{language-resolver,scip-rules,code-hash,edge-sources}.ts`（新）、`util/command.ts`（新）、`scip/{reader,runner}.ts`、`snapshot/{build,incremental}.ts`、`store/{schema,db}.ts`、`llm/cli/command.ts`、server `status.ts`/`mcp/format.ts`、web `StatusBar.tsx`、cli `cli.ts` 和 `commands/{index,similar}.ts`
 
-- [~] 阶段3：Go 符号提取、分类和快照接入
+- [x] 阶段3：Go 符号提取、分类和快照接入
   - 涉及模块：packages/core/package.json、packages/core/src/extract（go.ts、go-types.ts、go-module.ts、go-index.ts、normalize.ts、languages.ts）、packages/core/src/classify、packages/core/src/model/language.ts、packages/core/src/snapshot/incremental.ts（Go 配置文件复制、生成代码内容判断）、packages/core/src/resolve/go.ts（只放不出边的占位实现）、packages/core/test/fixtures/go-basic
   - 依赖：阶段2
   - 内容：加依赖 `tree-sitter-go@0.25.0`；Go 解析器加载；Go 提取器（4.2 的符号和命名、interface 方法、签名、文档注释、bodyHash、规范化 token 的 Go 节点类型）；`go` 字段收集（import、调用点、局部类型推断、struct 标签、环境变量读取；`collectGoImports`、`collectGoEnvReads` 导出）；`restoreFile` 和 `completeForResolve`；`go.mod` 解析、包导入路径、缓存 key；`GoSymbolIndex` 和代表文件；跨文件 parentId；`LANG_SUPPORT.go='full'`、vendor/testdata 规则；Go 配置文件放入快照目录并复制；测试和生成代码识别（含内容判断）；go-basic fixture
   - 完成标准：新增 `extract-go.test.ts`、`go-types.test.ts`、classify 的 Go 用例通过；go-basic 快照构建测试能查到 `example.com/gobasic/internal/order.Service.Create` 方法符号和 interface 方法符号，`service_test.go` 的 `isTest=true`，`order.pb.go` 的 `isGenerated=true`，`vendor/` 下文件的 `supportLevel='none'`；Go 文件的提取结果经过缓存读回后 `go.imports` 不为空；全部已有测试通过
+  - 验证：`pnpm -r build` 通过；core 561 通过/10 跳过、server 190、web 183、cli 40 通过（server `repo-switch.test.ts` 有一次在全量运行时超时失败，单独跑 3 次和重跑全量都通过，属于负载下的时间敏感测试）；新增 `extract-go.test.ts`（16）、`go-types.test.ts`（6）、`snapshot-go.test.ts`（6），go-basic 快照里有 `example.com/gobasic/internal/order.Service.Create`（父节点为 Service struct）和 `Repo.Find`/`Repo.Save` interface 方法，`service_test.go` isTest、`order.pb.go` isGenerated、vendor 文件 supportLevel=none，缓存读回后 `go.imports` 不为空，`go.mod` 复制不硬链接，重试解析后 `go` 字段一致。选择：`importRows` 沿用顶层字段；`go` 增加 `dotImports`、`structFields`、`funcResults`；需要跨文件的接收者类型先记 `receiverChain`，跨文件处理时补成 `receiverType`；Go 占位解析器来源记为 name_match/disabled（不触发重跑）。改动 `extract/{go,go-decls,go-calls,go-types,go-imports,go-syntax,go-module,go-index,symbols}.ts`（新）、`resolve/go.ts`（新）、`extract/{parser,normalize,types,languages,index,cache,python}.ts`、`classify/index.ts`、`model/language.ts`、`snapshot/{incremental,build}.ts`
 
-- [ ] 阶段4：Go 调用关系（scip-go 和名称匹配）
+- [~] 阶段4：Go 调用关系（scip-go 和名称匹配）
   - 涉及模块：packages/core/src/resolve（go.ts、go-name-match.ts、scip-rules.ts 的 Go 规则）、packages/core/src/scip/runner.ts（runScipGo）、packages/core/src/store/data-dir.ts、packages/core/src/config（scipGoTimeoutMs）、packages/core/src/snapshot/build.ts（needsReresolve 的 Go 条件）、packages/web/src/app/StatusBar.tsx（名称匹配提示）
   - 依赖：阶段0、阶段3
   - 验证方式：独立
   - 内容：scip-go 和 go 查找；`runScipGo`（先 `go list -e -json ./...` 检查加载错误，再 `scip-go index`，固定 `--module-version`；环境变量、go.work 和多 module、路径前缀、超时、中止、索引缓存和清理）；Go 的 SCIP 规则（注释、续行、包定义映射到代表文件、import 按 importRows 判断）；名称匹配（四种调用形式、import 边）；`GoResolver` 先 scip-go 后名称匹配，返回 `sources` 和 `effectiveVersion`；`needsReresolve` 的三种情况；状态栏提示：Go 调用关系来自名称匹配时显示“Go 调用关系来自名称匹配（未找到 scip-go / scip-go 运行失败），可能不完整”，未找到时附上 scip-go 的安装命令
   - 完成标准：`go-name-match.test.ts` 覆盖 ident、pkg、有推断类型的 selector、经 interface 字段调用、同名唯一、同名不唯一、import 边指向代表文件；go-basic 快照在 `scip: false` 时 `resolver_status=ok`、`edge_sources.go.source='name_match'`、有跨包的 `call` 和 `import` 边；重试解析后名称匹配的边数和第一次相同；`needsReresolve` 三种情况各一个测试；本机有 scip-go 时集成测试的 scip 路径通过，`go.mod` 在子目录时定义能对上，跑完后快照目录里 `go.mod`/`go.sum` 的 hash 不变，验证记录写明 scip-go 版本和对上的定义比例；中止时 scip-go 进程组被结束；全部测试通过
 
-- [ ] 阶段5：Go 入口和数据模型
+- [~] 阶段5：Go 入口和数据模型
   - 涉及模块：packages/core/src/extract（go.ts 的路由和 cobra 收集、处理函数字面量符号；go-entries.ts、go-models.ts；languages.ts 里 Go 的 resolveCrossFile）、packages/core/src/model/types.ts、packages/web/src/marks
   - 依赖：阶段3
   - 内容：4.4 表里的入口写法收集、处理函数字面量的 `func<N>` 符号、处理函数查找（函数名、`pkg.Func`、方法值、函数字面量）、路由分组前缀；数据模型识别；`ModelKind` 加 `gorm`、`sqlx`、`json`；网页模型标签
   - 完成标准：新增 `go-entries.test.ts` 覆盖 main、net/http、gin、echo、chi、cobra 各至少一个用例，以及方法值、函数字面量、gin 分组前缀、chi Route 前缀；`models.test.ts` 的 Go 用例覆盖三种类别和不是模型的 struct；go-basic 快照的 entries 里有 `cli/go` 和 `http/net/http`；`pnpm --filter @codeinsight/web test` 和 `pnpm --filter @codeinsight/web build` 通过
 
-- [ ] 阶段6：概览、相似代码、审查和其他 Go 适配
+- [~] 阶段6：概览、相似代码、审查和其他 Go 适配
   - 涉及模块：packages/core/src/overview（external.ts、external-table.ts、facts.ts）、packages/core/src/similar、packages/core/src/ask/sensitive.ts、packages/server/src/mcp/similar-tool.ts、packages/core/test（review 的 Go 用例）
   - 依赖：阶段3
   - 内容：概览按语言选解析器，Go 用 `collectGoImports`、`collectGoEnvReads`；Go 外部依赖（标准库判断：首段不含 `.`；项目内包按 module 前缀；第三方库分类表，含数据库、缓存、消息队列、Web 框架、RPC、配置、日志、云服务等常见库）；`isPublic` 的 Go 规则；Go 签名形状、同名重复规则、interface 方法不参与；`similar` 片段按语言选路径和提取器，MCP 工具加 `language` 参数；`sensitive` 加 `go.mod`、`go.sum`、`go.work`；Go 审查用例

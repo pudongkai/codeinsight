@@ -26,17 +26,24 @@ const EXT_LANG: Record<string, Language> = {
   '.go': 'go',
 };
 
-/** 当前版本只支持 Python；其他语言后续阶段加入时只改这张表。 */
+/** 各语言的支持级别；表里没有的语言为 none */
 const LANG_SUPPORT: Partial<Record<Language, SupportLevel>> = {
   python: 'full',
+  go: 'full',
 };
 
 export function detectLanguage(filePath: string): Language {
   return EXT_LANG[path.posix.extname(filePath).toLowerCase()] ?? 'unknown';
 }
 
-/** 文件的支持级别；path 用于按目录排除个别语言的文件 */
-export function supportLevelOf(language: Language, _path: string): SupportLevel {
+/** 路径在 `vendor/` 或 `testdata/` 目录下（任意深度）：Go 的依赖副本和测试数据，不当作项目代码 */
+export function inGoExcludedDir(filePath: string): boolean {
+  return filePath.split('/').slice(0, -1).some((d) => d === 'vendor' || d === 'testdata');
+}
+
+/** 文件的支持级别；path 用于按目录排除个别语言的文件（Go 的 vendor、testdata） */
+export function supportLevelOf(language: Language, filePath: string): SupportLevel {
+  if (language === 'go' && inGoExcludedDir(filePath)) return 'none';
   return LANG_SUPPORT[language] ?? 'none';
 }
 

@@ -3,7 +3,9 @@ import type { Language } from '../model/language.js';
 import type { SymbolRow } from '../model/types.js';
 import { resolveDjangoEntries } from './entries.js';
 import { resolveModels } from './models.js';
-import { getPythonParser } from './parser.js';
+import { extractGoFile, restoreGoFile } from './go.js';
+import { completeGoFiles } from './go-index.js';
+import { getGoParser, getPythonParser } from './parser.js';
 import { extractPythonFile, restoreExtractedFile, type FileFlags } from './python.js';
 import type { ExtractedEntry, ExtractedFile } from './types.js';
 
@@ -50,7 +52,22 @@ const python: LanguageSupport = {
   }),
 };
 
-const SUPPORTS: readonly LanguageSupport[] = [python];
+const go: LanguageSupport = {
+  language: 'go',
+  grammarPackage: 'tree-sitter-go',
+  getParser: getGoParser,
+  extractFile: (parser, path, source, flags, ctx) => extractGoFile(parser, path, source, flags, ctx.goModules),
+  restoreFile: (parser, path, source, rows, ctx) => restoreGoFile(parser, path, source, rows, ctx.goModules),
+  completeForResolve: (files) => {
+    completeGoFiles(files);
+  },
+  resolveCrossFile: (files) => {
+    completeGoFiles(files);
+    return { entries: files.flatMap((f) => f.entries), models: 0 };
+  },
+};
+
+const SUPPORTS: readonly LanguageSupport[] = [python, go];
 
 export function languageSupport(lang: Language): LanguageSupport | undefined {
   return SUPPORTS.find((s) => s.language === lang);

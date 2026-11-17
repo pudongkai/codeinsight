@@ -1,6 +1,7 @@
 import type { ExtractedFile } from '../extract/types.js';
 import { log } from '../log.js';
 import type { Language } from '../model/language.js';
+import { GoResolver } from './go.js';
 import { ScipPythonResolver } from './scip-python.js';
 import type { EdgeSources, FailedLanguage, ResolveInput, ResolveResult, Resolver } from './types.js';
 
@@ -121,7 +122,7 @@ export class LanguageResolver implements Resolver {
   }
 }
 
-/** 默认解析器：Python 用 scip-python */
+/** 默认解析器：Python 用 scip-python，Go 用 GoResolver */
 export function defaultResolver(): LanguageResolver {
-  return new LanguageResolver({ python: new ScipPythonResolver() });
+  return new LanguageResolver({ python: new ScipPythonResolver(), go: new GoResolver() });
 }

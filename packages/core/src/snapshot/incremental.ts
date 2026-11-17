@@ -2,12 +2,12 @@ import { existsSync } from 'node:fs';
 import { link, lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
-import { isGeneratedPath, isTestPath, type ClassifyOptions } from '../classify/index.js';
+import { GENERATED_HEAD_CHARS, isGeneratedContent, isGeneratedPath, isTestPath, type ClassifyOptions } from '../classify/index.js';
 import {
   deserializeExtractedFile, extractCacheKey, extractCodeHash, serializeExtractedFile,
 } from '../extract/cache.js';
 import {
-  emptyExtractContext, extractSource, languageSupport, loadParsers, resolveCrossFile,
+  emptyExtractContext, extractSource, goModuleEntry, goModuleOf, languageSupport, loadParsers, resolveCrossFile,
   type ExtractContext, type ExtractedFile, type ExtractResult, type LanguageSourceFile,
 } from '../extract/index.js';
 import { log } from '../log.js';
@@ -33,12 +33,20 @@ export function throwIfCancelled(signal: AbortSignal | undefined, stage: BuildSt
   if (signal?.aborted) throw new SnapshotCancelledError(stage);
 }
 
-/** 工作区快照除源码外还要放进快照目录的项目配置，scip-python 会读取它们 */
-const PROJECT_CONFIG_FILES = new Set(['pyproject.toml', 'setup.cfg', 'pyrightconfig.json']);
+/** Go 的项目配置：go 命令可能改写它们，放进快照目录时复制，不硬链接到上一个快照 */
+const GO_CONFIG_FILES = new Set(['go.mod', 'go.sum', 'go.work', 'go.work.sum']);
 
-/** 需要放进快照目录（交给 scip-python）的文件：支持的语言和项目配置 */
+/** 工作区快照除源码外还要放进快照目录的项目配置，scip-python、scip-go 会读取它们 */
+const PROJECT_CONFIG_FILES = new Set(['pyproject.toml', 'setup.cfg', 'pyrightconfig.json', ...GO_CONFIG_FILES]);
+
+/**
+ * 需要放进快照目录（交给 scip-python、scip-go）的文件：支持的语言、项目配置，
+ * 以及 vendor、testdata 下的 Go 文件和 vendor/modules.txt（支持级别为 none，但 go 命令加载包时要用）
+ */
 export function isPlaced(rel: string): boolean {
-  return supportLevelOf(detectLanguage(rel), rel) !== 'none' || PROJECT_CONFIG_FILES.has(path.posix.basename(rel));
+  const language = detectLanguage(rel);
+  if (supportLevelOf(language, rel) !== 'none' || language === 'go') return true;
+  return PROJECT_CONFIG_FILES.has(path.posix.basename(rel)) || rel === 'vendor/modules.txt' || rel.endsWith('/vendor/modules.txt');
 }
 
 // ---- 上一个快照 ----
@@ -73,6 +81,8 @@ export interface ReadResult {
   written: number;
   /** 没能放进快照目录的文件：快照目录里没有它，不能拿来比较或链接 */
   failed: Set<string>;
+  /** 清单里的 go.mod：所在目录 → module 路径 */
+  goModules: Map<string, string>;
 }
 
 export interface ReadOptions {
@@ -88,9 +98,10 @@ export interface ReadOptions {
 
 function fileRow(rel: string, data: Buffer, classify: ClassifyOptions): Omit<FileRow, 'snapshotId'> {
   const language = detectLanguage(rel);
+  const isGenerated = isGeneratedPath(rel, classify) || isGeneratedContent(language, data.subarray(0, GENERATED_HEAD_CHARS).toString('utf8'));
   return {
     path: rel, language, supportLevel: supportLevelOf(language, rel), contentHash: sha1(data),
-    isTest: isTestPath(rel, classify), isGenerated: isGeneratedPath(rel, classify),
+    isTest: isTestPath(rel, classify), isGenerated,
   };
 }
 
@@ -109,7 +120,7 @@ function isExtracted(row: Omit<FileRow, 'snapshotId'>): boolean {
 }
 
 class SnapshotWriter {
-  readonly result: ReadResult = { rows: [], sources: [], symlinks: new Map(), linked: 0, written: 0, failed: new Set() };
+  readonly result: ReadResult = { rows: [], sources: [], symlinks: new Map(), linked: 0, written: 0, failed: new Set(), goModules: new Map() };
   private readonly dirs = new Set<string>();
 
   constructor(private readonly o: ReadOptions) {}
@@ -135,7 +146,7 @@ class SnapshotWriter {
     const dest = path.join(this.o.destDir!, rel);
     try {
       await this.ensureDir(dest);
-      if (await linkFromPrevious(this.o.prev, rel, hash, dest)) {
+      if (!GO_CONFIG_FILES.has(path.posix.basename(rel)) && await linkFromPrevious(this.o.prev, rel, hash, dest)) {
         this.result.linked++;
         return;
       }
@@ -168,6 +179,8 @@ class SnapshotWriter {
     if (!data) return;
     const row = fileRow(rel, data, this.o.classify);
     this.result.rows.push(row);
+    const goModule = path.posix.basename(rel) === 'go.mod' ? goModuleEntry(rel, data.toString('utf8')) : undefined;
+    if (goModule) this.result.goModules.set(...goModule);
     if (isExtracted(row)) {
       this.result.sources.push({
         path: rel, language: row.language, source: data.toString('utf8'), isTest: row.isTest, isGenerated: row.isGenerated, contentHash: row.contentHash,
@@ -223,6 +236,13 @@ function putCache(store: Store, entries: readonly ExtractCacheEntry[]): void {
   }
 }
 
+/** Go 文件的缓存 key 并入所属 module（go.mod 位置或 module 行变了才失效）；其他语言为 undefined */
+function cacheModule(s: LanguageSourceFile, ctx: ExtractContext): string | undefined {
+  if (s.language !== 'go') return undefined;
+  const mod = goModuleOf(s.path, ctx.goModules);
+  return mod ? `${mod.dir}\0${mod.module}` : '';
+}
+
 /**
  * 提取一批文件（按语言选提取实现）：没变的文件从 extract_cache 取跨文件识别之前的结果，其余重新提取并写入缓存；
  * 然后对全部文件照常做跨文件的入口和模型识别，结果与全量提取相同。单个文件失败时跳过并记日志。
@@ -232,7 +252,7 @@ export async function extractWithCache(
 ): Promise<CachedExtractResult> {
   const parsers = await loadParsers(sources.map((s) => s.language));
   const codeHash = extractCodeHash();
-  const keys = sources.map((s) => extractCacheKey(codeHash, s));
+  const keys = sources.map((s) => extractCacheKey(codeHash, { ...s, module: cacheModule(s, ctx) }));
   const cached = lookupCache(store, keys);
   const files: ExtractedFile[] = [];
   const fresh: ExtractCacheEntry[] = [];

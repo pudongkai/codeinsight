@@ -1,38 +1,63 @@
 import type { Node } from 'web-tree-sitter';
 import { jaccard } from '../util/collections.js';
 
+/** 一种语言的 token 归一化规则：各类节点按节点类型列出 */
+export interface TokenTable {
+  /** 丢弃 */
+  comments: ReadonlySet<string>;
+  /** 整体保留原文 */
+  strings: ReadonlySet<string>;
+  /** 替换为 ID */
+  identifiers: ReadonlySet<string>;
+  /** 替换为 NUM */
+  numbers: ReadonlySet<string>;
+}
+
+export const PYTHON_TOKENS: TokenTable = {
+  comments: new Set(['comment']),
+  strings: new Set(['string', 'concatenated_string']),
+  identifiers: new Set(['identifier']),
+  numbers: new Set(['integer', 'float']),
+};
+
+export const GO_TOKENS: TokenTable = {
+  comments: new Set(['comment']),
+  strings: new Set(['interpreted_string_literal', 'raw_string_literal', 'rune_literal']),
+  identifiers: new Set(['identifier', 'field_identifier', 'type_identifier', 'package_identifier', 'label_name']),
+  numbers: new Set(['int_literal', 'float_literal', 'imaginary_literal']),
+};
+
 /**
  * tree-sitter token 归一化，similar 和 moved 判断共用：
  * 标识符替换为 ID，数字替换为 NUM，注释丢弃，字符串字面量保留原文
- * （只有 SQL 不同的仓储样板代码不会被判成重复）。
+ * （只有 SQL 不同的仓储样板代码不会被判成重复）。节点类型按语言取 table，默认 Python。
  */
-export function normalizeTokens(nodes: Node[]): string[] {
+export function normalizeTokens(nodes: Node[], table: TokenTable = PYTHON_TOKENS): string[] {
   const out: string[] = [];
-  for (const n of nodes) collect(n, out);
+  for (const n of nodes) collect(n, table, out);
   return out;
 }
 
-function collect(node: Node, out: string[]): void {
-  switch (node.type) {
-    case 'comment':
-      return;
-    case 'string':
-    case 'concatenated_string':
-      out.push(node.text);
-      return;
-    case 'identifier':
-      out.push('ID');
-      return;
-    case 'integer':
-    case 'float':
-      out.push('NUM');
-      return;
+function collect(node: Node, table: TokenTable, out: string[]): void {
+  const type = node.type;
+  if (table.comments.has(type)) return;
+  if (table.strings.has(type)) {
+    out.push(node.text);
+    return;
+  }
+  if (table.identifiers.has(type)) {
+    out.push('ID');
+    return;
+  }
+  if (table.numbers.has(type)) {
+    out.push('NUM');
+    return;
   }
   if (node.childCount === 0) {
     if (node.text.length > 0) out.push(node.text);
     return;
   }
-  for (const child of node.children) if (child) collect(child, out);
+  for (const child of node.children) if (child) collect(child, table, out);
 }
 
 export const SHINGLE_SIZE = 5;

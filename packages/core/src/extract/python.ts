@@ -1,10 +1,10 @@
 import type { Node, Parser } from 'web-tree-sitter';
-import { dedupeQualifiedNames, makeSymbolKey, symbolIdFromKey } from '../model/symbol-key.js';
 import type { SymbolRow } from '../model/types.js';
 import { sha1 } from '../util/hash.js';
 import { decoratorEntry, djangoRoutes, fileFrameworks } from './entries.js';
 import { baseVars, classHints } from './models.js';
 import { normalizeTokens } from './normalize.js';
+import { finalizeSymbols as finalizeRaw, type RawSymbol as BaseRawSymbol } from './symbols.js';
 import type { ExtractedEntry, ExtractedFile, ExtractedSymbol, ImportBinding } from './types.js';
 
 const DOCSTRING_MAX = 500;
@@ -14,9 +14,8 @@ export interface FileFlags {
   isGenerated: boolean;
 }
 
-/** 提取前、去重前的符号；parent 为父符号在列表里的下标 */
-interface RawSymbol extends Omit<ExtractedSymbol, 'id' | 'symbolKey' | 'parentId'> {
-  parent: number | null;
+/** 提取前、去重前的符号，带装饰器等 Python 专用线索 */
+interface RawSymbol extends BaseRawSymbol {
   decorators: Node[];
   /** 类的定义节点，模型识别要读基类列表 */
   classDef?: Node;
@@ -225,14 +224,7 @@ function moduleSymbol(path: string, root: Node, source: string, flags: FileFlags
 
 /** 去重 qualified_name 后计算 symbol_key、id 和 parent_id */
 function finalizeSymbols(raw: RawSymbol[]): { symbols: ExtractedSymbol[]; decorators: Node[][]; classDefs: (Node | undefined)[] } {
-  const deduped = dedupeQualifiedNames(raw);
-  const ids = deduped.map((s) => symbolIdFromKey(makeSymbolKey(s)));
-  const symbols = deduped.map(({ parent, decorators: _decorators, classDef: _def, ...rest }, i): ExtractedSymbol => ({
-    ...rest,
-    symbolKey: makeSymbolKey(rest),
-    id: ids[i]!,
-    parentId: parent === null ? null : ids[parent]!,
-  }));
+  const symbols = finalizeRaw(raw.map(({ decorators: _decorators, classDef: _def, ...rest }) => rest));
   return { symbols, decorators: raw.map((s) => s.decorators), classDefs: raw.map((s) => s.classDef) };
 }
 

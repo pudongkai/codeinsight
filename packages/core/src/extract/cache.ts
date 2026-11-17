@@ -84,10 +84,14 @@ export interface ExtractCacheKeyParts {
   contentHash: string;
   isTest: boolean;
   isGenerated: boolean;
+  /** Go 文件所属 module 的 `目录\0module 路径`（决定包导入路径）；其他语言不传 */
+  module?: string;
 }
 
 export function extractCacheKey(codeHash: string, p: ExtractCacheKeyParts): string {
-  return sha1([codeHash, p.path, p.contentHash, p.isTest ? '1' : '0', p.isGenerated ? '1' : '0'].join('\0'));
+  const parts = [codeHash, p.path, p.contentHash, p.isTest ? '1' : '0', p.isGenerated ? '1' : '0'];
+  if (p.module !== undefined) parts.push(p.module);
+  return sha1(parts.join('\0'));
 }
 
 type SerializedFile = Omit<ExtractedFile, 'imports' | 'baseVars'> & {

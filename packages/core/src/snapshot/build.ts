@@ -2,11 +2,11 @@ import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { dataDirInRepo, type CodeInsightConfig } from '../config/index.js';
-import { completeForResolve, emptyExtractContext, loadParsers, type ExtractedFile, type ExtractResult } from '../extract/index.js';
+import { completeForResolve, goModuleEntry, loadParsers, type ExtractContext, type ExtractedFile, type ExtractResult } from '../extract/index.js';
 import { exportArchive, listCommitFiles, listWorkingFiles, repoRoot, resolveRef, workingContentKey } from '../git/index.js';
 import { log } from '../log.js';
 import type { Language } from '../model/language.js';
-import type { SnapshotKind, SnapshotRow, SymbolRow } from '../model/types.js';
+import type { FileRow, SnapshotKind, SnapshotRow, SymbolRow } from '../model/types.js';
 import { hasFailedFallback, mayNeedReresolve, sourcesText } from '../resolve/edge-sources.js';
 import { defaultResolver } from '../resolve/language-resolver.js';
 import type { FailedLanguage, Resolver, ResolveResult } from '../resolve/types.js';
@@ -230,7 +230,7 @@ async function buildLocked(opts: BuildSnapshotOptions, t: Target, resolver: Reso
   const prev = findPreviousSnapshot(store, layout, t.kind, snap.id);
   const { dir, read } = await prepareFiles(opts, t, prev);
   const parseStarted = Date.now();
-  const extracted = await extractWithCache(store, read.sources, signal);
+  const extracted = await extractWithCache(store, read.sources, signal, { goModules: read.goModules });
   saveExtraction(store, snap.id, read, extracted);
   const extractMs = Date.now() - started;
   const symbols = extracted.files.reduce((n, f) => n + f.symbols.length, 0);
@@ -253,13 +253,26 @@ function countByLanguage(files: ExtractedFile[]): Partial<Record<Language, numbe
   return out;
 }
 
+/** 从快照目录里的 go.mod 重新得到提取上下文，和提取时一致；读不到的 go.mod 跳过 */
+async function snapshotExtractContext(files: FileRow[], dir: string): Promise<ExtractContext> {
+  const goModules = new Map<string, string>();
+  for (const f of files) {
+    if (path.posix.basename(f.path) !== 'go.mod') continue;
+    const text = await readFile(path.join(dir, f.path), 'utf8').catch(() => undefined);
+    const entry = text === undefined ? undefined : goModuleEntry(f.path, text);
+    if (entry) goModules.set(...entry);
+  }
+  return { goModules };
+}
+
 /** 从库里的符号按语言还原解析层输入，再补齐跨文件信息；源码从快照目录读 */
 async function restoreExtracted(store: Store, snap: SnapshotRow, dir: string): Promise<ExtractedFile[]> {
   const byPath = new Map<string, Omit<SymbolRow, 'snapshotId'>[]>();
   for (const s of store.getSymbols(snap.id)) byPath.set(s.path, [...(byPath.get(s.path) ?? []), s]);
-  const full = store.getFiles(snap.id).filter((f) => f.supportLevel === 'full' && byPath.has(f.path));
+  const rows = store.getFiles(snap.id);
+  const full = rows.filter((f) => f.supportLevel === 'full' && byPath.has(f.path));
   const parsers = await loadParsers(full.map((f) => f.language));
-  const ctx = emptyExtractContext();
+  const ctx = await snapshotExtractContext(rows, dir);
   const files: ExtractedFile[] = [];
   for (const f of full) {
     const p = parsers.get(f.language);
