@@ -365,6 +365,40 @@ describe('Go functions', () => {
     expect(sameName).toEqual(['Helper']);
   });
 
+  /** 每个候选的「查询名 -> 候选所在文件」和理由 */
+  function reasonList(findings: DuplicateFinding[]): string[] {
+    return findings.flatMap((f) => f.candidates.map((c) => `${f.symbol.path}#${f.symbol.name} -> ${c.symbol.path}: ${c.reasons.join(', ')}`));
+  }
+
+  it('does not count the funcN names of handler literals as same-name duplicates or similar names', async () => {
+    const handlerPkg = (name: string, body: string[]) => [
+      `package ${name}`, '', 'import "net/http"', '',
+      'func Setup() {', '\thttp.HandleFunc("/x", func(w http.ResponseWriter, r *http.Request) {', ...body, '\t})', '}', '',
+    ].join('\n');
+    const syms = await goSymbolsOf({
+      'a/a.go': handlerPkg('a', ['\t\tw.WriteHeader(200)', '\t\tw.Write([]byte("a"))', '\t\treturn']),
+      'b/b.go': handlerPkg('b', ['\t\tif r.Method != "GET" {', '\t\t\tpanic(r.URL.Path)', '\t\t}']),
+    });
+    expect(syms.filter((s) => s.name === 'func1')).toHaveLength(2);
+    const { findings } = findDuplicates({ symbols: syms, linkedPairs: new Set(), minScore: 0 });
+    const lines = reasonList(findings).filter((l) => l.includes('#func1'));
+    expect(lines.filter((l) => /same-name duplicate|same name/.test(l))).toEqual([]);
+  });
+
+  it('counts only same-name functions in different packages, never methods or same-package build-tag variants', async () => {
+    const variant = (pkg: string) => [
+      `package ${pkg}`, '', 'type File struct{ fd int }', '',
+      'func Open(n int) int {', '\treturn n', '}', '',
+      'func (f File) Close() error {', '\treturn nil', '}', '',
+    ].join('\n');
+    const other = ['package p', '', 'func Open(n int) int {', '\treturn n + 1', '}', '', 'func (f File) Close() error {', '\treturn nil', '}', ''].join('\n');
+    const syms = await goSymbolsOf({ 'p/x_linux.go': variant('p'), 'p/x_windows.go': other, 'q/q.go': variant('q') });
+    const { findings } = findDuplicates({ symbols: syms, linkedPairs: new Set(), minScore: 0.99 });
+    const sameName = reasonList(findings).filter((l) => l.includes('same-name duplicate')).map((l) => l.split(':')[0]);
+    // p 里两个文件之间的 Open 是构建标签变体；q 和 p 之间的 Open 是重复；File.Close 是方法，同包、跨包都不算
+    expect(sameName.sort()).toEqual(['p/x_linux.go#Open -> q/q.go', 'p/x_windows.go#Open -> q/q.go']);
+  });
+
   it('finds Go functions for a Go snippet, with or without a package clause', async () => {
     const store = new Store(path.join(tempDir('ci-similar-go-'), 'index.db'));
     const snap = store.createSnapshot('commit', 'x', 'x');

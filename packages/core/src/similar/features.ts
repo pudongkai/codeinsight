@@ -35,8 +35,16 @@ export function nameTokens(name: string): Set<string> {
   return new Set(parts);
 }
 
-/** 名字相同为 1，否则为切词后 token 集合的 Jaccard */
+/** Go 处理函数字面量的符号名（funcN、嵌套的 funcN.M，包级变量里的也是这个形式），由编号生成，不反映用途 */
+const GO_LITERAL_NAME = /^func\d+(\.\d+)*$/;
+
+function isGoLiteralName(f: FunctionFeatures): boolean {
+  return f.language === 'go' && GO_LITERAL_NAME.test(f.symbol.name);
+}
+
+/** 名字相同为 1，否则为切词后 token 集合的 Jaccard；Go 函数字面量的编号名字不说明相似，记 0 */
 export function nameSimilarity(a: FunctionFeatures, b: FunctionFeatures): number {
+  if (isGoLiteralName(a) || isGoLiteralName(b)) return 0;
   if (a.symbol.name === b.symbol.name) return 1;
   return jaccard(a.nameTokens, b.nameTokens);
 }
@@ -177,18 +185,26 @@ function isGoConventionalName(name: string): boolean {
   return name === 'main' || name === 'init' || /^New(?![a-z])/.test(name);
 }
 
-/** 方法所属的类型：qualifiedName 去掉最后的方法名（Go 为 `包路径.类型`） */
-function ownerOf(s: SymbolRow): string {
-  return s.qualifiedName.slice(0, s.qualifiedName.lastIndexOf('.'));
+/** qualifiedName 去掉最后一段（Go 函数得到包路径，方法得到 `包路径.类型`） */
+function stripLast(qn: string): string {
+  return qn.slice(0, qn.lastIndexOf('.'));
+}
+
+/** 符号所在的包路径：函数去掉函数名 */
+function goPackageOf(s: SymbolRow): string {
+  return stripLast(s.qualifiedName);
 }
 
 /**
- * Go 的同名重复额外条件：main、init、New 开头的函数不算；方法要求包路径和类型都相同，
- * 不同类型实现同一个接口的方法（如各类型的 `String()`）不算
+ * Go 的同名重复额外条件：
+ * - 方法一律不算：同一个包里的同名方法是构建标签变体，不同包里的同名方法多是惯用的接口式名字（如各包的 `Config.Validate`）；
+ * - 函数只有包路径不同才算，同一个包里不同文件的同名函数是构建标签变体（x_linux.go / x_windows.go）；
+ * - main、init、New 开头的函数和函数字面量的 funcN 名字不算。
  */
 function goSameNameAllowed(a: FunctionFeatures, b: FunctionFeatures): boolean {
-  if (a.symbol.kind === 'method' || b.symbol.kind === 'method') return a.symbol.kind === b.symbol.kind && ownerOf(a.symbol) === ownerOf(b.symbol);
-  return !isGoConventionalName(a.symbol.name);
+  if (a.symbol.kind === 'method' || b.symbol.kind === 'method') return false;
+  if (goPackageOf(a.symbol) === goPackageOf(b.symbol)) return false;
+  return !isGoConventionalName(a.symbol.name) && !isGoLiteralName(a);
 }
 
 /**

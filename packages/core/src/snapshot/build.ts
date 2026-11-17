@@ -2,7 +2,8 @@ import { existsSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { dataDirInRepo, type CodeInsightConfig } from '../config/index.js';
-import { completeForResolve, goModuleEntry, loadParsers, type ExtractContext, type ExtractedFile, type ExtractResult } from '../extract/index.js';
+import { collectGoModules } from '../extract/go-module.js';
+import { completeForResolve, loadParsers, type ExtractContext, type ExtractedFile, type ExtractResult } from '../extract/index.js';
 import { exportArchive, listCommitFiles, listWorkingFiles, repoRoot, resolveRef, workingContentKey } from '../git/index.js';
 import { log } from '../log.js';
 import type { Language } from '../model/language.js';
@@ -16,6 +17,7 @@ import {
   edgesCodeHash, extractWithCache, findPreviousSnapshot, readAndPlace, reuseEdges, sameResolverInput, SnapshotCancelledError, throwIfCancelled,
   type PreviousSnapshot, type ReadResult,
 } from './incremental.js';
+import { readFailureReason } from './source.js';
 
 export { SnapshotCancelledError, type BuildStage } from './incremental.js';
 
@@ -254,15 +256,13 @@ function countByLanguage(files: ExtractedFile[]): Partial<Record<Language, numbe
   return out;
 }
 
-/** 从快照目录里的 go.mod 重新得到提取上下文，和提取时一致；读不到的 go.mod 跳过 */
+/** 从快照目录里的 go.mod 重新得到提取上下文；读不到的 go.mod 会让包路径和提取时不一致，跳过并记警告 */
 async function snapshotExtractContext(files: FileRow[], dir: string): Promise<ExtractContext> {
-  const goModules = new Map<string, string>();
-  for (const f of files) {
-    if (path.posix.basename(f.path) !== 'go.mod') continue;
-    const text = await readFile(path.join(dir, f.path), 'utf8').catch(() => undefined);
-    const entry = text === undefined ? undefined : goModuleEntry(f.path, text);
-    if (entry) goModules.set(...entry);
-  }
+  const goModules = await collectGoModules(
+    files.map((f) => f.path),
+    (p) => readFile(path.join(dir, p), 'utf8'),
+    (p, err) => log.warn('snapshot_go_mod_skipped', { path: p, reason: readFailureReason(err) }),
+  );
   return { goModules };
 }
 

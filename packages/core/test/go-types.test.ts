@@ -44,6 +44,40 @@ describe('go local type inference', () => {
     expect(calls).toEqual([`selector:Find:${P}.Repo`, 'ident:NewT:', `selector:Run:${P}.T`]);
   });
 
+  it('treats range variables and type switch aliases that shadow import names as local variables', async () => {
+    const src = [
+      'package p', '', 'import (', '\t"example.com/m/order"', '\t"example.com/m/user"', ')', '',
+      'func A(orders []order.Order, x any) {',
+      '\tfor _, order := range orders {', '\t\torder.Save()', '\t}',
+      '\tswitch user := x.(type) {', '\tcase int:', '\t\tuser.Load()', '\t}',
+      '}', '',
+    ].join('\n');
+    const f = await extract(src);
+    const calls = f.go!.calls.map((c) => `${c.form}:${c.name}:${c.qualifier ?? ''}`);
+    expect(calls).toEqual(['selector:Save:', 'selector:Load:']);
+  });
+
+  it('restores import names after the range loop, type switch and function literal that shadowed them', async () => {
+    const src = [
+      'package p', '', 'import (', '\t"example.com/m/order"', '\t"example.com/m/user"', ')', '',
+      'func A(orders []order.Order, x any) {',
+      '\tfor _, order := range orders {', '\t\torder.Save()', '\t}',
+      '\torder.X()',
+      '\tswitch user := x.(type) {', '\tcase int:', '\t\tuser.Load()', '\t}',
+      '\tuser.Load()',
+      '\tf := func(order int) { order.In() }',
+      '\torder.After()',
+      '\tf(1)',
+      '}', '',
+    ].join('\n');
+    const f = await extract(src);
+    const calls = f.go!.calls.map((c) => `${c.form}:${c.name}:${c.qualifier ?? ''}`);
+    expect(calls).toEqual([
+      'selector:Save:', 'pkg:X:example.com/m/order', 'selector:Load:', 'pkg:Load:example.com/m/user',
+      'selector:In:', 'pkg:After:example.com/m/order',
+    ]);
+  });
+
   it('fills cross-file constructor results and field types in cross-file processing', async () => {
     const q = await extract('package q\n\ntype Q struct{ inner *I }\n\ntype I struct{}\n\nfunc NewQ() (*Q, error) { return nil, nil }\n', 'q/q.go');
     const p = await extract(`${HEADER}func A(t *T) {\n\te, _ := q.NewQ()\n\te.Go()\n\tt.q.inner.Deep()\n}\n`);

@@ -118,7 +118,7 @@
 | struct | class | `<包导入路径>.Type` | module 符号 |
 | interface | interface | `<包导入路径>.Type` | module 符号 |
 | interface 方法 | method | `<包导入路径>.Type.Method` | interface 符号 |
-| 作为路由或 cobra 处理函数的函数字面量（阶段5 加入） | function | `<外层函数 qualifiedName>.func<N>`（N 为外层函数里第几个函数字面量，和 Go 运行时的命名一致） | 外层函数符号 |
+| 作为路由或 cobra 处理函数的函数字面量（阶段5 加入） | function | `<外层函数 qualifiedName>.func<N>`（N 为外层函数里第几个函数字面量，编号方式和 Go 运行时相同；同一包里有多个 `init` 时，外层名沿用去重后缀，如 `init.func1#2`） | 外层函数符号 |
 
 - 包导入路径：从文件所在目录向上找最近的 `go.mod`，取 `module` 行加上相对目录；找不到 `go.mod` 时用相对目录。
 - 同一包里多个 `init` 函数：沿用现有的去重后缀（`#2`）。
@@ -241,7 +241,7 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
 
 **相似代码**：
 - Go 签名形状按 `(参数) 返回值` 解析，接收者不算参数。
-- 同名重复规则对 Go：`main`、`init`、`New` 开头的函数不参与；方法要求包路径和类型名都相同；interface 方法（没有函数体）不参与相似比较。
+- 同名重复规则对 Go：`main`、`init`、`New` 开头的函数和函数字面量符号（`func1` 等）不参与；函数只在包路径不同时才算同名重复（同一包里的同名函数只可能是构建标签变体）；方法不参与同名重复（同包同名是构建标签变体，跨包同名方法多是约定俗成的接口方法名），只按相似度比较；interface 方法（没有函数体）不参与相似比较。
 - 片段按语言用 `<snippet>/snippet.py` 或 `<snippet>/snippet.go`。
 
 **公开判断**：Go 符号按名字首字母大写判断；方法要求方法名和所属类型名都大写；interface 和 struct 都算类型。
@@ -347,6 +347,13 @@ function languageSupport(lang: Language): LanguageSupport | undefined;
   - 内容：概览按语言选解析器，Go 用 `collectGoImports`、`collectGoEnvReads`；Go 外部依赖（标准库判断：首段不含 `.`；项目内包按 module 前缀；第三方库分类表，含数据库、缓存、消息队列、Web 框架、RPC、配置、日志、云服务等常见库）；`isPublic` 的 Go 规则；Go 签名形状、同名重复规则、interface 方法不参与；`similar` 片段按语言选路径和提取器，MCP 工具加 `language` 参数；`sensitive` 加 `go.mod`、`go.sum`、`go.work`；Go 审查用例
   - 完成标准：`overview.test.ts` 的 Go 用例通过（第三方库按类别分组、标准库和项目内包不出现、环境变量被列出、首字母大写的符号算公开）；`similar.test.ts` 的 Go 用例通过（结构相同的两个 Go 函数相似度排第一，不同类型的 `String()`、各包的 `New()` 不算同名重复，Go 片段能搜到 Go 函数）；MCP `similar` 工具传 `language: "go"` 的 server 测试通过；Go 审查用例报告符号级变更和函数移动；全部测试通过
   - 验证：`overview.test.ts`、`similar.test.ts`、`review.test.ts`、server `mcp.test.ts` 的 Go 用例通过（合并后全量结果见阶段4）：第三方库按类别分组、标准库和项目内包不出现、环境变量列出、首字母大写算公开；结构相同的 Go 函数相似度排第一，不同类型的 `String()`、各包的 `New()` 不算同名重复，Go 片段能搜到 Go 函数；MCP similar 传 `language: "go"` 正常；Go 审查用例报告符号级变更和移动。偏离：没有新增 RPC/配置/日志/云服务类别（要改概览类型和网页标签），gRPC 归入 Web 框架、云 SDK 归入存储、viper/cobra/zap/logrus 显示为“其他”并带完整路径；Go 标准库一律不列出；MCP 参数说明沿用英文。改动 `overview/{external,external-table,facts}.ts`、`similar/{features,index}.ts`、`ask/sensitive.ts`、server `mcp/similar-tool.ts`
+
+- [x] 阶段7：代码审查问题修复
+  - 涉及模块：packages/core/src/similar/features.ts、packages/core/src/extract（go-types.ts、go-calls.ts、go-index.ts、go-module.ts）、packages/core/src/snapshot/build.ts、packages/core/src/overview/external.ts
+  - 依赖：阶段4、阶段5、阶段6
+  - 内容：整体代码审查两轮提出的问题：函数字面量符号不参与同名重复和名字相似度；Go 方法不参与同名重复，函数只在包路径不同时才算；range、if/switch 初始化、type switch 别名、函数字面量参数只在所在语句内遮蔽同名 import；外部测试包的类型、字段、返回值、方法按 `<path>_test` 区分，查不到再回退到被测包；go.mod 读取合并为 `collectGoModules`；重试解析读不到 go.mod 时记 warn 日志
+  - 完成标准：`pnpm -r build`、`pnpm lint` 通过；core、server、web、cli 测试全部通过
+  - 验证：`pnpm -r build`、`pnpm lint` 通过；core 612 通过/10 跳过、server 191/10 跳过、web 184、cli 40/1 跳过；新增用例覆盖函数字面量同名、构建标签变体和跨包同名方法、循环和 switch 内外的 import 名遮蔽、外部测试包同名类型和回退查找、重试时 go.mod 缺失的 warn 日志
 
 ## 9. 待确认问题
 

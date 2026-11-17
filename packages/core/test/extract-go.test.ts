@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { deserializeExtractedFile, serializeExtractedFile } from '../src/extract/cache.js';
+import { collectGoModules } from '../src/extract/go-module.js';
 import {
   collectGoEnvReads, collectGoImports, completeForResolve, extractFiles, extractGoFile, getGoParser, goModuleOf, goPackagePath,
   GoSymbolIndex, parseGoModulePath, restoreGoFile,
@@ -33,6 +34,22 @@ async function extractOne(source: string, file = 'm/a.go', modules = new Map([['
 }
 
 describe('go module paths', () => {
+  it('collects go.mod files from a path list, skipping other files, vendor and testdata, and reporting read failures', async () => {
+    const texts: Record<string, string> = {
+      'go.mod': 'module example.com/root\n', 'svc/go.mod': 'go 1.22\n', 'vendor/x/go.mod': 'module x\n', 'testdata/go.mod': 'module t\n',
+    };
+    const read = vi.fn(async (p: string) => {
+      if (!(p in texts)) throw new Error(`missing ${p}`);
+      return texts[p]!;
+    });
+    const failed: string[] = [];
+    const paths = ['a.go', 'go.mod', 'svc/go.mod', 'vendor/x/go.mod', 'testdata/go.mod', 'lib/go.mod'];
+    const modules = await collectGoModules(paths, read, (p) => failed.push(p));
+    expect([...modules]).toEqual([['', 'example.com/root']]);
+    expect(read.mock.calls.map(([p]) => p)).toEqual(['go.mod', 'svc/go.mod', 'lib/go.mod']);
+    expect(failed).toEqual(['lib/go.mod']);
+  });
+
   it('parses the module line and finds the nearest go.mod', () => {
     expect(parseGoModulePath('// x\nmodule example.com/a // comment\n\ngo 1.22\n')).toBe('example.com/a');
     expect(parseGoModulePath('go 1.22\n')).toBeUndefined();

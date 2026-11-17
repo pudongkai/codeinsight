@@ -8,7 +8,10 @@ export interface GoTypeContext {
   imports: Readonly<Record<string, string>>;
 }
 
-/** 一个函数内变量名 → 类型线索，类型推断不出的变量为 null（仍要记下，用来区分局部变量和包级函数、导入名）；不按代码块区分作用域 */
+/**
+ * 一个函数内变量名 → 类型线索，类型推断不出的变量为 null（仍要记下，用来区分局部变量和包级函数、导入名）；
+ * 只有 for / if / switch / 函数字面量自己声明的变量离开语句后恢复，代码块里普通的 `:=` 不按代码块区分作用域
+ */
 export type GoVarTypes = Map<string, GoTypeChain | null>;
 
 /** 跨文件查找类型信息：struct 字段类型、函数的第一个返回类型（都按 qualifiedName） */
@@ -104,7 +107,59 @@ function assignPairs(names: string[], values: Node[], ctx: GoTypeContext, vars: 
   names.forEach((name, i) => setVar(vars, name, values.length === names.length || i === 0 ? chains[i] : undefined));
 }
 
-/** `var x T`、`var x = e`、`x := e` 声明的变量类型记进 vars；其他节点不处理 */
+/** 节点下一层 expression_list 里的变量名 */
+function listNames(list: Node | null): string[] {
+  return (list?.namedChildren ?? []).map((n) => n.text);
+}
+
+/**
+ * 进入子节点之前就要记下的变量：`switch v := x.(type)` 的 v 在各个 case 里可见，类型随 case 变化，记为 null。
+ * 这样同名的导入名在 case 里被遮住，`v.M()` 不会当成包函数调用
+ */
+export function recordScopeDeclaration(node: Node, vars: GoVarTypes): void {
+  if (node.type === 'type_switch_statement') for (const n of listNames(node.childForFieldName('alias'))) setVar(vars, n, undefined);
+}
+
+/** 初始化语句（`if x := e; ...`、`for i := 0; ...`）里 `:=` 声明的变量名 */
+function initializerNames(init: Node | null): string[] {
+  return init?.type === 'short_var_declaration' ? listNames(init.childForFieldName('left')) : [];
+}
+
+/**
+ * 只在这个语句内可见的变量名：range / for 子句、if / switch 初始化语句、type switch 别名、函数字面量参数。
+ * 遍历这个节点前保存这些名字原来的记录，遍历完恢复，避免在语句之后继续遮住同名导入名或外层变量
+ */
+export function blockScopedNames(node: Node): string[] {
+  switch (node.type) {
+    case 'func_literal':
+      return (node.childForFieldName('parameters')?.namedChildren ?? []).flatMap((p) => p.childrenForFieldName('name').map((n) => n.text));
+    case 'for_statement': {
+      const clause = node.namedChildren.find((n) => n.type === 'range_clause' || n.type === 'for_clause');
+      if (clause?.type === 'range_clause') return clause.child(1)?.text === ':=' ? listNames(clause.childForFieldName('left')) : [];
+      return initializerNames(clause?.childForFieldName('initializer') ?? null);
+    }
+    case 'type_switch_statement':
+      return [...listNames(node.childForFieldName('alias')), ...initializerNames(node.childForFieldName('initializer'))];
+    case 'if_statement':
+    case 'expression_switch_statement':
+      return initializerNames(node.childForFieldName('initializer'));
+    default:
+      return [];
+  }
+}
+
+/** 保存 names 当前的记录，返回的函数把它们恢复原样（原来没有的删掉） */
+export function saveVars(names: string[], vars: GoVarTypes): () => void {
+  const saved = names.map((n) => [n, vars.has(n), vars.get(n)] as const);
+  return () => {
+    for (const [n, had, v] of saved) {
+      if (had) vars.set(n, v ?? null);
+      else vars.delete(n);
+    }
+  };
+}
+
+/** `var x T`、`var x = e`、`x := e` 声明的变量类型记进 vars；`for k, v := range e` 的变量类型推断不出，记为 null；其他节点不处理 */
 export function recordDeclaration(node: Node, ctx: GoTypeContext, vars: GoVarTypes): void {
   if (node.type === 'var_spec') {
     const names = node.childrenForFieldName('name').map((n) => n.text);
@@ -112,8 +167,9 @@ export function recordDeclaration(node: Node, ctx: GoTypeContext, vars: GoVarTyp
     if (type) for (const n of names) setVar(vars, n, typeChain(typeQualifiedName(type, ctx)));
     else assignPairs(names, node.childForFieldName('value')?.namedChildren ?? [], ctx, vars);
   } else if (node.type === 'short_var_declaration') {
-    const names = (node.childForFieldName('left')?.namedChildren ?? []).map((n) => n.text);
-    assignPairs(names, node.childForFieldName('right')?.namedChildren ?? [], ctx, vars);
+    assignPairs(listNames(node.childForFieldName('left')), node.childForFieldName('right')?.namedChildren ?? [], ctx, vars);
+  } else if (node.type === 'range_clause' && node.child(1)?.text === ':=') {
+    for (const n of listNames(node.childForFieldName('left'))) setVar(vars, n, undefined);
   }
 }
 

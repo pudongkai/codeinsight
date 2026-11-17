@@ -1,7 +1,6 @@
-import path from 'node:path';
 import type { Node } from 'web-tree-sitter';
 import { collectGoEnvReads, collectGoImports } from '../extract/go.js';
-import { goModuleEntry } from '../extract/go-module.js';
+import { collectGoModules } from '../extract/go-module.js';
 import { languageSupport } from '../extract/languages.js';
 import { collectImportModules, type ImportedModule } from '../extract/python.js';
 import { log } from '../log.js';
@@ -165,17 +164,12 @@ async function fileFacts(input: ExternalInput, project: ProjectInfo, file: strin
 
 /** 从快照里的 go.mod 读出 module 路径；读不到的跳过并记日志 */
 async function goModulePaths(input: ExternalInput): Promise<string[]> {
-  const out: string[] = [];
-  for (const f of input.files) {
-    if (path.posix.basename(f.path) !== 'go.mod') continue;
-    try {
-      const entry = goModuleEntry(f.path, await input.read(f.path));
-      if (entry) out.push(entry[1]);
-    } catch (err) {
-      log.warn('overview_go_mod_skipped', { path: f.path, reason: readFailureReason(err) });
-    }
-  }
-  return out;
+  const modules = await collectGoModules(
+    input.files.map((f) => f.path),
+    (p) => input.read(p),
+    (p, err) => log.warn('overview_go_mod_skipped', { path: p, reason: readFailureReason(err) }),
+  );
+  return [...modules.values()];
 }
 
 function sortedFiles(m: Map<string, Set<string>>): [string, string[]][] {

@@ -148,4 +148,87 @@ func TestInternal() {
     expect(imports).toHaveLength(1);
     expect(imports[0]).toMatchObject({ path: 'b/a_test.go', line: 6, dstId: files[0]!.symbols[0]!.id });
   });
+  it('links a method call on a value returned by the package under test from the external test package', async () => {
+    const src: Record<string, string> = {
+      'b/a.go': SOURCES['b/a.go']!,
+      'b/c_test.go': `package b_test
+
+import "example.com/m/b"
+
+func TestDo() {
+	t := b.NewThing()
+	t.Do()
+}
+`,
+    };
+    const parser = await getGoParser();
+    const files = Object.entries(src).map(([p, s]) => extractGoFile(parser, p, s, NO_FLAGS, MODULES));
+    completeGoFiles(files);
+    const edges = goNameMatchEdges(files, 1, new Map(Object.entries(src)));
+    const qn = (id: string): string => files.flatMap((f) => f.symbols).find((s) => s.id === id)!.qualifiedName;
+    const calls = edges.filter((e) => e.kind === 'call').map((e) => `${qn(e.srcId)} -> ${qn(e.dstId)}`);
+    // 测试包里查不到 Thing.Do，按被测包的键查到
+    expect(calls.sort()).toEqual(['example.com/m/b.TestDo -> example.com/m/b.NewThing', 'example.com/m/b.TestDo -> example.com/m/b.Thing.Do']);
+  });
+});
+
+describe('go symbol index with a same-named type in the external test package', () => {
+  const sources: Record<string, string> = {
+    'b/types.go': `package b
+
+type Thing struct{}
+
+type Holder struct {
+	item *Thing
+}
+`,
+    'b/thing.go': `package b
+
+func (t *Thing) Do() {}
+`,
+    'b/x_test.go': `package b_test
+
+type Thing struct{}
+
+type Probe struct{}
+
+type Holder struct {
+	item *Probe
+}
+`,
+    'b/y_test.go': `package b_test
+
+func (t *Thing) Check() {}
+
+func (p *Probe) Hit() {}
+
+func TestHolder() {
+	h := Holder{}
+	h.item.Hit()
+}
+`,
+    'b/z.go': `package b
+
+func use() {
+	h := Holder{}
+	h.item.Do()
+}
+`,
+  };
+
+  it('keeps types, struct fields and method parents of the test package apart from the package under test', async () => {
+    const parser = await getGoParser();
+    const files = Object.entries(sources).map(([p, src]) => extractGoFile(parser, p, src, NO_FLAGS, MODULES));
+    completeGoFiles(files);
+    const sym = (path: string, name: string) => files.find((f) => f.path === path)!.symbols.find((s) => s.name === name)!;
+    expect(sym('b/thing.go', 'Do').parentId).toBe(sym('b/types.go', 'Thing').id);
+    expect(sym('b/y_test.go', 'Check').parentId).toBe(sym('b/x_test.go', 'Thing').id);
+    const call = (path: string, name: string) => files.find((f) => f.path === path)!.go!.calls.find((c) => c.name === name);
+    expect(call('b/y_test.go', 'Hit')?.receiverType).toBe('example.com/m/b.Probe');
+    expect(call('b/z.go', 'Do')?.receiverType).toBe('example.com/m/b.Thing');
+    const edges = goNameMatchEdges(files, 1, new Map(Object.entries(sources)));
+    const qn = (id: string): string => files.flatMap((f) => f.symbols).find((s) => s.id === id)!.qualifiedName;
+    const calls = edges.filter((e) => e.kind === 'call').map((e) => `${e.path}: ${qn(e.dstId)}`);
+    expect(calls.sort()).toEqual(['b/y_test.go: example.com/m/b.Probe.Hit', 'b/z.go: example.com/m/b.Thing.Do']);
+  });
 });

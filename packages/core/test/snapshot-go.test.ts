@@ -1,7 +1,7 @@
-import { cpSync, lstatSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, lstatSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { buildSnapshot, initDataDir, loadConfig, sha1, Store } from '../src/index.js';
+import { buildSnapshot, initDataDir, loadConfig, setLogSink, sha1, Store } from '../src/index.js';
 import type { BuildSnapshotResult, DataDirLayout, ExtractedFile, FileRow, Resolver, SymbolRow } from '../src/index.js';
 import { GoResolver } from '../src/resolve/go.js';
 import { LanguageResolver } from '../src/resolve/language-resolver.js';
@@ -137,5 +137,31 @@ describe('retrying resolve on a Go snapshot', () => {
     expect(restored.go!.packagePath).toBe('example.com/gobasic/cmd/server');
     const methods = (files: ExtractedFile[]) => files.flatMap((f) => f.symbols).filter((s) => s.kind === 'method').map((s) => `${s.id}>${s.parentId}`).sort();
     expect(methods(seen[1]!)).toEqual(methods(seen[0]!));
+  }, 120_000);
+
+  it('logs a warning with the path when a go.mod in the snapshot directory cannot be read', async () => {
+    const repo = fixtureRepo();
+    const config = await loadConfig(repo, { dataDir: tempDir('ci-go-data-') });
+    const layout = await initDataDir(config.dataDir);
+    const store = new Store(layout.dbPath);
+    let fail = true;
+    const resolver: () => Resolver = () => ({
+      name: 'capture', version: '1',
+      resolve: async () => {
+        if (fail) throw new Error('boom');
+        return { edges: [] };
+      },
+    });
+    const first = await buildSnapshot({ repo, store, layout, config, ref: 'HEAD', resolver: resolver() });
+    rmSync(path.join(snapshotDir(layout, first.snapshot.contentKey), 'backend/go.mod'));
+    fail = false;
+    const lines: string[] = [];
+    const restore = setLogSink((line) => lines.push(line));
+    try {
+      expect((await buildSnapshot({ repo, store, layout, config, ref: 'HEAD', resolver: resolver() })).resolveRetried).toBe(true);
+    } finally {
+      setLogSink(restore);
+    }
+    expect(lines.filter((l) => l.includes('WARN snapshot_go_mod_skipped'))).toEqual([expect.stringContaining('path=backend/go.mod')]);
   }, 120_000);
 });

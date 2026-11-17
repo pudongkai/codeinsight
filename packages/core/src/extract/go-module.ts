@@ -55,12 +55,17 @@ export function goAncestorDirs(dir: string): string[] {
   return out;
 }
 
+/** 是确定包路径时要用的 go.mod：文件名为 go.mod，且不在 vendor、testdata 下 */
+function isGoModFile(filePath: string): boolean {
+  return path.posix.basename(filePath) === 'go.mod' && !inGoExcludedDir(filePath);
+}
+
 /**
  * 一个 go.mod 文件对应的 `目录 → module 路径`；不是 go.mod、在 vendor/testdata 下、
  * 或没有 module 行时为 undefined
  */
 export function goModuleEntry(filePath: string, text: string): [string, string] | undefined {
-  if (path.posix.basename(filePath) !== 'go.mod' || inGoExcludedDir(filePath)) return undefined;
+  if (!isGoModFile(filePath)) return undefined;
   const module = parseGoModulePath(text);
   return module ? [dirOf(filePath), module] : undefined;
 }
@@ -95,21 +100,41 @@ export function goPackagePath(filePath: string, modules: ReadonlyMap<string, str
 }
 
 /**
- * 从磁盘读出文件所在目录及各级上层目录（不超过 root）里的 go.mod，得到 `目录 → module 路径`；
- * vendor、testdata 下的 go.mod 不算（和提取时的 goModuleEntry 一致）
+ * 从 paths 里挑出 go.mod（vendor、testdata 下的不算）逐个读取，得到 `目录 → module 路径`；
+ * 读取失败的交给 onReadError（没给时直接跳过），没有 module 行的跳过
  */
-export async function readGoModules(root: string, filePaths: Iterable<string>): Promise<Map<string, string>> {
-  const seen = new Set<string>();
+export async function collectGoModules(
+  paths: Iterable<string>, read: (filePath: string) => Promise<string>, onReadError?: (filePath: string, err: unknown) => void,
+): Promise<Map<string, string>> {
   const out = new Map<string, string>();
+  for (const p of paths) {
+    if (!isGoModFile(p)) continue;
+    let text: string;
+    try {
+      text = await read(p);
+    } catch (err) {
+      onReadError?.(p, err);
+      continue;
+    }
+    const module = parseGoModulePath(text);
+    if (module) out.set(dirOf(p), module);
+  }
+  return out;
+}
+
+/** 文件所在目录及各级上层目录里可能有的 go.mod 路径，去重 */
+function candidateGoModPaths(filePaths: Iterable<string>): string[] {
+  const seen = new Set<string>();
   for (const p of filePaths) {
     for (const dir of goAncestorDirs(dirOf(p))) {
       if (seen.has(dir)) break;
       seen.add(dir);
-      const file = dir ? `${dir}/go.mod` : 'go.mod';
-      const text = await readFile(path.join(root, file), 'utf8').catch(() => undefined);
-      const entry = text === undefined ? undefined : goModuleEntry(file, text);
-      if (entry) out.set(...entry);
     }
   }
-  return out;
+  return [...seen].map((dir) => (dir ? `${dir}/go.mod` : 'go.mod'));
+}
+
+/** 从磁盘读出文件所在目录及各级上层目录（不超过 root）里的 go.mod；大多数目录没有 go.mod，读不到的不记日志 */
+export async function readGoModules(root: string, filePaths: Iterable<string>): Promise<Map<string, string>> {
+  return collectGoModules(candidateGoModPaths(filePaths), (p) => readFile(path.join(root, p), 'utf8'));
 }

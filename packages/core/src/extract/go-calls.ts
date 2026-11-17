@@ -1,6 +1,6 @@
 import type { Node } from 'web-tree-sitter';
 import {
-  declareParams, exprChain, isImportName, recordDeclaration, resolveChain,
+  blockScopedNames, declareParams, exprChain, isImportName, recordDeclaration, recordScopeDeclaration, resolveChain, saveVars,
   type GoTypeContext, type GoTypeLookup, type GoVarTypes,
 } from './go-types.js';
 import { goSelectorParts } from './go-syntax.js';
@@ -57,10 +57,12 @@ function callSite(call: Node, c: CallCollector): GoCallSite | undefined {
 
 /**
  * 按代码顺序遍历，收集调用点，同时记下变量声明的类型（先收集右边的调用，再记左边的变量）。
- * 函数字面量的参数也记进同一张变量表，里面的调用记到外层函数上（建了符号的处理函数字面量由 visitor 改记到它自己）
+ * for / if / switch / 函数字面量自己声明的变量离开语句后恢复原来的记录；函数字面量的参数也记进同一张变量表，里面的调用记到外层函数上（建了符号的处理函数字面量由 visitor 改记到它自己）
  */
 export function collectCalls(node: Node, c: CallCollector): void {
+  const restoreVars = saveVars(blockScopedNames(node), c.vars);
   if (node.type === 'func_literal') declareParams(node.childForFieldName('parameters'), c.ctx, c.vars);
+  recordScopeDeclaration(node, c.vars);
   if (node.type === 'call_expression') {
     const site = callSite(node, c);
     if (site) c.out.push(site);
@@ -68,6 +70,7 @@ export function collectCalls(node: Node, c: CallCollector): void {
   const restore = c.visitor?.enter(node, c);
   for (const child of node.namedChildren) collectCalls(child, c);
   restore?.();
+  restoreVars();
   recordDeclaration(node, c.ctx, c.vars);
   c.visitor?.leave(node, c);
 }

@@ -29,8 +29,18 @@ export function goLookupPackage(f: ExtractedFile): string {
 }
 
 /**
+ * 从查找包 from 出发查 pkg 里的名字时依次尝试的键：外部测试包里的类型和被测包的同名类型 qualifiedName 相同，
+ * from 是 pkg 的外部测试包时先查测试包自己的声明，查不到再查被测包。
+ * 已知限制：测试包里有和被测包同名的符号时，外部测试包里引用被测包的这个名字（如 `b.Thing`）也会连到测试包自己的符号
+ */
+function packageKeys(pkg: string, from: string | undefined): string[] {
+  return from === `${pkg}_test` ? [from, pkg] : [pkg];
+}
+
+/**
  * 一个快照里 Go 符号的查找表：按（包，名字）找函数，按（包，类型，名字）找方法，按（包，名字）找类型，
- * 每个包的代表文件；同时提供跨文件的类型信息（struct 字段类型、函数第一个返回类型）
+ * 每个包的代表文件；同时提供跨文件的类型信息（struct 字段类型、函数第一个返回类型）。
+ * 包键都用 goLookupPackage（外部测试包带 `_test` 后缀），查找时可传入查找方所在的包键（见 packageKeys）
  */
 export class GoSymbolIndex implements GoTypeLookup {
   private readonly funcs = new Map<string, ExtractedSymbol>();
@@ -47,20 +57,21 @@ export class GoSymbolIndex implements GoTypeLookup {
 
   private addFile(f: ExtractedFile): void {
     const pkg = f.go!.packagePath;
+    const lookupPkg = goLookupPackage(f);
     this.packages.set(pkg, [...(this.packages.get(pkg) ?? []), f]);
-    for (const s of f.symbols) this.addSymbol(pkg, goLookupPackage(f), s);
-    for (const [t, fields] of Object.entries(f.go!.structFields)) this.structFields.set(key(pkg, t), fields);
-    for (const [fn, result] of Object.entries(f.go!.funcResults)) this.funcResults.set(key(pkg, fn), result);
+    for (const s of f.symbols) this.addSymbol(pkg, lookupPkg, s);
+    for (const [t, fields] of Object.entries(f.go!.structFields)) this.structFields.set(key(lookupPkg, t), fields);
+    for (const [fn, result] of Object.entries(f.go!.funcResults)) this.funcResults.set(key(lookupPkg, fn), result);
   }
 
-  /** pkg 是 qualifiedName 的前缀；funcPkg 是函数的查找键（外部测试包带 `_test` 后缀） */
-  private addSymbol(pkg: string, funcPkg: string, s: ExtractedSymbol): void {
+  /** pkg 是 qualifiedName 的前缀；lookupPkg 是查找键（外部测试包带 `_test` 后缀） */
+  private addSymbol(pkg: string, lookupPkg: string, s: ExtractedSymbol): void {
     const local = s.qualifiedName.slice(pkg.length + 1);
-    if (s.kind === 'function') this.funcs.set(key(funcPkg, local), s);
-    else if (s.kind === 'class' || s.kind === 'interface') this.types.set(key(pkg, local), s);
+    if (s.kind === 'function') this.funcs.set(key(lookupPkg, local), s);
+    else if (s.kind === 'class' || s.kind === 'interface') this.types.set(key(lookupPkg, local), s);
     else if (s.kind === 'method') {
       const [type, name] = splitQualified(local);
-      this.methods.set(key(pkg, type, name), s);
+      this.methods.set(key(lookupPkg, type, name), s);
       this.methodsByName.set(name, [...(this.methodsByName.get(name) ?? []), s]);
     }
   }
@@ -69,12 +80,21 @@ export class GoSymbolIndex implements GoTypeLookup {
     return this.funcs.get(key(pkg, name));
   }
 
-  method(pkg: string, type: string, name: string): ExtractedSymbol | undefined {
-    return this.methods.get(key(pkg, type, name));
+  /** 按 packageKeys 的顺序在 map 里取第一个查到的值 */
+  private find<T>(map: ReadonlyMap<string, T>, pkg: string, from: string | undefined, ...rest: string[]): T | undefined {
+    for (const p of packageKeys(pkg, from)) {
+      const v = map.get(key(p, ...rest));
+      if (v !== undefined) return v;
+    }
+    return undefined;
   }
 
-  type(pkg: string, name: string): ExtractedSymbol | undefined {
-    return this.types.get(key(pkg, name));
+  method(pkg: string, type: string, name: string, from?: string): ExtractedSymbol | undefined {
+    return this.find(this.methods, pkg, from, type, name);
+  }
+
+  type(pkg: string, name: string, from?: string): ExtractedSymbol | undefined {
+    return this.find(this.types, pkg, from, name);
   }
 
   /** 项目里所有叫这个名字的方法（含 interface 方法） */
@@ -93,12 +113,23 @@ export class GoSymbolIndex implements GoTypeLookup {
     return files ? pickRepresentative(files) : undefined;
   }
 
-  field(typeName: string, field: string): string | undefined {
-    return ownValue(this.structFields.get(key(...splitQualified(typeName))), field);
+  field(typeName: string, field: string, from?: string): string | undefined {
+    const [pkg, type] = splitQualified(typeName);
+    for (const p of packageKeys(pkg, from)) {
+      const v = ownValue(this.structFields.get(key(p, type)), field);
+      if (v !== undefined) return v;
+    }
+    return undefined;
   }
 
-  funcResult(funcName: string): string | undefined {
-    return this.funcResults.get(key(...splitQualified(funcName)));
+  funcResult(funcName: string, from?: string): string | undefined {
+    const [pkg, name] = splitQualified(funcName);
+    return this.find(this.funcResults, pkg, from, name);
+  }
+
+  /** 从查找包 from 出发的类型信息查找 */
+  lookupFrom(from: string): GoTypeLookup {
+    return { field: (t, f) => this.field(t, f, from), funcResult: (fn) => this.funcResult(fn, from) };
   }
 }
 
@@ -109,8 +140,11 @@ export class GoSymbolIndex implements GoTypeLookup {
 export function findGoFunc(index: GoSymbolIndex, ref: GoFuncRef, pkg: string): ExtractedSymbol | undefined {
   if (ref.form === 'ident') return index.func(pkg, ref.name);
   if (ref.form === 'pkg') return ref.qualifier ? index.func(ref.qualifier, ref.name) : undefined;
-  const type = ref.receiverType ?? (ref.receiverChain ? resolveChain(ref.receiverChain, index) : undefined);
-  if (type) return index.method(...splitQualified(type), ref.name);
+  const type = ref.receiverType ?? (ref.receiverChain ? resolveChain(ref.receiverChain, index.lookupFrom(pkg)) : undefined);
+  if (type) {
+    const [typePkg, typeName] = splitQualified(type);
+    return index.method(typePkg, typeName, ref.name, pkg);
+  }
   const same = index.methodsNamed(ref.name);
   return same.length === 1 ? same[0] : undefined;
 }
@@ -119,19 +153,21 @@ export function findGoFunc(index: GoSymbolIndex, ref: GoFuncRef, pkg: string): E
 function linkMethodParents(f: ExtractedFile, index: GoSymbolIndex): void {
   const moduleId = f.symbols[0]?.id;
   const pkg = f.go!.packagePath;
+  const lookupPkg = goLookupPackage(f);
   for (const s of f.symbols) {
     if (s.kind !== 'method' || s.parentId !== moduleId) continue;
     const [type] = splitQualified(s.qualifiedName.slice(pkg.length + 1));
-    const owner = index.type(pkg, type);
+    const owner = index.type(lookupPkg, type);
     if (owner) s.parentId = owner.id;
   }
 }
 
 /** 接收者类型要跨文件才能确定的调用点，按全部文件的类型信息补上 receiverType */
 function fillReceiverTypes(f: ExtractedFile, index: GoSymbolIndex): void {
+  const lookup = index.lookupFrom(goLookupPackage(f));
   for (const c of f.go!.calls) {
     if (c.receiverType || !c.receiverChain) continue;
-    const type = resolveChain(c.receiverChain, index);
+    const type = resolveChain(c.receiverChain, lookup);
     if (type) c.receiverType = type;
   }
 }
